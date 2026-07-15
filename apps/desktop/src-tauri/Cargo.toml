@@ -1,0 +1,25 @@
+[package]
+name = "hermes-office"
+version = "0.1.0"
+description = "A lightweight visual control plane for Hermes Agent"
+authors = ["Hermes Office contributors"]
+edition = "2021"
+
+[lib]
+name = "hermes_office_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

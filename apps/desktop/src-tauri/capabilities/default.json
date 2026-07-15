@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Base capability for the Hermes Office main window.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

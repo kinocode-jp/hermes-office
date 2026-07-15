@@ -1,0 +1,22 @@
+{
+  "name": "hermes-office",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @hermes-office/web",
+    "dev:server": "npm run dev --workspace @hermes-office/server",
+    "dev:desktop": "npm run tauri:dev --workspace @hermes-office/desktop",
+    "build": "npm run build --workspaces --if-present",
+    "build:web": "npm run build --workspace @hermes-office/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test:server": "npm test --workspace @hermes-office/server"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
