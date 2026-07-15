@@ -10,13 +10,15 @@ const deskPorts: Record<string, { x: number; y: number }> = {
   editor: { x: 740, y: 365 }
 };
 
-function ProfilePod({ profile, index }: { profile: Profile; index: number }) {
+function ProfilePod({ profile, index, crowded }: { profile: Profile; index: number; crowded: boolean }) {
   const selected = selectedProfileId.value === profile.id;
+  const column = index % 5;
+  const row = Math.floor(index / 5) % 2;
 
   return (
     <button
       class={`profile-pod pod-${index + 1} ${selected ? "is-selected" : ""}`}
-      style={{ "--agent-color": profile.color }}
+      style={{ "--agent-color": profile.color, ...(crowded ? { left: `${2 + column * 20}%`, top: `${row === 0 ? 14 : 62}%` } : {}) }}
       onClick={() => selectProfile(profile.id)}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
@@ -84,7 +86,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
         </div>
       </header>
 
-      <div class="office-floor">
+      <div class={`office-floor ${profiles.length > 4 ? "is-crowded" : ""}`}>
         <div class="window-wall" aria-hidden="true">
           <span /><span /><span /><span />
         </div>
@@ -102,7 +104,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
         <div class="library-shelf" aria-hidden="true">
           <i /><i /><i /><i /><i /><i />
         </div>
-        {profiles.map((profile, index) => <ProfilePod key={profile.id} profile={profile} index={index} />)}
+        {profiles.map((profile, index) => <ProfilePod key={profile.id} profile={profile} index={index} crowded={profiles.length > 4} />)}
         <div class="office-legend">
           <span><i class="legend-light working" />working</span>
           <span><i class="legend-light waiting" />needs you</span>

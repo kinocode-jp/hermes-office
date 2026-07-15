@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "app.hermesoffice.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev --workspace @hermes-office/web",
+    "beforeDevCommand": "npm --prefix ../.. run dev",
     "devUrl": "http://localhost:4173",
     "beforeBuildCommand": "npm run build --workspace @hermes-office/web",
     "frontendDist": "../../web/dist"

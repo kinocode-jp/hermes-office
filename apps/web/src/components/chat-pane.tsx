@@ -32,8 +32,8 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
       <div class="message-list" aria-live="polite">
         {session.messages.length === 0 ? (
           <div class="empty-chat">
-            <span>NEW THREAD</span>
-            <p>{profile.name}に最初の指示を送ります。</p>
+            <span>{session.readOnly ? "HERMES SESSION" : "NEW THREAD"}</span>
+            <p>{session.readOnly ? "履歴と送信は安全なChat接続を準備中です。" : `${profile.name}に最初の指示を送ります。`}</p>
           </div>
         ) : session.messages.map((message) => (
           <div key={message.id} class={`message message-${message.from}`}>
@@ -47,6 +47,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
       <form class="composer" onSubmit={submit}>
         <textarea
           value={draft}
+          disabled={session.readOnly}
           onInput={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -54,10 +55,10 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
               event.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={`${profile.name}に指示…`}
+          placeholder={session.readOnly ? "Chat接続は次の実装段階です" : `${profile.name}に指示…`}
           rows={1}
         />
-        <button type="submit" disabled={!draft.trim()}>送信</button>
+        <button type="submit" disabled={session.readOnly || !draft.trim()}>送信</button>
       </form>
     </article>
   );

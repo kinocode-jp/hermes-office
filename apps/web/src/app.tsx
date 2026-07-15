@@ -4,7 +4,7 @@ import { KanbanBoard } from "./components/kanban-board";
 import { OfficeScene } from "./components/office-scene";
 import { ProfilePanel } from "./components/profile-panel";
 import type { Surface } from "./domain";
-import { activeSurface, mobileWorkspaceOpen, profileList } from "./store";
+import { activeSurface, mobileWorkspaceOpen, officeConnection, profileList } from "./store";
 
 const navItems: { id: Surface; glyph: string; label: string }[] = [
   { id: "office", glyph: "⌂", label: "Office" },
@@ -14,6 +14,10 @@ const navItems: { id: Surface; glyph: string; label: string }[] = [
 ];
 
 export function App() {
+  const connection = officeConnection.value;
+  const connectionLabel = connection.state === "connected"
+    ? (connection.eventStream === "open" ? "live" : "connected")
+    : connection.state === "error" ? "demo fallback" : connection.state;
   return (
     <div class="app-shell">
       <header class="topbar">
@@ -21,7 +25,9 @@ export function App() {
           <span class="brand-mark">H</span>
           <span><b>Hermes</b><small>Office</small></span>
         </a>
-        <div class="runtime-status"><i />Local office <span>connected</span></div>
+        <div class={`runtime-status runtime-${connection.state}`} title={connection.message}>
+          <i />Office Server <span>{connectionLabel}</span>
+        </div>
         <div class="top-actions">
           <button class="quiet-button">⌘ K</button>
           <button class="user-button">KO</button>

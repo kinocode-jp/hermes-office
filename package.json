@@ -8,13 +8,17 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace @hermes-office/web",
+    "dev": "concurrently --kill-others-on-fail --names server,web \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:web": "npm run dev --workspace @hermes-office/web",
     "dev:server": "npm run dev --workspace @hermes-office/server",
     "dev:desktop": "npm run tauri:dev --workspace @hermes-office/desktop",
     "build": "npm run build --workspaces --if-present",
     "build:web": "npm run build --workspace @hermes-office/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test:server": "npm test --workspace @hermes-office/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   },
   "engines": {
     "node": ">=22"

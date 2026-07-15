@@ -2,7 +2,10 @@ import { useState } from "preact/hooks";
 import {
   addGlobalSkill,
   globalSettings,
+  officeConnection,
+  officeSnapshot,
   removeGlobalSkill,
+  retryOfficeServer,
   setGlobalSettings
 } from "../store";
 
@@ -41,6 +44,12 @@ export function LibraryPage() {
 
 export function SettingsPage() {
   const mode = globalSettings.value.remoteAccess;
+  const connection = officeConnection.value;
+  const snapshot = officeSnapshot.value;
+  const stateLabel = connection.state === "connected" ? "Office Server connected" : connection.state === "connecting" ? "Connecting" : connection.state === "error" ? "Demo fallback" : "Demo mode";
+  const detail = connection.state === "connected"
+    ? `${connection.serverUrl} · events ${connection.eventStream} · runtime ${connection.runtime ?? "unknown"}`
+    : connection.state === "error" ? `${connection.message} · demo dataを継続表示` : connection.message;
   return (
     <section class="control-page">
       <header class="page-title-row">
@@ -51,7 +60,18 @@ export function SettingsPage() {
         <article class="control-card wide-card">
           <span class="card-kicker">HERMES RUNTIME</span>
           <h2>既存のローカルHermesへ接続</h2>
-          <div class="connection-row"><i /><div><b>Adapter ready</b><span>接続先は未設定 · demo data</span></div><button disabled>接続設定</button></div>
+          <div class={`connection-row connection-${connection.state}`}>
+            <i /><div><b>{stateLabel}</b><span>{detail}</span></div>
+            {connection.state === "error"
+              ? <button type="button" onClick={retryOfficeServer}>再接続</button>
+              : <span class="connection-protocol">{connection.protocolVersion ? `PROTO ${connection.protocolVersion}` : "READ ONLY"}</span>}
+          </div>
+          {snapshot && <div class="snapshot-facts" aria-label="Office Server snapshot summary">
+            <span><b>{snapshot.profiles.length}</b>Profiles</span>
+            <span><b>{snapshot.sessions.length}</b>Sessions</span>
+            <span><b>{snapshot.boards.length}</b>Boards</span>
+            <span><b>{new Date(snapshot.generatedAt).toLocaleTimeString("ja-JP")}</b>Updated</span>
+          </div>}
         </article>
         <article class="control-card">
           <span class="card-kicker">REMOTE ACCESS</span>

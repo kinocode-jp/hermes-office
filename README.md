@@ -30,10 +30,15 @@ npm install
 npm run dev
 ```
 
-The local read-model/event server runs separately on `127.0.0.1:4317`:
+This starts the Web/PWA interface on `4173`, the Office Server on `4317`, and a
+managed stock `hermes serve` backend on an OS-assigned loopback port. The
+Hermes session token remains inside the Office Server process.
+
+To run each surface separately:
 
 ```bash
 npm run dev:server
+npm run dev:web
 ```
 
 Desktop development requires the Tauri prerequisites for the host OS:
@@ -42,10 +47,27 @@ Desktop development requires the Tauri prerequisites for the host OS:
 npm run dev:desktop
 ```
 
-The current local MVP supports multi-pane chat composition, Profile editing, per-Profile
+The current local MVP supports live Hermes Profile and stored Session discovery,
+multi-pane chat composition, Profile editing, per-Profile
 Skills and Memory, Global inheritance settings, Kanban creation/assignment/status moves,
 responsive mobile navigation, and an installable PWA. State is intentionally in-memory.
 
-The server exposes bounded health, snapshot, and WebSocket event endpoints. The typed Hermes
-adapter is ready, but the UI does not yet read or mutate an existing Hermes installation.
-That last write path remains isolated so the demo cannot accidentally alter a live Profile.
+The server exposes bounded health, snapshot, and WebSocket event endpoints and reads
+live Profile, stored Session, and Kanban summaries through an authenticated managed
+Hermes backend. Chat history, prompt submission, and settings mutations remain read-only
+until the Office device-auth and audit boundary is connected.
+
+Runtime modes:
+
+```bash
+# Default: Office starts and owns a loopback Hermes backend
+HERMES_OFFICE_HERMES_MODE=managed npm run dev
+
+# UI/server demo without touching Hermes
+HERMES_OFFICE_HERMES_MODE=demo npm run dev
+
+# Adopt an explicitly managed loopback backend
+HERMES_OFFICE_HERMES_MODE=existing \
+HERMES_OFFICE_HERMES_URL=http://127.0.0.1:12345 \
+HERMES_OFFICE_HERMES_TOKEN=... npm run dev
+```

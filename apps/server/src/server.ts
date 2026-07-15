@@ -2,6 +2,7 @@ import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { EventEnvelope, EventTopic, ProtocolError } from "@hermes-office/protocol";
 import { WebSocket, WebSocketServer } from "ws";
+import type { HermesRuntimeSource } from "./hermes-backend.js";
 import {
   OFFICE_PROTOCOL_VERSION,
   createDemoRuntimeStatus,
@@ -24,6 +25,7 @@ export interface OfficeServerOptions {
   maxJsonBytes?: number;
   maxEventBytes?: number;
   maxWebSocketClients?: number;
+  runtimeSource?: HermesRuntimeSource;
 }
 
 export interface OfficeServer {
@@ -42,6 +44,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const maxEventBytes = boundedInteger(options.maxEventBytes, 64 * 1024, 1_024, 1024 * 1024);
   const maxWebSocketClients = boundedInteger(options.maxWebSocketClients, 32, 1, 256);
   const originAllowlist = makeOriginAllowlist(options.allowedOrigins ?? DEFAULT_ORIGINS);
+  const runtimeSource = options.runtimeSource;
 
   if (!options.allowNonLoopback && !isLoopbackHost(host)) {
     throw new Error(
@@ -57,7 +60,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     clientTracking: true,
   });
 
-  const httpServer = createHttpServer({ maxHeaderSize: 16 * 1024 }, (request, response) => {
+  const httpServer = createHttpServer({ maxHeaderSize: 16 * 1024 }, async (request, response) => {
     applySecurityHeaders(response);
 
     const origin = request.headers.origin;
@@ -103,13 +106,14 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (requestUrl.pathname === "/api/v1/health") {
+      const runtime = runtimeSource?.status() ?? createDemoRuntimeStatus();
       writeJson(
         response,
         200,
         {
           ok: true,
           protocolVersion: OFFICE_PROTOCOL_VERSION,
-          runtime: createDemoRuntimeStatus().state,
+          runtime: runtime.state,
         },
         maxJsonBytes,
       );
@@ -117,7 +121,10 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (requestUrl.pathname === "/api/v1/snapshot") {
-      writeJson(response, 200, createDemoSnapshot(), maxJsonBytes);
+      const snapshot = runtimeSource === undefined
+        ? createDemoSnapshot()
+        : await runtimeSource.snapshot().catch(() => createDemoSnapshot());
+      writeJson(response, 200, snapshot, maxJsonBytes);
       return;
     }
 
@@ -167,7 +174,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     const event = makeEvent(
       ++sequence,
       "runtime.status",
-      createDemoRuntimeStatus(),
+      runtimeSource?.status() ?? createDemoRuntimeStatus(),
     );
     sendBoundedEvent(websocket, event, maxEventBytes);
   });
@@ -197,8 +204,9 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         }
         websocketServer.close(() => {
           httpServer.close((error) => {
-            if (error) reject(error);
-            else resolve();
+            if (error) { reject(error); return; }
+            if (runtimeSource === undefined) resolve();
+            else runtimeSource.close().then(resolve, reject);
           });
         });
       }),
