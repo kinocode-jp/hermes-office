@@ -210,6 +210,35 @@ test("chat boundary returns public errors without reflecting Hermes details", as
   await connection.close();
 });
 
+test("session.close preserves false and rejects a malformed success result", async (t) => {
+  const http = createServer((_request, response) => { response.writeHead(404).end(); });
+  const sockets = new WebSocketServer({ noServer: true });
+  http.on("upgrade", (request, socket, head) => sockets.handleUpgrade(request, socket, head, (websocket) => sockets.emit("connection", websocket, request)));
+  sockets.on("connection", (websocket) => websocket.on("message", (data) => {
+    const frame = JSON.parse(data.toString()) as Record<string, unknown>;
+    const params = frame.params as Record<string, unknown>;
+    websocket.send(JSON.stringify({
+      jsonrpc: "2.0", id: frame.id,
+      result: params.session_id === "live-malformed" ? { status: "missing closed" } : { closed: false },
+    }));
+  }));
+  const origin = await listen(http);
+  t.after(() => {
+    for (const client of sockets.clients) client.terminate();
+    sockets.close();
+    http.close();
+  });
+
+  const connection = await createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN }).connect(() => undefined);
+  const absent = await connection.request({ method: "session.close", params: { session_id: "live-absent" } });
+  assert.deepEqual(absent.value, { closed: false });
+  await assert.rejects(
+    connection.request({ method: "session.close", params: { session_id: "live-malformed" } }),
+    (error: unknown) => error instanceof HermesChatTransportError && error.code === "backend_rejected",
+  );
+  await connection.close();
+});
+
 test("chat transport reports one lifecycle close and rejects pending RPC", async (t) => {
   let terminateUpstream!: () => void;
   let closedCount = 0;

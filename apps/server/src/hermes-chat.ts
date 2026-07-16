@@ -216,7 +216,11 @@ async function openConnection(
       item.reject(publicRpcError(rpcCode));
       return;
     }
-    item.resolve({ method: item.method, value: normalizeRpcResult(item.method, frame.result) });
+    try {
+      item.resolve({ method: item.method, value: normalizeRpcResult(item.method, frame.result) });
+    } catch (error) {
+      item.reject(error instanceof Error ? error : publicError("backend_rejected", "Hermes returned an invalid chat response."));
+    }
   });
   websocket.on("close", () => failPending(publicError("backend_closed", "Hermes chat connection closed.")));
   websocket.on("error", () => failPending(publicError("backend_closed", "Hermes chat connection failed.")));
@@ -411,7 +415,10 @@ function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<stri
       status: safeShortText(value.status, 80),
     });
   }
-  if (method === "session.close") return { closed: value.closed === true };
+  if (method === "session.close") {
+    if (typeof value.closed !== "boolean") throw publicError("backend_rejected", "Hermes returned an invalid close result.");
+    return { closed: value.closed };
+  }
   if (method === "approval.respond") return { resolved: value.resolved === true };
   return compact({ status: safeShortText(value.status, 80), taskId: safeId(value.task_id) });
 }

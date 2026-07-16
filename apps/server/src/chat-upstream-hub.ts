@@ -120,7 +120,9 @@ export class ChatUpstreamHub {
         this.discardBufferedSession(liveId);
         try {
           const result = await this.request(owner, { method: "session.close", params: { session_id: liveId } });
-          if (result.value.closed === true) {
+          if (typeof result.value.closed === "boolean") {
+            // Hermes returns false when the live session was already absent;
+            // both boolean results prove the idempotent close is complete.
             this.#coordinator.releaseSession(owner, liveId);
             this.discardBufferedSession(liveId);
           }
@@ -194,6 +196,9 @@ export class ChatUpstreamHub {
   }
 
   #bufferUnbound(liveSessionId: string, event: HermesChatEvent): void {
+    // Once any prefix was evicted, later fragments cannot reconstruct a safe
+    // stream. Preserve the tombstone until bind instead of buffering a suffix.
+    if (this.#droppedUnbound.has(liveSessionId)) return;
     let buffered = this.#unbound.get(liveSessionId);
     if (buffered === undefined) {
       if (this.#unbound.size >= MAX_UNBOUND_SESSIONS) {
@@ -228,7 +233,9 @@ export class ChatUpstreamHub {
     const buffered = this.#unbound.get(liveSessionId);
     if (buffered !== undefined) this.#discardBuffered(liveSessionId);
     const wasDropped = this.#droppedUnbound.delete(liveSessionId);
-    return buffered ?? (wasDropped ? { events: [], bytes: 0, dropped: true } : undefined);
+    // Tombstone precedence is defensive: never deliver a partial suffix even
+    // if an older process version or race left both representations present.
+    return wasDropped ? { events: [], bytes: 0, dropped: true } : buffered;
   }
 
   #discardBuffered(liveSessionId: string): void {

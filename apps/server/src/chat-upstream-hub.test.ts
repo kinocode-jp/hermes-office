@@ -111,7 +111,7 @@ test("shared hub preserves native targets, merges unseen aliases, and routes onl
   assert.equal(a.events("live-main").at(-1)?.payload?.text, "A survives B");
 });
 
-test("disconnect cleanup covers pending results, drops detached events, and retains failed close leases", async () => {
+test("disconnect cleanup releases absent sessions but retains transport-failed close leases", async () => {
   const hermes = new NativeFakeHermes();
   const coordinator = new ChatSessionCoordinator();
   const runtime = hermes.runtime();
@@ -163,6 +163,26 @@ test("disconnect cleanup covers pending results, drops detached events, and reta
     "an invalid binding must discard its unowned early events",
   );
 
+  const absent = new FakeWebSocket();
+  handleOfficeChatConnection(absent as unknown as WebSocket, dependencies);
+  await settle();
+  absent.rpc(36, "session.resume", { session_id: "close-absent", profile: "coder" });
+  await settle();
+  hermes.markAlreadyAbsent("live-close-absent");
+  absent.close(1000, "already absent upstream");
+  await settle(6);
+  assert.equal(
+    hermes.sessionCloseRequests.filter((liveId) => liveId === "live-close-absent").length,
+    1,
+    "a normal closed:false response completes idempotent cleanup without retry",
+  );
+  const absentRetry = new FakeWebSocket();
+  handleOfficeChatConnection(absentRetry as unknown as WebSocket, dependencies);
+  await settle();
+  absentRetry.rpc(37, "session.resume", { session_id: "close-absent", profile: "coder" });
+  await settle();
+  assert.equal(absentRetry.errorCode(37), undefined, "closed:false must release the durable lease for a new owner");
+
   const failed = new FakeWebSocket();
   handleOfficeChatConnection(failed as unknown as WebSocket, dependencies);
   await settle();
@@ -182,6 +202,31 @@ test("disconnect cleanup covers pending results, drops detached events, and reta
   retry.rpc(32, "session.resume", { session_id: "close-fails", profile: "coder" });
   await settle();
   assert.equal(retry.errorCode(32), -32006, "a failed explicit close keeps the lease fail-closed");
+});
+
+test("an evicted pre-bind ID remains tombstoned and never delivers a partial suffix", async () => {
+  const hermes = new NativeFakeHermes();
+  const coordinator = new ChatSessionCoordinator();
+  const runtime = hermes.runtime();
+  const hub = new ChatUpstreamHub(runtime, coordinator, 64 * 1024);
+  const dependencies = {
+    auth: new OfficeAuth(), officeSession: SESSION, runtimeSource: runtime,
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    sessionCoordinator: coordinator, chatHub: hub,
+  };
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+  client.rpc(38, "session.resume", { session_id: "tombstone-revisit", profile: "coder" });
+  await settle();
+
+  assert.equal(client.errorCode(38), undefined);
+  assert.deepEqual(
+    client.events("live-tombstone-revisit").map(({ type }) => type),
+    ["error"],
+    "lost-prefix streams must expose only one resync signal, never later delta or approval fragments",
+  );
+  assert.equal(client.events("live-tombstone-revisit")[0]?.payload?.status, "resync_required");
 });
 
 test("upstream generation failure terminalizes every owner and reconnect ignores stale events", async () => {
@@ -283,6 +328,7 @@ class NativeFakeHermes {
   readonly createRequests: Array<{ profile: string; closeOnDisconnect: boolean }> = [];
   readonly sessionCloseRequests: string[] = [];
   readonly failCloseFor = new Set<string>();
+  readonly alreadyAbsentOnClose = new Set<string>();
   connectCount = 0;
   connectionCloseCount = 0;
   readonly #events: Array<(event: HermesChatEvent) => void> = [];
@@ -320,6 +366,10 @@ class NativeFakeHermes {
   emit(event: HermesChatEvent): void { this.#events.at(-1)?.(event); }
   eventEmitter(generation: number): (event: HermesChatEvent) => void { return this.#events[generation]!; }
   isLive(liveId: string): boolean { return this.#live.has(liveId); }
+  markAlreadyAbsent(liveId: string): void {
+    this.#live.delete(liveId);
+    this.alreadyAbsentOnClose.add(liveId);
+  }
   rotateMainWithoutEvent(): void { this.#mainStored = "rotated-tip"; }
   failGeneration(generation: number): void {
     this.#generationClosed[generation] = true;
@@ -339,8 +389,9 @@ class NativeFakeHermes {
     if (request.method === "session.close") {
       const liveId = String(request.params?.session_id);
       this.sessionCloseRequests.push(liveId);
-      const closed = !this.failCloseFor.has(liveId);
-      if (closed) this.#live.delete(liveId);
+      if (this.failCloseFor.has(liveId)) throw new HermesChatTransportError("timed_out", "fake close timeout");
+      const closed = !this.alreadyAbsentOnClose.has(liveId);
+      this.#live.delete(liveId);
       return { method: request.method, value: { closed } };
     }
     if (request.method === "session.create") {
@@ -392,6 +443,26 @@ class NativeFakeHermes {
         });
       }
     }
+    if (sessionId === "tombstone-revisit") {
+      this.#events[generation]?.({
+        type: "message.delta", sessionId: identity.liveSessionId,
+        payload: { text: "first fragment is evicted" },
+      });
+      for (let index = 0; index < 64; index += 1) {
+        this.#events[generation]?.({
+          type: "message.delta", sessionId: `tombstone-peer-${index}`,
+          payload: { text: `peer-${index}` },
+        });
+      }
+      this.#events[generation]?.({
+        type: "message.delta", sessionId: identity.liveSessionId,
+        payload: { text: "forbidden partial suffix" },
+      });
+      this.#events[generation]?.({
+        type: "approval.request", sessionId: identity.liveSessionId,
+        payload: { command: "must not surface", choices: ["once"] },
+      });
+    }
     if (sessionId === "rotated-live-tip") {
       this.#events[generation]?.({
         type: "message.delta", sessionId: identity.liveSessionId,
@@ -416,7 +487,9 @@ class NativeFakeHermes {
     if (requested === "pending-reuse") return { liveSessionId: "live-pending", storedSessionId: requested };
     if (requested === "invalid-reuse") return { liveSessionId: "live-invalid", storedSessionId: requested };
     if (requested === "close-fails") return { liveSessionId: "live-close-fails", storedSessionId: requested };
+    if (requested === "close-absent") return { liveSessionId: "live-close-absent", storedSessionId: requested };
     if (requested === "overflow") return { liveSessionId: "live-overflow", storedSessionId: requested };
+    if (requested === "tombstone-revisit") return { liveSessionId: "live-tombstone-revisit", storedSessionId: requested };
     return { liveSessionId: `live-${requested}`, storedSessionId: requested };
   }
 }

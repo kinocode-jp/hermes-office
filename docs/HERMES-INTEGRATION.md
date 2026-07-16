@@ -120,6 +120,9 @@ Important behavior from the current server:
   response.
 - A single server accepts an explicit `profile` on create/resume, allowing
   several profile chats to remain live concurrently.
+- `session.close` returns `closed: false` when the live id is already absent.
+  This is a successful idempotent close; only an RPC/transport failure leaves
+  Office ownership unresolved and fail-closed.
 - `prompt.submit` returns `{status: "streaming"}` before the model turn finishes.
   Completion is event-driven.
 - Sending while a turn is busy may queue/interrupt according to Hermes behavior;

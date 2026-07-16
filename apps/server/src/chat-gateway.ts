@@ -248,7 +248,10 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         }
         boundLiveId = identities.liveSessionId;
       }
-      if (frame.method === "session.close" && result.value.closed === true && typeof frame.params?.session_id === "string") {
+      if (frame.method === "session.close" && typeof result.value.closed !== "boolean") {
+        throw new Error("Hermes returned an invalid close result.");
+      }
+      if (frame.method === "session.close" && typeof frame.params?.session_id === "string") {
         sessionCoordinator.releaseSession(sessionOwner, frame.params.session_id);
         chatHub.discardBufferedSession(frame.params.session_id);
       }
