@@ -375,8 +375,8 @@ function validCardId(value: string): string {
 }
 
 function validProfile(value: string): string {
-  const profile = value.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profile)) {
+  const profile = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profile)) {
     throw new KanbanValidationError("INVALID_PROFILE", "The profile identifier is invalid.");
   }
   return profile;

@@ -19,6 +19,16 @@ test("history page metadata and stable cross-page message indexes are normalized
   ]);
   assert.equal(page.hasMore, true);
   assert.equal(page.nextCursor, "djE6Mjc");
+  assert.equal(page.truncated, false);
+  assert.equal(page.partial, false);
+});
+
+test("server truncation metadata is preserved without requesting another page", () => {
+  const page = normalizeHistoryPage({
+    messages: [{ index: 499, role: "assistant", text: "bounded result" }],
+    pagination: { hasMore: false, returned: 1, truncated: true, partial: true, truncationReason: "message_limit" },
+  }, "stored-1");
+  assert.deepEqual({ truncated: page.truncated, partial: page.partial, reason: page.truncationReason }, { truncated: true, partial: true, reason: "message_limit" });
 });
 
 test("a continuation flag without a cursor is rejected", () => {

@@ -54,6 +54,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
         ) : session.connectionState === "disconnected" && isLiveChat ? (
           <div class="chat-connection-note"><span>{t("chat.recovering")}</span></div>
         ) : null}
+        {session.historyPartial && <div class="chat-connection-note"><span>{session.historyNotice ? localizeRuntimeMessage(session.historyNotice) : t("chat.historyPartial")}</span></div>}
         {session.messages.length === 0 ? (
           <div class="empty-chat">
             <span>{session.historyState === "loading" ? t("chat.loadingHistory") : isLiveChat ? t("chat.hermesSession") : t("chat.newThread")}</span>

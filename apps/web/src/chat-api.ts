@@ -1,6 +1,9 @@
 import type { ApprovalChoice, ChatMessage } from "./domain";
 import { officeFetchJson, officeServerUrl } from "./office-api";
 import { createAuthenticatedOfficeWebSocket } from "./desktop-transport";
+import { DEFAULT_CLIENT_HISTORY_LIMITS, HistoryAccumulator, type ChatHistoryResult } from "./history-loader";
+
+export type { ChatHistoryResult } from "./history-loader";
 
 export type ChatTarget = {
   clientSessionId: string;
@@ -17,7 +20,7 @@ export type ChatGatewayEvent = {
 export type ChatApiCallbacks = {
   onSocketState(state: "disconnected" | "connecting" | "ready" | "error", message?: string): void;
   onHistoryLoading(clientSessionId: string): void;
-  onHistory(clientSessionId: string, messages: ChatMessage[], resolvedStoredSessionId?: string): void;
+  onHistory(clientSessionId: string, messages: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void;
   onHistoryError(clientSessionId: string, message: string): void;
   onSessionConnecting(clientSessionId: string): void;
   onSessionReady(clientSessionId: string, liveSessionId: string, storedSessionId?: string): void;
@@ -66,7 +69,7 @@ const RPC_TIMEOUT_MS = 15_000;
 const HISTORY_TIMEOUT_MS = 10_000;
 const RECONNECT_MAX_MS = 8_000;
 const HISTORY_PAGE_LIMIT = 25;
-const MAX_HISTORY_PAGES = 2_000;
+const MAX_HISTORY_PAGES = DEFAULT_CLIENT_HISTORY_LIMITS.maxPages;
 
 export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatApiDependencies = {}): ChatApiConnection {
   const serverUrl = dependencies.serverUrl ?? officeServerUrl();
@@ -275,10 +278,10 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     }
     historyLoads.set(target.clientSessionId, operation);
     callbacks.onHistoryLoading(target.clientSessionId);
+    const history = new HistoryAccumulator();
+    let resolvedStoredSessionId: string | undefined;
     try {
-      const messages: ChatMessage[] = [];
       let cursor: string | undefined;
-      let resolvedStoredSessionId: string | undefined;
       for (let pageNumber = 0; pageNumber < MAX_HISTORY_PAGES; pageNumber += 1) {
         const query = new URLSearchParams({ profile: target.profileId, limit: String(HISTORY_PAGE_LIMIT) });
         if (cursor !== undefined) query.set("cursor", cursor);
@@ -289,20 +292,23 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         );
         if (!isCurrentTarget(active)) return;
         const page = normalizeHistoryPage(body, target.storedSessionId);
-        messages.push(...page.messages);
         resolvedStoredSessionId = page.resolvedStoredSessionId ?? resolvedStoredSessionId;
-        if (!page.hasMore) break;
-        if (page.nextCursor === undefined || page.messages.length === 0 || pageNumber === MAX_HISTORY_PAGES - 1) {
-          throw new Error("保存済み履歴がOfficeの安全な読込上限を超えました。");
-        }
+        const shouldContinue = history.append(page);
+        if (!shouldContinue) break;
+        if (page.nextCursor === undefined || page.messages.length === 0 || pageNumber === MAX_HISTORY_PAGES - 1) throw new Error("保存済み履歴の継続情報が安全上限と一致しません。");
         cursor = page.nextCursor;
       }
       if (!isCurrentTarget(active)) return;
       if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
       loadedHistories.set(target.clientSessionId, active);
-      callbacks.onHistory(target.clientSessionId, messages, resolvedStoredSessionId);
+      callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, history.result());
     } catch (error) {
-      if (isCurrentTarget(active)) callbacks.onHistoryError(target.clientSessionId, errorText(error));
+      if (isCurrentTarget(active) && history.messages.length > 0) {
+        history.fail(errorText(error));
+        if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
+        loadedHistories.set(target.clientSessionId, active);
+        callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, history.result());
+      } else if (isCurrentTarget(active)) callbacks.onHistoryError(target.clientSessionId, errorText(error));
     } finally {
       if (historyLoads.get(target.clientSessionId) === operation) historyLoads.delete(target.clientSessionId);
     }
@@ -432,6 +438,9 @@ export function normalizeHistoryPage(value: unknown, storedSessionId: string): {
   resolvedStoredSessionId?: string;
   hasMore: boolean;
   nextCursor?: string;
+  truncated: boolean;
+  partial: boolean;
+  truncationReason?: string;
 } {
   const record = asRecord(value);
   const entries = Array.isArray(value) ? value : Array.isArray(record?.messages) ? record.messages : [];
@@ -456,15 +465,20 @@ export function normalizeHistoryPage(value: unknown, storedSessionId: string): {
     : typeof record?.session_id === "string" ? record.session_id : undefined;
   const pagination = asRecord(record?.pagination);
   const hasMore = pagination?.hasMore === true;
-  const nextCursor = typeof pagination?.nextCursor === "string" && pagination.nextCursor.length <= 64
+  const truncated = pagination?.truncated === true;
+  const nextCursor = typeof pagination?.nextCursor === "string" && pagination.nextCursor.length <= 256
     ? pagination.nextCursor
     : undefined;
-  if (hasMore && nextCursor === undefined) throw new Error("Office Serverの履歴ページ情報に互換性がありません。");
+  if ((hasMore && nextCursor === undefined) || (hasMore && truncated)) throw new Error("Office Serverの履歴ページ情報に互換性がありません。");
+  const truncationReason = typeof pagination?.truncationReason === "string" ? pagination.truncationReason : undefined;
   return {
     messages,
     ...(resolvedStoredSessionId ? { resolvedStoredSessionId } : {}),
     hasMore,
     ...(nextCursor ? { nextCursor } : {}),
+    truncated,
+    partial: pagination?.partial === true,
+    ...(truncationReason ? { truncationReason } : {}),
   };
 }
 

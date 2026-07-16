@@ -1,6 +1,6 @@
 import { computed, signal } from "@preact/signals";
 import { initialSessions, profiles } from "./demo-data";
-import type { ChatGatewayEvent, ChatTarget } from "./chat-api";
+import type { ChatGatewayEvent, ChatHistoryResult, ChatTarget } from "./chat-api";
 import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
@@ -451,13 +451,14 @@ export function setChatHistoryLoading(sessionId: string): void {
   updateChatSession(sessionId, (session) => ({ ...session, historyState: "loading" }));
 }
 
-export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string): void {
+export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void {
   updateChatSession(sessionId, (session) => {
     const historyIds = new Set(history.map((message) => message.id));
     return {
       ...session,
       ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
       historyState: "loaded",
+      historyPartial: result?.partial === true, historyNotice: result?.error,
       errorMessage: session.connectionState === "error" ? session.errorMessage : undefined,
       messages: [...history, ...session.messages.filter((message) => !historyIds.has(message.id))]
     };

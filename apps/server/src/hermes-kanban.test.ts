@@ -74,6 +74,49 @@ test("create, assignment, status, and comments send only bounded allowlisted JSO
   assert.deepEqual(requests[3]?.body, { body: "Need input", author: "hermes-office" });
 });
 
+test("profile identities preserve case across assignment, board reads, and updates", async () => {
+  const requests: HermesKanbanRequest[] = [];
+  const adapter = new HermesKanbanAdapter({
+    listAllowedProfiles: () => ["TeamLead", "teamlead", "QA.Lead-2"],
+    request: async (request) => {
+      requests.push(request);
+      if (request.method === "GET") return {
+        columns: [{ name: "todo", tasks: [{ ...CARD, assignee: "TeamLead" }] }],
+        assignees: ["TeamLead", "teamlead", "QA.Lead-2"], latest_event_id: 1, now: 2,
+      };
+      const assignee = request.body?.assignee;
+      return { task: { ...CARD, assignee: typeof assignee === "string" ? assignee : CARD.assignee } };
+    },
+  });
+
+  const created = await adapter.createCard({ title: "Mixed case", assignee: "QA.Lead-2" });
+  const upper = await adapter.setAssignee("t_deadbeef", "TeamLead");
+  const lower = await adapter.setAssignee("t_deadbeef", "teamlead");
+  const board = await adapter.getBoard();
+
+  assert.equal(requests[0]?.body?.assignee, "QA.Lead-2");
+  assert.equal(created.assignee, "QA.Lead-2");
+  assert.equal(requests[1]?.body?.assignee, "TeamLead");
+  assert.equal(requests[2]?.body?.assignee, "teamlead");
+  assert.equal(upper.assignee, "TeamLead");
+  assert.equal(lower.assignee, "teamlead");
+  assert.deepEqual(board.assignees, ["TeamLead", "teamlead", "QA.Lead-2"]);
+  assert.equal(board.columns[0]?.cards[0]?.assignee, "TeamLead");
+});
+
+test("profile validation remains exact and rejects unsafe identifiers", async () => {
+  let calls = 0;
+  const adapter = new HermesKanbanAdapter({
+    listAllowedProfiles: () => ["TeamLead"],
+    request: async () => { calls += 1; return { task: CARD }; },
+  });
+  await assert.rejects(adapter.setAssignee("t_deadbeef", "teamlead"), /not available/);
+  for (const unsafe of ["../TeamLead", "Team/Lead", "Team Lead", "Team@Lead", ".TeamLead"]) {
+    await assert.rejects(adapter.setAssignee("t_deadbeef", unsafe), KanbanValidationError);
+  }
+  assert.equal(calls, 0);
+});
+
 test("unsafe identifiers, profiles, and dispatcher-owned statuses fail before transport", async () => {
   let calls = 0;
   const adapter = mockAdapter(() => { calls += 1; return { task: CARD }; });

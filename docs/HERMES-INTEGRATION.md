@@ -150,6 +150,12 @@ List responses intentionally omit heavyweight `system_prompt` and `model_config`
 unless `full=1`. Office should keep that default and page messages (maximum 500
 per request) rather than loading every transcript at startup.
 
+Office history continuation is cumulatively bounded as well as response-bounded.
+Signed cursors carry the page, delivered-message, and UTF-8 wire-byte totals;
+the server and Web client independently stop at 40 pages, 500 messages, or
+8 MiB. Reaching a limit or losing a later page preserves the already loaded
+messages as an explicit partial result instead of attempting an unbounded render.
+
 `GET /api/profiles` is not paginated by Hermes. Office reads its single bounded
 response, then exposes both profile and session inventories as 100-row Office
 pages with opaque continuation cursors. Snapshot metadata includes `hasMore`,

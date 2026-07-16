@@ -64,7 +64,7 @@ export class HermesBackend implements HermesRuntimeSource {
   readonly #profilePool: HermesProfileBackendPool;
   readonly #globalSettings: OfficeGlobalSettingsStore;
   readonly #inventory = new HermesInventoryCache();
-  #snapshotRefresh: Promise<{ inventory: CollectedHermesInventory; boardWire: unknown }> | undefined;
+  #snapshotRefresh: Promise<{ inventory: CollectedHermesInventory; boards: KanbanBoardSummary[] }> | undefined;
   #globalInheritance?: GlobalInheritanceCoordinator;
 
   constructor(options: HermesBackendOptions = {}) {
@@ -188,9 +188,8 @@ export class HermesBackend implements HermesRuntimeSource {
     if (this.#state.state !== "ready") return emptySnapshot(this.status(), ++this.#sequence);
 
     try {
-      const { inventory, boardWire } = await this.#collectSnapshotData();
+      const { inventory, boards } = await this.#collectSnapshotData();
       const firstPage = this.#inventory.replace(inventory);
-      const boards = mapBoards(boardWire);
       this.#state = { ...this.#state, state: "ready", compatibilityMessage: "Hermes runtimeに接続済み" };
       return makeSnapshot(this.status(), ++this.#sequence, firstPage.profiles, firstPage.sessions, firstPage.metadata, boards);
     } catch {
@@ -207,18 +206,28 @@ export class HermesBackend implements HermesRuntimeSource {
     return this.#inventory.page(kind, cursor, limit);
   }
 
-  async #collectSnapshotData(): Promise<{ inventory: CollectedHermesInventory; boardWire: unknown }> {
+  async #collectSnapshotData(): Promise<{ inventory: CollectedHermesInventory; boards: KanbanBoardSummary[] }> {
     const current = this.#snapshotRefresh;
     if (current !== undefined) return await current;
     const refresh = Promise.all([
       collectHermesInventory(async (path, timeoutMs) => await this.#requestJsonResult(path, true, timeoutMs)),
-      this.#requestJson("/api/plugins/kanban/board"),
-    ]).then(([inventory, boardWire]) => ({ inventory, boardWire }));
+      this.#collectBoardSummaries(),
+    ]).then(([inventory, boards]) => ({ inventory, boards }));
     this.#snapshotRefresh = refresh;
     try {
       return await refresh;
     } finally {
       if (this.#snapshotRefresh === refresh) this.#snapshotRefresh = undefined;
+    }
+  }
+
+  async #collectBoardSummaries(): Promise<KanbanBoardSummary[]> {
+    try {
+      return mapBoards(await this.#requestJson("/api/plugins/kanban/board"));
+    } catch {
+      // Kanban is an optional, independently-failing feature. An unavailable
+      // or incompatible board must not discard otherwise healthy inventory.
+      return emptyBoards();
     }
   }
 
@@ -367,9 +376,24 @@ function requiredToken(value: string | undefined): string {
 }
 
 function mapBoards(value: unknown): KanbanBoardSummary[] {
-  const columns = recordArray(value, "columns");
-  const count = columns.reduce((sum, column) => sum + (Array.isArray(column.tasks) ? column.tasks.length : 0), 0);
-  return [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: count, revision: readNumber(value, "latest_event_id") ?? 0 }];
+  if (!isRecord(value) || !Array.isArray(value.columns)) throw new Error("Hermes Kanban board contract is incompatible.");
+  let count = 0;
+  for (const column of value.columns) {
+    if (!isRecord(column) || (column.tasks !== undefined && !Array.isArray(column.tasks))) {
+      throw new Error("Hermes Kanban column contract is incompatible.");
+    }
+    count += Array.isArray(column.tasks) ? column.tasks.length : 0;
+    if (!Number.isSafeInteger(count)) throw new Error("Hermes Kanban card count is invalid.");
+  }
+  const revision = value.latest_event_id;
+  if (revision !== undefined && (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)) {
+    throw new Error("Hermes Kanban revision is invalid.");
+  }
+  return [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: count, revision: revision ?? 0 }];
+}
+
+function emptyBoards(): KanbanBoardSummary[] {
+  return [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: 0, revision: 0 }];
 }
 
 function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: OfficeSnapshot["profiles"], sessions: OfficeSnapshot["sessions"], inventory: OfficeInventoryMetadata, boards: KanbanBoardSummary[]): OfficeSnapshot {
@@ -387,12 +411,11 @@ function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: Office
 
 function emptySnapshot(runtime: RuntimeStatus, sequence: number): OfficeSnapshot {
   const empty = { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 };
-  return makeSnapshot(runtime, sequence, [], [], { profiles: empty, sessions: empty }, [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: 0, revision: 0 }]);
+  return makeSnapshot(runtime, sequence, [], [], { profiles: empty, sessions: empty }, emptyBoards());
 }
 
 function recordArray(value: unknown, key: string): Record<string, unknown>[] { const rows = isRecord(value) ? value[key] : undefined; return Array.isArray(rows) ? rows.filter(isRecord) : []; }
 function readString(value: unknown, key: string): string | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "string" ? item : undefined; }
-function readNumber(value: unknown, key: string): number | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "number" && Number.isFinite(item) ? item : undefined; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function bounded(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }
 

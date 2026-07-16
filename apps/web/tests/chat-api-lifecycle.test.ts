@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChatApiCallbacks, ChatTarget } from "../src/chat-api";
+import type { ChatApiCallbacks, ChatHistoryResult, ChatTarget } from "../src/chat-api";
 import { connectChatApi } from "../src/chat-api";
 import { storedSessionClientId } from "../src/session-identity.ts";
 
@@ -106,15 +106,50 @@ test("profile-scoped client IDs isolate resume, history, and events for equal st
   harness.api.stop();
 });
 
+test("automatic history loading stops at the cumulative message boundary", async () => {
+  let pages = 0;
+  const harness = await createHarness(async <T>() => {
+    const page = pages++;
+    return {
+      sessionId: "large-stored",
+      messages: Array.from({ length: 25 }, (_, index) => ({ index: page * 25 + index, role: "assistant", text: `m-${page}-${index}` })),
+      pagination: { hasMore: true, nextCursor: `cursor-${page + 1}`, returned: 25, truncated: false, partial: false },
+    } as T;
+  });
+  harness.api.ensureSession({ clientSessionId: "large-client", profileId: "coder", storedSessionId: "large-stored" });
+  await waitFor(() => harness.historyResults.length === 1);
+  assert.equal(pages, 20);
+  assert.deepEqual(harness.historyResults[0], { clientSessionId: "large-client", messages: 500, result: { truncated: true, partial: true, reason: "message_limit" } });
+  harness.api.stop();
+});
+
+test("a later history page failure delivers prior pages as partial history", async () => {
+  let pages = 0;
+  const harness = await createHarness(async <T>() => {
+    pages += 1;
+    if (pages === 3) throw new Error("page three unavailable");
+    return {
+      sessionId: "partial-stored",
+      messages: Array.from({ length: 2 }, (_, index) => ({ index: (pages - 1) * 2 + index, role: "assistant", text: `m-${pages}-${index}` })),
+      pagination: { hasMore: true, nextCursor: `cursor-${pages}`, returned: 2, truncated: false, partial: false },
+    } as T;
+  });
+  harness.api.ensureSession({ clientSessionId: "partial-client", profileId: "coder", storedSessionId: "partial-stored" });
+  await waitFor(() => harness.historyResults.length === 1);
+  assert.deepEqual(harness.historyResults[0], { clientSessionId: "partial-client", messages: 4, result: { truncated: true, partial: true, reason: "upstream_error" } });
+  harness.api.stop();
+});
+
 async function createHarness(fetchJson?: <T>(path: string, options?: unknown, serverUrl?: string) => Promise<T>) {
   const socket = new FakeWebSocket();
   const ready: Array<{ clientSessionId: string; liveSessionId: string }> = [];
   const histories: string[] = [];
+  const historyResults: Array<{ clientSessionId: string; messages: number; result: Pick<ChatHistoryResult, "truncated" | "partial" | "reason"> }> = [];
   const events: string[] = [];
   let sequence = 0;
   const callbacks: ChatApiCallbacks = {
     onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {}, onSessionError() {}, onHistoryError() {},
-    onHistory(clientSessionId) { histories.push(clientSessionId); },
+    onHistory(clientSessionId, messages, _storedSessionId, result) { histories.push(clientSessionId); if (result) historyResults.push({ clientSessionId, messages: messages.length, result: { truncated: result.truncated, partial: result.partial, ...(result.reason ? { reason: result.reason } : {}) } }); },
     onSessionReady(clientSessionId, liveSessionId) { ready.push({ clientSessionId, liveSessionId }); },
     onEvent(clientSessionId) { events.push(clientSessionId); },
   };
@@ -127,7 +162,7 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   await flush();
   socket.open();
   await flush();
-  return { api, socket, ready, histories, events };
+  return { api, socket, ready, histories, historyResults, events };
 }
 
 type RpcFrame = { id: string; method: string; params: Record<string, string> };
@@ -168,3 +203,4 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
+async function waitFor(predicate: () => boolean): Promise<void> { for (let attempt = 0; attempt < 100; attempt += 1) { if (predicate()) return; await flush(); } throw new Error("Timed out waiting for chat history"); }

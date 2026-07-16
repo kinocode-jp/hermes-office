@@ -133,6 +133,45 @@ test("an upstream failure after the first page retains a clearly truncated usabl
   }
 });
 
+for (const scenario of ["404", "500", "timeout", "mapping"] as const) {
+  test(`a Kanban ${scenario} failure preserves healthy profile and session inventory`, async () => {
+    let boardRequests = 0;
+    const fixture = await startHermesFixture((request, response, url) => {
+      if (url.pathname === "/api/profiles") return writeJson(response, { profiles: [profileRow(0)] });
+      if (url.pathname === "/api/profiles/sessions") {
+        return writeJson(response, { sessions: [sessionRow(0)], total: 1, limit: 100, offset: 0, errors: [] });
+      }
+      if (url.pathname === "/api/plugins/kanban/board") {
+        boardRequests += 1;
+        if (scenario === "404" || scenario === "500") {
+          response.writeHead(Number(scenario));
+          response.end();
+        } else if (scenario === "mapping") {
+          writeJson(response, { columns: [{ tasks: { invalid: true } }], latest_event_id: 1 });
+        }
+        return;
+      }
+      return defaultFixtureRoute(request, response, url);
+    });
+    try {
+      assert.equal((await fixture.backend.start()).state, "ready");
+      const snapshots = await Promise.all([fixture.backend.snapshot(), fixture.backend.snapshot()]);
+      assert.equal(boardRequests, 1, "concurrent snapshots retain single-flight collection on board failure");
+      for (const snapshot of snapshots) {
+        assert.equal(snapshot.capabilities.runtime.state, "ready");
+        assert.deepEqual(snapshot.profiles.map((profile) => profile.id), ["profile-0"]);
+        assert.deepEqual(snapshot.sessions.map((session) => session.id), ["session-0"]);
+        assert.equal(snapshot.inventory.profiles.partialFailures, 0);
+        assert.equal(snapshot.inventory.sessions.partialFailures, 0);
+        assert.deepEqual(snapshot.boards, [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: 0, revision: 0 }]);
+      }
+    } finally {
+      await fixture.backend.close();
+      await fixture.close();
+    }
+  });
+}
+
 test("managed backend drains output beyond pipe capacity after readiness", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-backend-"));
   const executable = join(directory, "fake-hermes.mjs");
@@ -194,12 +233,12 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
   throw new Error(`Timed out waiting for ${path}`);
 }
 
-async function startHermesFixture(handler: (request: IncomingMessage, response: ServerResponse, url: URL) => void): Promise<{ backend: HermesBackend; close(): Promise<void> }> {
+async function startHermesFixture(handler: (request: IncomingMessage, response: ServerResponse, url: URL) => void, requestTimeoutMs = 2_000): Promise<{ backend: HermesBackend; close(): Promise<void> }> {
   const server = createServer((request, response) => handler(request, response, new URL(request.url ?? "/", "http://fixture.local")));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   return {
-    backend: new HermesBackend({ baseUrl: `http://127.0.0.1:${address.port}`, sessionToken: "fixture-session-token-0123456789", requestTimeoutMs: 2_000 }),
+    backend: new HermesBackend({ baseUrl: `http://127.0.0.1:${address.port}`, sessionToken: "fixture-session-token-0123456789", requestTimeoutMs }),
     close: async () => await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }

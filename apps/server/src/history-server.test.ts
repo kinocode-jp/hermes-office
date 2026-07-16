@@ -11,7 +11,9 @@ test("Office history endpoint serves large histories as bounded cursor pages", a
   const messages = Array.from({ length: 60 }, (_, index) => ({
     index,
     role: index % 2 === 0 ? "user" as const : "assistant" as const,
-    text: `history-${index}-${"x".repeat(100_000)}`,
+    // Keep a page above the regular 64 KiB JSON budget without making every
+    // concurrently-running test file contend with a multi-megabyte fixture.
+    text: `history-${index}-${"x".repeat(3_000)}`,
   }));
   const runtime: HermesRuntimeSource = {
     status: createDemoRuntimeStatus,

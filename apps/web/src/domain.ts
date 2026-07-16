@@ -64,6 +64,8 @@ export type ChatSession = {
   messages: ChatMessage[];
   connectionState?: ChatConnectionState;
   historyState?: ChatHistoryState;
+  historyPartial?: boolean;
+  historyNotice?: string | undefined;
   errorMessage?: string | undefined;
   remoteKind?: "demo" | "stored" | "draft" | undefined;
   streamingMessageId?: string | undefined;
