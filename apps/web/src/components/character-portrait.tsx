@@ -1,9 +1,8 @@
 import type { JSX } from "preact";
-import { avatarForProfile } from "../avatar-preferences";
+import { avatarForProfile, DEFAULT_CHARACTER_COUNT, defaultAvatarOrdinal, profileAvatars } from "../avatar-preferences";
 import { t } from "../i18n";
 
-const CHARACTER_SHEET_COLUMNS = 4;
-const CHARACTER_SHEET_ROWS = 3;
+const CHARACTER_SHEET_ROWS = DEFAULT_CHARACTER_COUNT;
 export type CharacterSheetPosition = {
   index: number;
   column: number;
@@ -12,15 +11,15 @@ export type CharacterSheetPosition = {
 };
 
 /**
- * Resolve a Hermes profile preference to one square in the 4 × 3 creature sheet.
+ * Resolve a Hermes profile preference to the front-idle cell in the 9 × 6 atlas.
  * Known profiles keep stable cells; new profiles receive a deterministic default.
  */
 export function characterSheetPosition(profileId: string): CharacterSheetPosition {
   const avatar = avatarForProfile(profileId);
   const index = avatar.kind === "creature" ? avatar.index : 0;
-  const column = index % CHARACTER_SHEET_COLUMNS;
-  const row = Math.floor(index / CHARACTER_SHEET_COLUMNS);
-  const x = (column / (CHARACTER_SHEET_COLUMNS - 1)) * 100;
+  const column = 0;
+  const row = index;
+  const x = 0;
   const y = (row / (CHARACTER_SHEET_ROWS - 1)) * 100;
 
   return {
@@ -37,6 +36,7 @@ type CharacterPortraitProps = {
   class?: string;
   decorative?: boolean;
   characterIndex?: number;
+  profileIndex?: number;
 };
 
 export function CharacterPortrait({
@@ -44,10 +44,23 @@ export function CharacterPortrait({
   profileName,
   class: className = "",
   decorative = false,
-  characterIndex
+  characterIndex,
+  profileIndex
 }: CharacterPortraitProps) {
   const avatar = avatarForProfile(profileId);
-  const position = characterIndex === undefined ? characterSheetPosition(profileId) : sheetPosition(characterIndex);
+  const savedAvatar = profileAvatars.value[profileId];
+  const defaultIndex = profileIndex === undefined ? undefined : Math.max(0, profileIndex) % DEFAULT_CHARACTER_COUNT;
+  const position = characterIndex !== undefined
+    ? sheetPosition(characterIndex)
+    : avatar.kind === "creature"
+      ? sheetPosition(savedAvatar?.kind === "creature" ? avatar.index : (defaultIndex ?? avatar.index))
+      : sheetPosition(0);
+  const ordinal = profileIndex ?? defaultAvatarOrdinal(profileId);
+  const colorCycle = Math.floor(Math.max(0, ordinal) / DEFAULT_CHARACTER_COUNT);
+  const creatureStyle = {
+    "--sprite-y": `${formatPercentage((position.row / (CHARACTER_SHEET_ROWS - 1)) * 100)}%`,
+    "--avatar-hue": `${(colorCycle * 53) % 360}deg`
+  } as JSX.CSSProperties;
   const accessibility: JSX.HTMLAttributes<HTMLSpanElement> = decorative
     ? { "aria-hidden": true }
     : { role: "img", "aria-label": t("profile.character", { name: profileName }) };
@@ -57,7 +70,7 @@ export function CharacterPortrait({
       class={`character-portrait ${className}`.trim()}
       style={avatar.kind === "custom" && characterIndex === undefined
         ? { backgroundImage: `url(${JSON.stringify(avatar.dataUrl)})`, backgroundPosition: "center", backgroundSize: "cover" }
-        : { backgroundPosition: position.backgroundPosition }}
+        : creatureStyle}
       data-character-index={avatar.kind === "creature" || characterIndex !== undefined ? position.index : "custom"}
       {...accessibility}
     />
@@ -69,10 +82,10 @@ function formatPercentage(value: number): string {
 }
 
 function sheetPosition(index: number): CharacterSheetPosition {
-  const safeIndex = Math.max(0, Math.min(11, Math.floor(index)));
-  const column = safeIndex % CHARACTER_SHEET_COLUMNS;
-  const row = Math.floor(safeIndex / CHARACTER_SHEET_COLUMNS);
-  const x = (column / (CHARACTER_SHEET_COLUMNS - 1)) * 100;
+  const safeIndex = Math.max(0, Math.min(DEFAULT_CHARACTER_COUNT - 1, Math.floor(index)));
+  const column = 0;
+  const row = safeIndex;
+  const x = 0;
   const y = (row / (CHARACTER_SHEET_ROWS - 1)) * 100;
   return { index: safeIndex, column, row, backgroundPosition: `${formatPercentage(x)}% ${formatPercentage(y)}%` };
 }

@@ -4,6 +4,7 @@ const STORAGE_KEY = "hermes-office.profile-avatars.v1";
 const CUSTOM_IMAGE_LIMIT = 1_500_000;
 const DATABASE_NAME = "hermes-office-assets";
 const DATABASE_STORE = "profile-avatars";
+export const DEFAULT_CHARACTER_COUNT = 6;
 
 export type ProfileAvatar =
   | { kind: "creature"; index: number }
@@ -15,17 +16,21 @@ const initialAvatars = readStoredAvatars();
 export const profileAvatars = signal<AvatarMap>(initialAvatars);
 void hydrateCustomAvatars(initialAvatars);
 
-export function defaultAvatarIndex(profileId: string): number {
+export function defaultAvatarOrdinal(profileId: string): number {
   const normalized = profileId.trim().toLocaleLowerCase("en-US");
   const knownIndex = knownProfileIndexes[normalized];
   if (knownIndex !== undefined) return knownIndex;
-  if (!normalized) return 11;
+  if (!normalized) return DEFAULT_CHARACTER_COUNT - 1;
   let hash = 2166136261;
   for (const character of normalized) {
     hash ^= character.codePointAt(0) ?? 0;
     hash = Math.imul(hash, 16777619);
   }
-  return Math.abs(hash) % 12;
+  return Math.abs(hash) % DEFAULT_CHARACTER_COUNT;
+}
+
+export function defaultAvatarIndex(profileId: string): number {
+  return defaultAvatarOrdinal(profileId) % DEFAULT_CHARACTER_COUNT;
 }
 
 export function avatarForProfile(profileId: string): ProfileAvatar {
@@ -33,7 +38,7 @@ export function avatarForProfile(profileId: string): ProfileAvatar {
 }
 
 export function setCreatureAvatar(profileId: string, index: number): void {
-  if (!profileId || !Number.isInteger(index) || index < 0 || index > 11) return;
+  if (!profileId || !Number.isInteger(index) || index < 0 || index >= DEFAULT_CHARACTER_COUNT) return;
   updateAvatar(profileId, { kind: "creature", index });
   void deleteCustomAvatar(profileId);
 }
@@ -74,8 +79,10 @@ function readStoredAvatars(): AvatarMap {
     for (const [profileId, value] of Object.entries(parsed)) {
       if (!profileId || !value || typeof value !== "object") continue;
       const avatar = value as Partial<ProfileAvatar>;
-      if (avatar.kind === "creature" && Number.isInteger(avatar.index) && Number(avatar.index) >= 0 && Number(avatar.index) < 12) {
-        avatars[profileId] = { kind: "creature", index: Number(avatar.index) };
+      if (avatar.kind === "creature" && Number.isInteger(avatar.index) && Number(avatar.index) >= 0) {
+        // v1 offered twelve cells. Preserve old choices by folding them onto
+        // the six production characters instead of discarding the preference.
+        avatars[profileId] = { kind: "creature", index: Number(avatar.index) % DEFAULT_CHARACTER_COUNT };
         continue;
       }
       if (avatar.kind === "custom" && typeof avatar.dataUrl === "string" && avatar.dataUrl.length <= CUSTOM_IMAGE_LIMIT && isSafeImageDataUrl(avatar.dataUrl)) {

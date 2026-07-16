@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { avatarForProfile, resetProfileAvatar, setCreatureAvatar, setCustomAvatar } from "../avatar-preferences";
+import { avatarForProfile, DEFAULT_CHARACTER_COUNT, resetProfileAvatar, setCreatureAvatar, setCustomAvatar } from "../avatar-preferences";
 import { CharacterPortrait } from "./character-portrait";
 import { InfoTip } from "./info-tip";
 import { t } from "../i18n";
@@ -7,12 +7,13 @@ import { t } from "../i18n";
 type AvatarPickerProps = {
   profileId: string;
   profileName: string;
+  profileIndex?: number;
   onClose: () => void;
 };
 
 const MAX_FILE_BYTES = 1_000_000;
 
-export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerProps) {
+export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: AvatarPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +61,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
         </header>
         <p id="avatar-picker-description" class="visually-hidden">{t("avatar.description")}</p>
         <div class="avatar-choice-grid">
-          {Array.from({ length: 12 }, (_, index) => (
+          {Array.from({ length: DEFAULT_CHARACTER_COUNT }, (_, index) => (
             <button
               key={index}
               type="button"
@@ -69,7 +70,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
               aria-pressed={selected.kind === "creature" && selected.index === index}
               onClick={() => { setCreatureAvatar(profileId, index); onClose(); }}
             >
-              <CharacterPortrait profileId={profileId} profileName={t("avatar.creature", { number: index + 1 })} characterIndex={index} decorative />
+              <CharacterPortrait profileId={profileId} profileName={t("avatar.creature", { number: index + 1 })} profileIndex={profileIndex} characterIndex={index} decorative />
             </button>
           ))}
         </div>

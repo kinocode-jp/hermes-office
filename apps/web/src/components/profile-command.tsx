@@ -100,7 +100,7 @@ export function ProfileCommand() {
                   onPointerMove={() => setActiveIndex(index)}
                   onClick={() => choose(index)}
                 >
-                  <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--command" decorative />
+                  <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileList.value.findIndex((candidate) => candidate.id === profile.id)} class="character-portrait--command" decorative />
                   <span><b>{profile.name}</b><small>{profile.sessions} {t("office.chats")}</small></span>
                   <StatusPill status={profile.status} />
                 </button>

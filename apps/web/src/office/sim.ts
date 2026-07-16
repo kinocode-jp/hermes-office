@@ -186,7 +186,7 @@ export type SimCharacter = {
   /** Seconds to stand still before choosing the next wander target. */
   pause: number;
   moving: boolean;
-  facing: 1 | -1;
+  direction: "front" | "right" | "back" | "left";
 };
 
 export function createCharacters(world: OfficeWorld, profileIds: string[], previous?: SimCharacter[]): SimCharacter[] {
@@ -204,7 +204,7 @@ export function createCharacters(world: OfficeWorld, profileIds: string[], previ
       path: [],
       pause: Math.random() * 2,
       moving: false,
-      facing: 1,
+      direction: prior?.direction ?? "front",
       ...(inBounds ? { path: [], pause: 0.2 } : {})
     };
   });
@@ -251,7 +251,11 @@ export function tickCharacters(
     const speed = atDeskDuty ? 110 : 72;
     const step = speed * dt;
     character.moving = true;
-    if (Math.abs(dx) > 1) character.facing = dx < 0 ? -1 : 1;
+    if (Math.abs(dx) >= Math.abs(dy) && Math.abs(dx) > 1) {
+      character.direction = dx < 0 ? "left" : "right";
+    } else if (Math.abs(dy) > 1) {
+      character.direction = dy < 0 ? "back" : "front";
+    }
     if (distance <= step) {
       character.x = target.x;
       character.y = target.y;

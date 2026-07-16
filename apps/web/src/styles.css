@@ -132,8 +132,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .page-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
 .page-title-row h1, .placeholder-page h1 { margin: 0; font: 900 clamp(20px, 2.1vw, 28px)/1.05 "Arial Black", sans-serif; letter-spacing: -0.055em; }
 
-.character-portrait { display: block; overflow: hidden; background-color: #f8f5ed; background-image: url("/characters/creature-avatar-sheet-pixel-v3.webp"); background-repeat: no-repeat; background-size: 400% 300%; }
-.character-portrait:not([data-character-index="custom"]) { image-rendering: pixelated; }
+.character-portrait { --sprite-x: 0%; display: block; overflow: hidden; background-color: #f8f5ed; background-image: url("/characters/hermes-office-character-atlas-v4.webp"); background-repeat: no-repeat; background-size: 900% 600%; background-position: var(--sprite-x) var(--sprite-y, 0%); }
+.character-portrait:not([data-character-index="custom"]) { image-rendering: pixelated; filter: hue-rotate(var(--avatar-hue, 0deg)); }
 .character-portrait--panel::after { content: ""; position: absolute; inset: 0; border: 1px solid rgba(255,255,255,.08); background: linear-gradient(145deg, rgba(255,255,255,.09), transparent 38%, rgba(5,10,18,.06)); pointer-events: none; }
 
 .status-pill { display: inline-flex; width: 11px; height: 11px; border-radius: 50%; background: currentColor; color: var(--muted); box-shadow: 0 0 8px color-mix(in srgb, currentColor 45%, transparent); }

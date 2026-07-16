@@ -102,14 +102,16 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
 
   useEffect(() => {
     simRef.current = createCharacters(world, profiles.map((profile) => profile.id), simRef.current);
-    const paint = () => {
+    const paint = (now = performance.now()) => {
+      const walkFrame = Math.floor(now / 220) % 2;
       for (const character of simRef.current) {
         const el = charEls.current.get(character.id);
         if (!el) continue;
         el.style.transform = characterTransform(character);
         el.style.zIndex = String(100 + Math.round(character.y / 4));
         el.classList.toggle("is-walking", character.moving);
-        el.dataset.facing = character.facing < 0 ? "left" : "right";
+        el.dataset.direction = character.direction;
+        el.dataset.walkFrame = String(walkFrame);
       }
     };
     paint();
@@ -134,7 +136,7 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
       const dt = Math.min(0.2, (now - last) / 1000);
       last = now;
       tickCharacters(world, simRef.current, statusRef.current, dt);
-      paint();
+      paint(now);
     }, 80);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -187,7 +189,7 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
         {cables.length > 0 && (
           <TaskCables cables={cables} width={worldW} height={worldH} maxCables={24} onSelect={(cable) => selectProfile(cable.profileId)} />
         )}
-        {profiles.map((profile) => {
+        {profiles.map((profile, profileIndex) => {
           const stateLabel = t(statusTranslation[profile.status]);
           const activity = profileActivity(profile.id);
           return (
@@ -202,7 +204,7 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
               {...profileDropHandlers(profile.id)}
               aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
             >
-              <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--sim" decorative />
+              <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} class="character-portrait--sim" decorative />
               <span class="ow-char-name">{profile.name}</span>
             </button>
           );
@@ -215,7 +217,7 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
 function OfficeList({ profiles }: { profiles: Profile[] }) {
   return (
     <div class="office-list">
-      {profiles.map((profile) => {
+      {profiles.map((profile, profileIndex) => {
         const stateLabel = t(statusTranslation[profile.status]);
         const activity = profileActivity(profile.id);
         return (
@@ -227,7 +229,7 @@ function OfficeList({ profiles }: { profiles: Profile[] }) {
             {...profileDropHandlers(profile.id)}
             aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
           >
-            <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--row" decorative />
+            <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} class="character-portrait--row" decorative />
             <span class="office-row-main">
               <b>{profile.name}</b>
               {activity && <small title={activity}>{activity}</small>}

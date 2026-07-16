@@ -65,11 +65,17 @@
 /* Characters */
 .ow-char { position: absolute; left: 0; top: 0; display: grid; justify-items: center; align-content: end; gap: 2px; padding: 0; border: 0; background: transparent; color: var(--paper); cursor: pointer; will-change: transform; transition: transform 140ms linear; }
 .character-portrait--sim { width: 40px; height: 40px; border: 2px solid color-mix(in srgb, var(--night) 55%, transparent); border-radius: 8px; box-shadow: 0 3px 8px color-mix(in srgb, var(--night) 45%, transparent); }
-.ow-char[data-facing="left"] .character-portrait--sim { transform: scaleX(-1); }
 .ow-char.is-walking .character-portrait--sim { animation: ow-step 460ms ease-in-out infinite; }
-.ow-char[data-facing="left"].is-walking .character-portrait--sim { animation-name: ow-step-left; }
 @keyframes ow-step { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-@keyframes ow-step-left { 0%, 100% { transform: scaleX(-1) translateY(0); } 50% { transform: scaleX(-1) translateY(-3px); } }
+.ow-char[data-direction="front"] .character-portrait--sim { --sprite-x: 0%; }
+.ow-char[data-direction="front"].is-walking[data-walk-frame="0"] .character-portrait--sim { --sprite-x: 12.5%; }
+.ow-char[data-direction="front"].is-walking[data-walk-frame="1"] .character-portrait--sim { --sprite-x: 25%; }
+.ow-char[data-direction="right"] .character-portrait--sim { --sprite-x: 37.5%; }
+.ow-char[data-direction="right"].is-walking[data-walk-frame="1"] .character-portrait--sim { --sprite-x: 50%; }
+.ow-char[data-direction="back"] .character-portrait--sim { --sprite-x: 62.5%; }
+.ow-char[data-direction="back"].is-walking[data-walk-frame="1"] .character-portrait--sim { --sprite-x: 75%; }
+.ow-char[data-direction="left"] .character-portrait--sim { --sprite-x: 87.5%; }
+.ow-char[data-direction="left"].is-walking[data-walk-frame="1"] .character-portrait--sim { --sprite-x: 100%; }
 .ow-char-name { max-width: 74px; overflow: hidden; padding: 1px 5px; border-radius: 4px; color: var(--paper); background: color-mix(in srgb, var(--night) 62%, transparent); font: 700 10px/1.3 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .ow-char.is-selected .character-portrait--sim { outline: 2px dashed var(--aqua); outline-offset: 2px; }
 .ow-char::before { position: absolute; top: -6px; left: 50%; transform: translateX(-50%); display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; font: 900 10px/1 ui-monospace, monospace; z-index: 2; }
