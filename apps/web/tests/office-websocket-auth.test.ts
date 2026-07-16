@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   OfficeDeviceAuthRequiredError,
+  OfficeSessionUnavailableError,
   authenticateRemoteDevice,
   connectOfficeApi,
   openOfficeWebSocket,
@@ -9,12 +10,15 @@ import {
   shouldRecoverOfficeWebSocket,
 } from "../src/office-api.ts";
 import { connectChatApi } from "../src/chat-api.ts";
+import { initializeInventory, loadMoreSessions, sessionInventoryState } from "../src/inventory.ts";
+import { applyOfficeSnapshot, officeConnection, officeSnapshot, sessions, setOfficeError } from "../src/store.ts";
 
 test("simultaneous live event and chat expiry renew once and reconnect both transports", async () => {
   await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example", fastTimers: true }, async () => {
     const serverUrl = "https://office.example";
     let localBootstraps = 0;
     let renewals = 0;
+    let snapshotCalls = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input) => {
       const url = requestUrl(input);
@@ -22,7 +26,8 @@ test("simultaneous live event and chat expiry renew once and reconnect both tran
       if (url.endsWith("/api/v1/auth/local")) { localBootstraps += 1; return new Response(null, { status: 403 }); }
       if (url.endsWith("/api/v1/auth/device/renew")) { renewals += 1; return jsonResponse({ csrfToken: "f".repeat(32) }); }
       if (url.endsWith("/api/v1/health")) return jsonResponse({ ok: true, protocolVersion: 1, runtime: "ready" });
-      if (url.endsWith("/api/v1/snapshot")) return jsonResponse(snapshot());
+      if (url.endsWith("/api/v1/snapshot")) { snapshotCalls += 1; return jsonResponse(snapshot(snapshotCalls, 100, true)); }
+      if (url.includes("/api/v1/inventory?")) return jsonResponse({ kind: "sessions", profiles: [], sessions: [{ id: "session-101", profileId: "profile", title: "Session 101", activity: "idle" }], pagination: { returned: 1, available: 101, total: 101, hasMore: false, truncated: false, partialFailures: 0 } });
       throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
     const eventStates: string[] = [];
@@ -30,7 +35,7 @@ test("simultaneous live event and chat expiry renew once and reconnect both tran
     try {
       assert.deepEqual(await authenticateRemoteDevice("phone", "one-shot-secret", serverUrl), { ok: true });
       const office = connectOfficeApi({
-        onConnecting() {}, onSnapshot() {}, onError(message) { throw new Error(message); },
+        onConnecting() {}, onSnapshot(value, identity) { if (applyOfficeSnapshot(value, identity)) initializeInventory(value, identity); }, onError(message) { throw new Error(message); },
         onEventStream(state) { eventStates.push(state); }, onAuthRequired() { throw new Error("unexpected auth failure"); },
       }, serverUrl);
       const chat = connectChatApi({
@@ -52,10 +57,15 @@ test("simultaneous live event and chat expiry renew once and reconnect both tran
       BareWebSocket.byPath("/api/v1/chat")[1]!.open();
       assert.equal(localBootstraps, 1);
       assert.equal(renewals, 1);
+      await waitFor(() => snapshotCalls === 2 && sessionInventoryState.value.hasMore);
+      assert.equal(officeSnapshot.value?.sequence, 2);
+      await loadMoreSessions();
+      assert.equal(sessions.value.some((session) => session.storedSessionId === "session-101"), true);
       assert.equal(eventStates.filter((state) => state === "open").length, 2);
       assert.equal(chatStates.filter((state) => state === "ready").length, 2);
       chat.stop();
       office.stop();
+      sessions.value = [];
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -97,8 +107,98 @@ test("event and chat expiry share one bounded remote device renewal", async () =
   });
 });
 
-test("revoked and rate-limited renewal fail closed through one shared attempt", async () => {
-  for (const renewalStatus of [401, 429]) {
+test("a failed post-renew snapshot preserves LKG and explicit retry restores pagination", async () => {
+  await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example", fastTimers: true }, async () => {
+    const serverUrl = "https://office.example/recovery-snapshot";
+    let snapshotCalls = 0;
+    let failRecoverySnapshot = true;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/api/v1/auth/device")) return jsonResponse({ csrfToken: "7".repeat(32) });
+      if (url.endsWith("/api/v1/auth/local")) return new Response(null, { status: 403 });
+      if (url.endsWith("/api/v1/auth/device/renew")) return jsonResponse({ csrfToken: "8".repeat(32) });
+      if (url.endsWith("/api/v1/health")) return jsonResponse({ ok: true, protocolVersion: 1, runtime: "ready" });
+      if (url.endsWith("/api/v1/snapshot")) {
+        snapshotCalls += 1;
+        if (snapshotCalls === 2 && failRecoverySnapshot) return new Response(null, { status: 503 });
+        return jsonResponse(snapshot(snapshotCalls, 100, true));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+    try {
+      assert.deepEqual(await authenticateRemoteDevice("phone", "one-shot-secret", serverUrl), { ok: true });
+      const office = connectOfficeApi({
+        onConnecting() {},
+        onSnapshot(value, identity) { if (applyOfficeSnapshot(value, identity)) initializeInventory(value, identity); },
+        onEventStream() {}, onError(message) { throw new Error(message); },
+        onRecoveryUnavailable(message, url) { setOfficeError(message, url, true); },
+        onAuthRequired() { throw new Error("unexpected auth failure"); },
+      }, serverUrl);
+      await waitFor(() => BareWebSocket.byPath("/api/v1/events").length === 1 && officeSnapshot.value?.sequence === 1);
+      const firstEvent = BareWebSocket.byPath("/api/v1/events")[0]!;
+      firstEvent.open();
+      firstEvent.serverClose(1008, "Session expired");
+      await waitFor(() => snapshotCalls === 2 && officeConnection.value.state === "error");
+      assert.equal(officeSnapshot.value?.sequence, 1);
+      assert.equal(sessions.value.length, 100);
+      assert.equal(sessionInventoryState.value.hasMore, false);
+
+      failRecoverySnapshot = false;
+      office.retry();
+      await waitFor(() => officeSnapshot.value?.sequence === 3 && sessionInventoryState.value.hasMore);
+      assert.equal(sessions.value.length, 100);
+      office.stop();
+      sessions.value = [];
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("event recovery honors Retry-After, stays out of login, and snapshots after retry succeeds", async () => {
+  const timerDelays: number[] = [];
+  await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example", fastTimers: true, timerDelays }, async () => {
+    const serverUrl = "https://office.example/rate-limited-recovery";
+    let renewals = 0;
+    let snapshots = 0;
+    let authRequired = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/api/v1/auth/device")) return jsonResponse({ csrfToken: "4".repeat(32) });
+      if (url.endsWith("/api/v1/auth/local")) return new Response(null, { status: 403 });
+      if (url.endsWith("/api/v1/auth/device/renew")) {
+        renewals += 1;
+        return renewals === 1
+          ? new Response(null, { status: 429, headers: { "Retry-After": "60" } })
+          : jsonResponse({ csrfToken: "5".repeat(32) });
+      }
+      if (url.endsWith("/api/v1/health")) return jsonResponse({ ok: true, protocolVersion: 1, runtime: "ready" });
+      if (url.endsWith("/api/v1/snapshot")) { snapshots += 1; return jsonResponse(snapshot(snapshots)); }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+    try {
+      assert.deepEqual(await authenticateRemoteDevice("phone", "one-shot-secret", serverUrl), { ok: true });
+      const office = connectOfficeApi({
+        onConnecting() {}, onSnapshot() {}, onEventStream() {}, onError() {}, onRecoveryUnavailable() {},
+        onAuthRequired() { authRequired += 1; },
+      }, serverUrl);
+      await waitFor(() => BareWebSocket.byPath("/api/v1/events").length === 1);
+      BareWebSocket.byPath("/api/v1/events")[0]!.open();
+      BareWebSocket.byPath("/api/v1/events")[0]!.serverClose(1008, "Session expired");
+      await waitFor(() => renewals === 2 && snapshots === 2 && BareWebSocket.byPath("/api/v1/events").length === 2);
+      assert.equal(timerDelays.includes(60_000), true);
+      assert.equal(authRequired, 0);
+      office.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("401 and 403 renewal failures require login through one shared attempt", async () => {
+  for (const renewalStatus of [401, 403]) {
     await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example" }, async () => {
       const serverUrl = `https://office.example/failed-renew-${renewalStatus}`;
       let renewals = 0;
@@ -119,6 +219,45 @@ test("revoked and rate-limited renewal fail closed through one shared attempt", 
         ]);
         assert.equal(renewals, 1);
         assert.ok(results.every((result) => result.status === "rejected" && result.reason instanceof OfficeDeviceAuthRequiredError));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});
+
+test("network, timeout, 429, and 5xx renewal failures remain retryable", async () => {
+  const cases: Array<{ name: string; response?: Response; failure?: Error; retryAfterMs: number }> = [
+    { name: "network", failure: new TypeError("offline"), retryAfterMs: 0 },
+    { name: "timeout", failure: new DOMException("timed out", "AbortError"), retryAfterMs: 0 },
+    { name: "rate", response: new Response(null, { status: 429, headers: { "Retry-After": "60" } }), retryAfterMs: 60_000 },
+    { name: "server", response: new Response(null, { status: 503 }), retryAfterMs: 0 },
+  ];
+  for (const item of cases) {
+    await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example" }, async () => {
+      const serverUrl = `https://office.example/retryable-${item.name}`;
+      let renewals = 0;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/api/v1/auth/device")) return jsonResponse({ csrfToken: "9".repeat(32) });
+        if (url.endsWith("/api/v1/auth/local")) return new Response(null, { status: 403 });
+        if (url.endsWith("/api/v1/auth/device/renew")) {
+          renewals += 1;
+          if (item.failure) throw item.failure;
+          return item.response!;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }) as typeof fetch;
+      try {
+        assert.deepEqual(await authenticateRemoteDevice("phone", "one-shot-secret", serverUrl), { ok: true });
+        const lease = await openOfficeWebSocket("wss://office.example/api/v1/events", serverUrl);
+        const results = await Promise.allSettled([
+          recoverOfficeWebSocketAuthentication(serverUrl, lease.authRevision),
+          recoverOfficeWebSocketAuthentication(serverUrl, lease.authRevision),
+        ]);
+        assert.equal(renewals, 1);
+        assert.ok(results.every((result) => result.status === "rejected" && result.reason instanceof OfficeSessionUnavailableError && result.reason.retryAfterMs === item.retryAfterMs));
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -148,6 +287,23 @@ test("local cookie recovery rotates locally without using the device endpoint", 
       assert.notEqual(recovered.authRevision, lease.authRevision);
       assert.equal(localBootstraps, 2);
       assert.equal(renewals, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("local bootstrap 5xx remains unavailable instead of requesting device login", async () => {
+  await withBrowserEnvironment({ protocol: "http:", hostname: "127.0.0.1", origin: "http://127.0.0.1:4317" }, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch;
+    try {
+      const result = await Promise.allSettled([openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", "http://127.0.0.1:4317/local-503")]);
+      assert.equal(result[0]?.status, "rejected");
+      if (result[0]?.status === "rejected") {
+        assert.equal(result[0].reason instanceof OfficeSessionUnavailableError, true);
+        assert.equal(result[0].reason instanceof OfficeDeviceAuthRequiredError, false);
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -187,7 +343,7 @@ test("authenticated WebSocket leases reject cross-origin and non-Office targets 
   await assert.rejects(openOfficeWebSocket("wss://office.example/api/v1/chat?leak=1", "https://office.example"), /target is invalid/);
 });
 
-type BrowserLocation = { protocol: string; hostname: string; origin: string; desktopCapability?: string; fastTimers?: boolean };
+type BrowserLocation = { protocol: string; hostname: string; origin: string; desktopCapability?: string; fastTimers?: boolean; timerDelays?: number[] };
 
 async function withBrowserEnvironment(locationValue: BrowserLocation, run: () => Promise<void>): Promise<void> {
   const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
@@ -199,7 +355,10 @@ async function withBrowserEnvironment(locationValue: BrowserLocation, run: () =>
   Object.defineProperty(globalThis, "location", { configurable: true, value: locationValue });
   const browserWindow = {
     __TAURI_INTERNALS__: bridge,
-    setTimeout: (handler: TimerHandler, timeout?: number) => globalThis.setTimeout(handler, locationValue.fastTimers ? Math.min(timeout ?? 0, 1) : timeout),
+    setTimeout: (handler: TimerHandler, timeout?: number) => {
+      locationValue.timerDelays?.push(timeout ?? 0);
+      return globalThis.setTimeout(handler, locationValue.fastTimers ? Math.min(timeout ?? 0, 1) : timeout);
+    },
     clearTimeout: (timer: ReturnType<typeof setTimeout>) => globalThis.clearTimeout(timer),
   };
   BareWebSocket.created.length = 0;
@@ -258,18 +417,19 @@ function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
-function snapshot(): unknown {
+function snapshot(sequence = 1, sessionCount = 0, hasMore = false): unknown {
+  const snapshotSessions = Array.from({ length: sessionCount }, (_, index) => ({ id: `session-${index + 1}`, profileId: "profile", title: `Session ${index + 1}`, activity: "idle" }));
   return {
-    generatedAt: new Date(0).toISOString(), sequence: 1,
+    generatedAt: new Date(sequence).toISOString(), sequence,
     capabilities: {
       protocolVersion: 1, serverVersion: "test", runtime: { state: "ready", adapterVersion: "test" },
       access: { deviceId: "device-test", tier: "operator", exposure: "public", authentication: "device-cookie", allowedOperations: ["state.read"] },
       features: ["chat", "profiles"],
     },
-    profiles: [], sessions: [], boards: [],
+    profiles: [{ id: "profile", name: "Profile", activity: "idle", activeSessionCount: sessionCount }], sessions: snapshotSessions, boards: [],
     inventory: {
-      profiles: { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 },
-      sessions: { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 },
+      profiles: { returned: 1, available: 1, total: 1, hasMore: false, truncated: false, partialFailures: 0 },
+      sessions: { returned: sessionCount, available: hasMore ? sessionCount + 1 : sessionCount, total: hasMore ? sessionCount + 1 : sessionCount, hasMore, truncated: false, partialFailures: 0, ...(hasMore ? { nextCursor: `cursor-${sequence}` } : {}) },
     },
   };
 }

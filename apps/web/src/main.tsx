@@ -70,6 +70,7 @@ const officeApi = connectOfficeApi({
   },
   onEventStream: setOfficeEventStream,
   onAuthRequired: requireDeviceLogin,
+  onRecoveryUnavailable: (message, serverUrl) => setOfficeError(message, serverUrl, true),
   onError(message, serverUrl) {
     setOfficeError(message, serverUrl);
     if (isLocalOfficeClient(location)) setOfficeAuthenticated(serverUrl);

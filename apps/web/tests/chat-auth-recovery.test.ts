@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { connectChatApi, type ChatApiCallbacks } from "../src/chat-api.ts";
+import { OfficeDeviceAuthRequiredError, OfficeSessionUnavailableError } from "../src/office-api.ts";
+import { openSessionIds, reconnectChatSession, registerChatRuntime, sessions, setChatSessionError } from "../src/store.ts";
 
 test("chat renews an expired open lease once and reconnects with the replacement revision", async () => {
   const sockets: FakeWebSocket[] = [];
@@ -59,7 +61,7 @@ test("an upgrade 401 represented by pre-open error/1000 performs bounded authent
   api.stop();
 });
 
-test("revoked or rate-limited recovery enters authentication-required error without a reconnect loop", async () => {
+test("revoked recovery enters authentication-required error without a reconnect loop", async () => {
   const sockets: FakeWebSocket[] = [];
   const states: string[] = [];
   let recoveries = 0;
@@ -71,7 +73,7 @@ test("revoked or rate-limited recovery enters authentication-required error with
       sockets.push(socket);
       return { socket: socket as unknown as WebSocket, authRevision: revision };
     },
-    recoverAuthentication: async () => { recoveries += 1; throw new Error("device revoked"); },
+    recoverAuthentication: async () => { recoveries += 1; throw new OfficeDeviceAuthRequiredError(); },
     reconnectDelay: () => 0,
   });
 
@@ -90,6 +92,57 @@ test("revoked or rate-limited recovery enters authentication-required error with
   await waitFor(() => sockets.length === 2);
   sockets[1]!.open();
   assert.equal(states.at(-1), "ready");
+  api.stop();
+});
+
+test("temporary recovery honors Retry-After and reconnects without requesting device login", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const states: string[] = [];
+  const minimumDelays: number[] = [];
+  const api = connectChatApi(callbacks(states), {
+    serverUrl: "https://office.example",
+    openWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return { socket: socket as unknown as WebSocket, authRevision: sockets.length };
+    },
+    recoverAuthentication: async () => { throw new OfficeSessionUnavailableError("rate limited", 60_000); },
+    reconnectDelay: (_attempt, minimumDelayMs) => { minimumDelays.push(minimumDelayMs); return 0; },
+  });
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  sockets[0]!.serverClose(1008, "Session expired");
+  await waitFor(() => sockets.length === 2);
+  sockets[1]!.open();
+  assert.deepEqual(minimumDelays, [60_000]);
+  assert.equal(states.includes("ready"), true);
+  api.stop();
+});
+
+test("manual Office retry supersedes a pending chat recovery without opening a duplicate socket", async () => {
+  const sockets: FakeWebSocket[] = [];
+  let finishRecovery!: () => void;
+  const recovery = new Promise<void>((resolve) => { finishRecovery = resolve; });
+  const api = connectChatApi(callbacks([]), {
+    serverUrl: "https://office.example",
+    openWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return { socket: socket as unknown as WebSocket, authRevision: sockets.length };
+    },
+    recoverAuthentication: async () => await recovery,
+    reconnectDelay: () => 0,
+  });
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  sockets[0]!.serverClose(1008, "Session expired");
+  await flush();
+  api.retry();
+  await waitFor(() => sockets.length === 2);
+  finishRecovery();
+  await flush();
+  await flush();
+  assert.equal(sockets.length, 2);
   api.stop();
 });
 
@@ -120,7 +173,7 @@ test("persistent pre-open failures spend one auth check and then stop after a bo
   const states: string[] = [];
   let recoveries = 0;
   let revision = 31;
-  const api = connectChatApi(callbacks(states), {
+  const api = connectChatApi({ ...callbacks(states), onSessionError: setChatSessionError }, {
     serverUrl: "https://office.example",
     openWebSocket: async () => {
       const socket = new FakeWebSocket();
@@ -130,6 +183,9 @@ test("persistent pre-open failures spend one auth check and then stop after a bo
     recoverAuthentication: async () => { recoveries += 1; revision += 1; },
     reconnectDelay: () => 0,
   });
+  sessions.value = [{ id: "retry-client", profileId: "profile", title: "Retry", status: "ready", messages: [], connectionState: "connecting", historyState: "unloaded", remoteKind: "draft" }];
+  openSessionIds.value = ["retry-client"];
+  registerChatRuntime(api);
 
   for (let expected = 1; expected <= 3; expected += 1) {
     await waitFor(() => sockets.length === expected);
@@ -139,7 +195,14 @@ test("persistent pre-open failures spend one auth check and then stop after a bo
   await flush();
   assert.equal(recoveries, 1);
   assert.equal(sockets.length, 3);
+  assert.equal(sessions.value[0]?.connectionState, "error");
+  reconnectChatSession("retry-client");
+  await waitFor(() => sockets.length === 4);
+  sockets[3]!.open();
+  assert.equal(states.at(-1), "ready");
   api.stop();
+  sessions.value = [];
+  openSessionIds.value = [];
 });
 
 test("reconnect scheduling is single-timer and increases attempts after repeated open failures", async () => {
@@ -159,6 +222,20 @@ test("reconnect scheduling is single-timer and increases attempts after repeated
   await waitFor(() => opens === 3);
   assert.deepEqual(attempts, [0, 1]);
   socket.open();
+  api.stop();
+});
+
+test("repeated network bootstrap failures stop after the bounded reconnect budget", async () => {
+  const states: string[] = [];
+  let opens = 0;
+  const api = connectChatApi(callbacks(states), {
+    serverUrl: "https://office.example",
+    openWebSocket: async () => { opens += 1; throw new OfficeSessionUnavailableError("offline"); },
+    reconnectDelay: () => 0,
+  });
+  await waitFor(() => states.at(-1) === "error");
+  await flush();
+  assert.equal(opens, 6);
   api.stop();
 });
 

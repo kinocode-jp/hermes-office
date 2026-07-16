@@ -3,6 +3,7 @@ import {
   officeFetchJson,
   officeServerUrl,
   OfficeDeviceAuthRequiredError,
+  OfficeSessionUnavailableError,
   openOfficeWebSocket,
   recoverOfficeWebSocketAuthentication,
   shouldRecoverOfficeWebSocket,
@@ -52,7 +53,7 @@ export type ChatApiDependencies = {
   createWebSocket?: (url: string) => Promise<WebSocket>;
   openWebSocket?: (url: string, serverUrl: string) => Promise<OfficeWebSocketLease>;
   recoverAuthentication?: (serverUrl: string, rejectedAuthRevision: number) => Promise<void>;
-  reconnectDelay?: (attempt: number) => number;
+  reconnectDelay?: (attempt: number, minimumDelayMs: number) => number;
   fetchJson?: typeof officeFetchJson;
   randomId?: () => string;
 };
@@ -78,6 +79,7 @@ type LiveTarget = { clientSessionId: string; generation: number };
 const RPC_TIMEOUT_MS = 15_000;
 const HISTORY_TIMEOUT_MS = 10_000;
 const RECONNECT_MAX_MS = 8_000;
+const MAX_RECONNECT_ATTEMPTS = 5;
 const MAX_PREOPEN_WEBSOCKET_FAILURES = 3;
 const HISTORY_PAGE_LIMIT = 25;
 const MAX_HISTORY_PAGES = DEFAULT_CLIENT_HISTORY_LIMITS.maxPages;
@@ -88,7 +90,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     ? async (url: string) => ({ socket: await dependencies.createWebSocket!(url), authRevision: 0 })
     : openOfficeWebSocket);
   const recoverAuthentication = dependencies.recoverAuthentication ?? recoverOfficeWebSocketAuthentication;
-  const reconnectDelay = dependencies.reconnectDelay ?? ((attempt: number) => Math.min(RECONNECT_MAX_MS, 800 * (2 ** attempt)));
+  const reconnectDelay = dependencies.reconnectDelay ?? ((attempt: number, minimumDelayMs: number) => Math.max(minimumDelayMs, Math.min(RECONNECT_MAX_MS, 800 * (2 ** attempt))));
   const fetchJson = dependencies.fetchJson ?? officeFetchJson;
   const randomId = dependencies.randomId ?? (() => crypto.randomUUID());
   const targets = new Map<string, ActiveTarget>();
@@ -110,6 +112,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   let socketFailedBeforeOpen = false;
   let attemptedRecoveryRevision: number | undefined;
   let preOpenFailureCount = 0;
+  let transportHalted = false;
 
   const rejectPending = (message: string) => {
     for (const request of pending.values()) {
@@ -119,14 +122,22 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     pending.clear();
   };
 
-  const scheduleReconnect = () => {
-    if (stopped || reconnectTimer !== undefined) return;
-    const delay = reconnectDelay(reconnectAttempt);
+  const scheduleReconnect = (minimumDelayMs = 0): boolean => {
+    if (stopped || reconnectTimer !== undefined) return true;
+    if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) return false;
+    const delay = reconnectDelay(reconnectAttempt, minimumDelayMs);
     reconnectAttempt += 1;
     reconnectTimer = globalThis.setTimeout(() => {
       reconnectTimer = undefined;
       void openSocket();
     }, delay);
+    return true;
+  };
+
+  const haltTransport = (message: string) => {
+    transportHalted = true;
+    callbacks.onSocketState("error", message);
+    for (const clientSessionId of targets.keys()) callbacks.onSessionError(clientSessionId, message);
   };
 
   const handleClose = (event: CloseEvent) => {
@@ -151,25 +162,30 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     );
     if (stopped) return;
     if (ambiguousPreOpenFailure && preOpenFailureCount >= MAX_PREOPEN_WEBSOCKET_FAILURES) {
-      callbacks.onSocketState("error", "Chat WebSocketへ接続できませんでした。手動で再接続してください。");
+      haltTransport("Chat WebSocketへ接続できませんでした。手動で再接続してください。");
       return;
     }
     if (!needsAuthentication || rejectedRevision === undefined) {
-      scheduleReconnect();
+      if (!scheduleReconnect()) haltTransport("Chat WebSocketへ再接続できませんでした。手動で再接続してください。");
       return;
     }
     if (attemptedRecoveryRevision === rejectedRevision) {
-      callbacks.onSocketState("error", "端末の再認証が必要です。");
+      haltTransport("端末の再認証が必要です。");
       return;
     }
     attemptedRecoveryRevision = rejectedRevision;
     const recoveryGeneration = lifecycleGeneration;
     void recoverAuthentication(serverUrl, rejectedRevision).then(
-      () => { if (!stopped && lifecycleGeneration === recoveryGeneration) scheduleReconnect(); },
       () => {
+        if (!stopped && lifecycleGeneration === recoveryGeneration && !scheduleReconnect()) {
+          haltTransport("Chat Serverへ再接続できませんでした。手動で再接続してください。");
+        }
+      },
+      (error) => {
         if (stopped || lifecycleGeneration !== recoveryGeneration) return;
-        callbacks.onSocketState("error", "端末の再認証が必要です。");
-        for (const clientSessionId of targets.keys()) callbacks.onSessionError(clientSessionId, "端末の再認証が必要です。");
+        if (error instanceof OfficeDeviceAuthRequiredError) { haltTransport("端末の再認証が必要です。"); return; }
+        const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
+        if (!scheduleReconnect(retryAfterMs)) haltTransport("Chat Serverへ再接続できませんでした。手動で再接続してください。");
       },
     );
   };
@@ -237,8 +253,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (socketOpenAttempt !== attempt) return;
       socketOpening = false;
       socketOpenAttempt = undefined;
-      callbacks.onSocketState("error", errorText(error));
-      if (!(error instanceof OfficeDeviceAuthRequiredError)) scheduleReconnect();
+      if (error instanceof OfficeDeviceAuthRequiredError) haltTransport("端末の再認証が必要です。");
+      else {
+        callbacks.onSocketState("disconnected", errorText(error));
+        const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
+        if (!scheduleReconnect(retryAfterMs)) haltTransport("Chat Serverへ再接続できませんでした。手動で再接続してください。");
+      }
       return;
     }
     if (socketOpenAttempt !== attempt) { lease.socket.close(1000, "Superseded connection"); return; }
@@ -253,6 +273,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     nextSocket.addEventListener("open", () => {
       if (socket !== nextSocket || stopped) return;
       socketOpened = true;
+      transportHalted = false;
       preOpenFailureCount = 0;
       reconnectAttempt = 0;
       attemptedRecoveryRevision = undefined;
@@ -401,12 +422,37 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     }
   };
 
+  const restartTransport = (force: boolean): void => {
+    if (!force && !transportHalted) return;
+    stopped = false;
+    transportHalted = false;
+    lifecycleGeneration += 1;
+    socketOpenAttempt = undefined;
+    socketOpening = false;
+    if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    reconnectAttempt = 0;
+    attemptedRecoveryRevision = undefined;
+    preOpenFailureCount = 0;
+    rejectPending("Chat接続を再試行します。");
+    opening.clear();
+    liveToClient.clear();
+    const closingSocket = socket;
+    socket = undefined;
+    socketAuthRevision = undefined;
+    socketOpened = false;
+    socketFailedBeforeOpen = false;
+    closingSocket?.close();
+    void openSocket();
+  };
+
   void openSocket();
 
   return {
     ensureSession(target) {
       const existing = targets.get(target.clientSessionId);
       if (existing !== undefined && targetsMatch(existing.target, target)) {
+        restartTransport(false);
         void loadHistory(existing);
         void openRemoteSession(existing);
         return;
@@ -414,6 +460,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (existing !== undefined) deactivateTarget(existing);
       const active: ActiveTarget = { generation: ++nextGeneration, target: { ...target } };
       targets.set(target.clientSessionId, active);
+      restartTransport(false);
       void loadHistory(active);
       void openRemoteSession(active);
     },
@@ -453,25 +500,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       await rpc("approval.respond", { session_id: liveSessionId, approval_id: approvalId, choice });
     },
     retry() {
-      stopped = false;
-      lifecycleGeneration += 1;
-      socketOpenAttempt = undefined;
-      socketOpening = false;
-      if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
-      reconnectTimer = undefined;
-      reconnectAttempt = 0;
-      attemptedRecoveryRevision = undefined;
-      preOpenFailureCount = 0;
-      rejectPending("Chat接続を再試行します。");
-      opening.clear();
-      liveToClient.clear();
-      const closingSocket = socket;
-      socket = undefined;
-      socketAuthRevision = undefined;
-      socketOpened = false;
-      socketFailedBeforeOpen = false;
-      closingSocket?.close();
-      void openSocket();
+      restartTransport(true);
     },
     stop() {
       stopped = true;

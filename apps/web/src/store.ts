@@ -283,9 +283,8 @@ export function setOfficeEventStream(eventStream: OfficeConnection["eventStream"
   officeConnection.value = { ...officeConnection.value, eventStream };
 }
 
-export function setOfficeError(message: string, serverUrl: string): void {
-  clearRuntimeState();
-  officeSnapshot.value = undefined;
+export function setOfficeError(message: string, serverUrl: string, preserveRuntime = false): void {
+  if (!preserveRuntime) { clearRuntimeState(); officeSnapshot.value = undefined; }
   officeConnection.value = {
     ...officeConnection.value,
     state: "error",
