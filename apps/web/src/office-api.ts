@@ -1,5 +1,6 @@
 import type { OfficeRuntimeState, OfficeSnapshot } from "./domain";
 import { classifyDeviceLoginFailure, isLocalOfficeClient, normalizeDeviceName, type DeviceLoginFailure } from "./auth-state";
+import { createAuthenticatedOfficeWebSocket, desktopCapability, desktopCapabilityHeader } from "./desktop-transport";
 
 type HealthResponse = {
   ok: true;
@@ -44,8 +45,9 @@ export class OfficeDeviceAuthRequiredError extends Error {
 // drop into demo fallback during a normal first launch.
 const FETCH_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
-const officeSessions = new Map<string, Promise<{ csrfToken: string }>>();
-const officeSessionRefreshes = new Map<string, Promise<{ csrfToken: string }>>();
+type OfficeClientSession = { csrfToken: string; desktopCapability?: string };
+const officeSessions = new Map<string, Promise<OfficeClientSession>>();
+const officeSessionRefreshes = new Map<string, Promise<OfficeClientSession>>();
 let authRequiredObserver: ((serverUrl: string) => void) | undefined;
 
 export function officeServerUrl(): string {
@@ -65,6 +67,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
   authRequiredObserver = callbacks.onAuthRequired;
   let stopped = false;
   let socket: WebSocket | undefined;
+  let eventStreamOpening = false;
   let reconnectTimer: number | undefined;
   let refreshTimer: number | undefined;
 
@@ -105,10 +108,23 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
     refreshTimer = window.setTimeout(() => void loadSnapshot(false), 120);
   };
 
-  const openEvents = () => {
-    if (stopped) return;
+  const openEvents = async () => {
+    if (stopped || socket || eventStreamOpening) return;
+    eventStreamOpening = true;
     callbacks.onEventStream("connecting");
-    socket = new WebSocket(toWebSocketUrl(serverUrl));
+    let nextSocket: WebSocket;
+    try {
+      nextSocket = await createAuthenticatedOfficeWebSocket(toWebSocketUrl(serverUrl));
+    } catch (error) {
+      eventStreamOpening = false;
+      callbacks.onEventStream("closed");
+      callbacks.onError(errorMessage(error), serverUrl);
+      if (!stopped) reconnectTimer = window.setTimeout(() => void openEvents(), RECONNECT_DELAY_MS);
+      return;
+    }
+    eventStreamOpening = false;
+    if (stopped || socket) { nextSocket.close(1000, "Client stopped"); return; }
+    socket = nextSocket;
     socket.addEventListener("open", () => callbacks.onEventStream("open"));
     socket.addEventListener("message", (event) => {
       const message = parseEvent(event.data);
@@ -121,7 +137,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
     socket.addEventListener("close", () => {
       socket = undefined;
       callbacks.onEventStream("closed");
-      if (!stopped) reconnectTimer = window.setTimeout(openEvents, RECONNECT_DELAY_MS);
+      if (!stopped) reconnectTimer = window.setTimeout(() => void openEvents(), RECONNECT_DELAY_MS);
     });
     socket.addEventListener("error", () => socket?.close());
   };
@@ -129,7 +145,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
   const start = async () => {
     stopSocket();
     const available = await loadSnapshot(true);
-    if (available && !stopped) openEvents();
+    if (available && !stopped) void openEvents();
   };
 
   void start();
@@ -153,7 +169,7 @@ export async function officeFetchJson<T>(path: string, options: OfficeApiRequest
   }
   try {
     const session = await ensureOfficeSession(serverUrl);
-    return await requestOfficeJson<T>(url, options, session.csrfToken, serverUrl, true);
+    return await requestOfficeJson<T>(url, options, session, serverUrl, true);
   } catch (error) {
     if (error instanceof OfficeDeviceAuthRequiredError) authRequiredObserver?.(serverUrl);
     throw error;
@@ -188,7 +204,7 @@ export async function logoutRemoteDevice(serverUrl = officeServerUrl()): Promise
   officeSessionRefreshes.delete(serverUrl);
 }
 
-async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, csrfToken: string, serverUrl: string, retryAuth: boolean): Promise<T> {
+async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, session: OfficeClientSession, serverUrl: string, retryAuth: boolean): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS);
   const method = options.method ?? "GET";
@@ -199,14 +215,15 @@ async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, 
       signal: controller.signal,
       headers: {
         Accept: "application/json",
+        ...desktopCapabilityHeader(session.desktopCapability),
         ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(method === "GET" ? {} : { "X-CSRF-Token": csrfToken })
+        ...(method === "GET" || session.desktopCapability !== undefined ? {} : { "X-CSRF-Token": session.csrfToken })
       },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
     });
     if (response.status === 401 && retryAuth) {
-      const replacement = await recoverOfficeSession(serverUrl, csrfToken);
-      return await requestOfficeJson<T>(url, options, replacement.csrfToken, serverUrl, false);
+      const replacement = await recoverOfficeSession(serverUrl, session.csrfToken);
+      return await requestOfficeJson<T>(url, options, replacement, serverUrl, false);
     }
     if (!response.ok) throw new Error(`Office Server returned HTTP ${response.status}.`);
     return await response.json() as T;
@@ -215,7 +232,7 @@ async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, 
   }
 }
 
-function ensureOfficeSession(serverUrl: string): Promise<{ csrfToken: string }> {
+function ensureOfficeSession(serverUrl: string): Promise<OfficeClientSession> {
   const current = officeSessions.get(serverUrl);
   if (current) return current;
   const pending = bootstrapLocalSession(serverUrl).catch((error) => {
@@ -226,7 +243,7 @@ function ensureOfficeSession(serverUrl: string): Promise<{ csrfToken: string }> 
   return pending;
 }
 
-function refreshOfficeSession(serverUrl: string): Promise<{ csrfToken: string }> {
+function refreshOfficeSession(serverUrl: string): Promise<OfficeClientSession> {
   const current = officeSessionRefreshes.get(serverUrl);
   if (current) return current;
   officeSessions.delete(serverUrl);
@@ -239,7 +256,7 @@ function refreshOfficeSession(serverUrl: string): Promise<{ csrfToken: string }>
   return pending;
 }
 
-async function recoverOfficeSession(serverUrl: string, rejectedCsrfToken: string): Promise<{ csrfToken: string }> {
+async function recoverOfficeSession(serverUrl: string, rejectedCsrfToken: string): Promise<OfficeClientSession> {
   const current = officeSessions.get(serverUrl);
   if (current) {
     const session = await current;
@@ -248,7 +265,9 @@ async function recoverOfficeSession(serverUrl: string, rejectedCsrfToken: string
   return await refreshOfficeSession(serverUrl);
 }
 
-async function bootstrapLocalSession(serverUrl: string): Promise<{ csrfToken: string }> {
+async function bootstrapLocalSession(serverUrl: string): Promise<OfficeClientSession> {
+  const capability = await desktopCapability();
+  if (capability !== undefined) return { csrfToken: "desktop-capability", desktopCapability: capability };
   const response = await fetch(`${serverUrl}/api/v1/auth/local`, {
     method: "POST",
     credentials: "include",

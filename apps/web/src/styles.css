@@ -145,18 +145,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .pod-4 { left: 67%; top: 62%; }
 .office-floor.is-crowded .profile-pod { transform: scale(var(--pod-scale, .82)); transform-origin: left top; }
 .office-floor.is-crowded .profile-pod:hover, .office-floor.is-crowded .profile-pod.is-selected { transform: scale(var(--pod-scale, .82)) translateY(-3px); }
-.desk { position: absolute; left: 20px; top: 36px; width: 98px; height: 38px; background: #30445c; transform: skewY(-2deg); box-shadow: 0 9px 0 #0c1521; }
+.desk { position: absolute; left: 47px; top: 36px; width: 72px; height: 38px; background: #30445c; transform: skewY(-2deg); box-shadow: 0 9px 0 #0c1521; }
 .desk-edge { position: absolute; inset: auto 0 -6px; height: 6px; background: #18283c; }
-.monitor { position: absolute; left: 35px; top: -23px; width: 35px; height: 25px; border: 4px solid #0a111c; background: #172a36; box-shadow: 0 4px 0 #0a111c; }
+.monitor { position: absolute; left: 21px; top: -23px; width: 35px; height: 25px; border: 4px solid #0a111c; background: #172a36; box-shadow: 0 4px 0 #0a111c; }
 .monitor-lines { position: absolute; inset: 4px; background: repeating-linear-gradient(to bottom, var(--agent-color) 0 1px, transparent 1px 4px); opacity: .75; }
-.agent { position: absolute; left: 5px; top: 34px; width: 28px; height: 48px; z-index: 2; }
-.agent-head { position: absolute; left: 6px; width: 18px; height: 18px; background: #d6a986; box-shadow: 0 -5px 0 #101827, 4px -3px 0 #101827; }
-.agent-body { position: absolute; left: 3px; top: 19px; width: 24px; height: 24px; background: var(--agent-color); box-shadow: -3px 21px 0 -1px #182334, 9px 21px 0 -1px #182334; }
 .desk-lamp { position: absolute; left: 104px; top: 23px; width: 9px; height: 9px; background: var(--agent-color); box-shadow: 0 0 20px 8px color-mix(in srgb, var(--agent-color) 26%, transparent); z-index: 3; }
-.pod-label { position: absolute; left: 40px; top: 83px; display: flex; align-items: baseline; gap: 5px; }
+.character-portrait { display: block; overflow: hidden; background-color: #17283c; background-image: url("/characters/hermes-office-character-sheet.webp"); background-repeat: no-repeat; background-size: 400% 300%; }
+.character-portrait--pod { position: absolute; left: 2px; top: 16px; width: 58px; height: 58px; border: 1px solid rgba(243,232,209,.24); box-shadow: 5px 6px 0 rgba(5,10,18,.38); z-index: 2; }
+.character-portrait--pod::after, .character-portrait--panel::after { content: ""; position: absolute; inset: 0; border: 1px solid rgba(255,255,255,.08); background: linear-gradient(145deg, rgba(255,255,255,.09), transparent 38%, rgba(5,10,18,.06)); pointer-events: none; }
+.pod-label { position: absolute; left: 2px; top: 84px; display: flex; align-items: baseline; gap: 5px; max-width: 128px; }
 .pod-name { font: 900 13px/1 "Arial Black", sans-serif; }
-.pod-role { color: var(--muted); font: 500 8px/1 ui-monospace, monospace; text-transform: uppercase; }
-.pod-meta { position: absolute; left: 40px; top: 103px; display: flex; align-items: center; gap: 6px; color: var(--muted); font: 500 8px/1 ui-monospace, monospace; }
+.pod-role { overflow: hidden; color: var(--muted); font: 500 8px/1 ui-monospace, monospace; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.pod-meta { position: absolute; left: 2px; top: 103px; display: flex; align-items: center; gap: 6px; color: var(--muted); font: 500 8px/1 ui-monospace, monospace; }
 
 .status-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 5px; color: var(--muted); border: 1px solid var(--line); font: 600 8px/1 ui-monospace, monospace; text-transform: uppercase; white-space: nowrap; }
 .status-pill::before { content: ""; width: 5px; height: 5px; background: currentColor; }
@@ -171,12 +171,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .legend-light.waiting { color: var(--amber); }
 
 .profile-panel { grid-area: panel; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--panel); z-index: 35; }
-.profile-panel-head { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 72px; padding: 12px; border-bottom: 1px solid var(--line); }
+.profile-panel-head { display: grid; grid-template-columns: 66px minmax(0, 1fr) auto; align-items: center; gap: 11px; min-height: 90px; padding: 12px; border-bottom: 1px solid var(--line); }
 .profile-panel-head h2 { margin: 0; font: 900 17px/1 "Arial Black", sans-serif; letter-spacing: -.04em; }
 .profile-panel-head p { margin: 4px 0 0; color: var(--muted); font: 500 9px/1 ui-monospace, monospace; text-transform: uppercase; }
-.portrait { --agent-color: var(--aqua); position: relative; width: 40px; height: 44px; background: rgba(243,232,209,.05); border: 1px solid var(--line); }
-.portrait i { position: absolute; left: 13px; top: 7px; width: 14px; height: 14px; background: #d6a986; box-shadow: 0 -4px 0 #080e17; }
-.portrait b { position: absolute; left: 9px; bottom: 4px; width: 22px; height: 18px; background: var(--agent-color); }
+.character-portrait--panel { position: relative; width: 64px; height: 64px; border: 1px solid rgba(85,214,190,.42); box-shadow: 5px 5px 0 rgba(5,10,18,.42); }
 .mobile-close { display: none; }
 .panel-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }
 .panel-tabs button { min-height: 40px; padding: 0 3px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font: 600 9px/1 ui-monospace, monospace; cursor: pointer; }
@@ -390,17 +388,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .profile-pod, .profile-pod:hover, .profile-pod.is-selected { position: relative; inset: auto; display: grid; grid-template-columns: 68px minmax(0, 1fr); grid-template-rows: 1fr auto; width: 100%; height: 88px; padding: 10px; border: 1px solid var(--line); background: var(--draft); transform: none; }
   .office-floor.is-crowded .profile-pod, .office-floor.is-crowded .profile-pod:hover, .office-floor.is-crowded .profile-pod.is-selected { left: auto !important; top: auto !important; transform: none; }
   .profile-pod.is-selected::after { inset: -1px; border: 1px solid var(--aqua); }
-  .profile-pod .desk { left: 11px; top: 37px; width: 52px; height: 20px; }
-  .profile-pod .monitor { left: 19px; top: -16px; width: 25px; height: 17px; border-width: 3px; }
-  .profile-pod .agent { left: 5px; top: 24px; transform: scale(.68); transform-origin: left top; }
+  .profile-pod .desk { display: none; }
+  .profile-pod .character-portrait--pod { left: 9px; top: 9px; width: 68px; height: 68px; box-shadow: 4px 4px 0 rgba(5,10,18,.32); }
   .profile-pod .desk-lamp { left: 54px; top: 27px; }
-  .profile-pod .pod-label { position: static; grid-column: 2; display: grid; gap: 4px; align-self: center; }
+  .profile-pod .pod-label { position: static; grid-column: 2; display: grid; gap: 4px; max-width: none; align-self: center; }
   .profile-pod .pod-name { font-size: 16px; }
   .profile-pod .pod-role { font-size: 9px; }
   .profile-pod .pod-meta { position: static; grid-column: 2; gap: 8px; align-self: end; }
   .profile-panel { position: fixed; inset: 0; display: none; z-index: 80; border: 0; }
   .profile-panel.is-mobile-open { display: block; }
-  .profile-panel-head { grid-template-columns: 36px 42px minmax(0, 1fr) auto; min-height: 70px; }
+  .profile-panel-head { grid-template-columns: 36px 58px minmax(0, 1fr) auto; min-height: 82px; }
+  .character-portrait--panel { width: 56px; height: 56px; }
   .mobile-close { display: block; min-width: 34px; min-height: 34px; border: 1px solid var(--line); background: transparent; }
   .workspace-drawer { position: fixed; inset: 52px 0 58px; display: none; z-index: 70; }
   .workspace-drawer.is-mobile-open { display: block; }

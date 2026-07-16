@@ -1,5 +1,6 @@
 import type { Profile } from "../domain";
 import { assignTask, selectProfile, selectedProfileId, tasks } from "../store";
+import { CharacterPortrait } from "./character-portrait";
 import { StatusPill } from "./status-pill";
 import { TaskCables, type TaskCable } from "./task-cables";
 
@@ -41,10 +42,7 @@ function ProfilePod({ profile, index, crowded, columnCount, rowCount }: { profil
         </span>
         <span class="desk-edge" />
       </span>
-      <span class="agent">
-        <span class="agent-head" />
-        <span class="agent-body" />
-      </span>
+      <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--pod" decorative />
       <span class="pod-label">
         <span class="pod-name">{profile.name}</span>
         <span class="pod-role">{profile.role}</span>

@@ -33,6 +33,8 @@ export interface OfficeServerOptions {
   maxWebSocketClients?: number;
   runtimeSource?: HermesRuntimeSource;
   remoteToken?: string;
+  desktopCapability?: string;
+  desktopOrigins?: readonly string[];
   staticWebRoot?: string;
 }
 
@@ -59,6 +61,8 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   let publishAudit = (_record: OfficeAuditRecord): void => {};
   const auth = new OfficeAuth({
     ...(options.remoteToken === undefined ? {} : { remoteToken: options.remoteToken }),
+    ...(options.desktopCapability === undefined ? {} : { desktopCapability: options.desktopCapability }),
+    ...(options.desktopOrigins === undefined ? {} : { desktopOrigins: options.desktopOrigins }),
     onAudit: (record) => publishAudit(record),
   });
 
@@ -182,7 +186,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     if (request.method === "OPTIONS") {
       response.writeHead(204, {
         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, X-CSRF-Token",
+        "Access-Control-Allow-Headers": "Content-Type, X-CSRF-Token, X-Hermes-Office-Desktop-Capability",
         "Access-Control-Max-Age": "600",
       });
       response.end();

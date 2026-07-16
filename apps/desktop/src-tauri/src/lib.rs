@@ -14,13 +14,23 @@ const OFFICE_HOST: &str = "127.0.0.1";
 const OFFICE_PORT: u16 = 4317;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(debug_assertions)]
+const DEBUG_DESKTOP_CAPABILITY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 struct OfficeServerProcess(Mutex<Option<Child>>);
+struct DesktopCapability(String);
+
+#[tauri::command]
+fn desktop_capability(state: tauri::State<'_, DesktopCapability>) -> String {
+    state.0.clone()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(OfficeServerProcess(Mutex::new(None)))
+        .manage(DesktopCapability(generate_desktop_capability()))
+        .invoke_handler(tauri::generate_handler![desktop_capability])
         .setup(|app| {
             // `tauri dev` already starts Office Server through beforeDevCommand.
             // The bundled release owns exactly one sidecar process itself.
@@ -67,6 +77,7 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         &hermes_candidates(home.as_deref()),
     )
     .ok_or("Hermes Agent was not found in a known absolute install path.")?;
+    let desktop_capability = app.state::<DesktopCapability>().0.clone();
 
     let mut command = Command::new(node);
     command
@@ -75,6 +86,7 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         .env("HERMES_OFFICE_PORT", OFFICE_PORT.to_string())
         .env("HERMES_OFFICE_HERMES_MODE", "managed")
         .env("HERMES_OFFICE_HERMES_EXECUTABLE", hermes)
+        .env("HERMES_OFFICE_DESKTOP_CAPABILITY", desktop_capability)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -82,6 +94,26 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         command.current_dir(directory);
     }
     Ok(command.spawn()?)
+}
+
+fn generate_desktop_capability() -> String {
+    #[cfg(debug_assertions)]
+    return DEBUG_DESKTOP_CAPABILITY.to_owned();
+
+    #[cfg(not(debug_assertions))]
+    random_desktop_capability()
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn random_desktop_capability() -> String {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).expect("operating system random source is unavailable");
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn ensure_office_port_available() -> Result<(), Box<dyn std::error::Error>> {
@@ -233,5 +265,20 @@ mod tests {
         assert!(hermes_candidates(None)
             .iter()
             .all(|path| path.is_absolute()));
+    }
+
+    #[test]
+    fn desktop_capabilities_are_url_safe_and_launch_scoped() {
+        let first = random_desktop_capability();
+        let second = random_desktop_capability();
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_capability_matches_the_dev_server_contract() {
+        assert_eq!(generate_desktop_capability(), DEBUG_DESKTOP_CAPABILITY);
     }
 }

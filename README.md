@@ -51,6 +51,8 @@ npm run dev:desktop
 Implemented runtime features include:
 
 - real Profile and stored Session discovery;
+- a generated 12-cell character roster with deterministic Profile mapping and
+  a fallback portrait for newly added Profiles;
 - up to four simultaneous chat panes, stored history, streaming prompts, steering,
   interruption, reconnect, and tool-event display;
 - the real Hermes Kanban board with card creation, status changes, Profile
@@ -117,11 +119,17 @@ npm run build --workspace @hermes-office/desktop
 The macOS build produces the Hermes Office application and DMG. In release mode the
 Tauri shell starts the bundled Office Server module automatically, using the Node
 runtime installed with Hermes Agent when available, and terminates it when the app
-exits. Development mode continues to use the root `npm run dev` processes.
+exits. Release builds generate an in-memory desktop capability on every launch.
+Development mode uses an explicitly local-only fixed capability shared by the Tauri
+IPC command and `beforeDevCommand`; normal browser development continues to use the
+loopback cookie session.
 
 ## Security boundary
 
 - Hermes and Office tokens never cross into browser DTOs.
+- The Tauri shell mints a random launch-scoped desktop capability and passes it
+  to its WebView only through in-memory Tauri IPC. The Server accepts it only
+  from an exact Tauri origin over loopback; it is never written to storage.
 - Local bootstrap requires a loopback socket plus an exact local/Tauri Origin and
   Host, and rejects forwarded requests.
 - Remote authentication is disabled unless a valid token is configured, compares

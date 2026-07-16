@@ -8,6 +8,9 @@ const MAX_AUDIT_RECORDS = 256;
 const REMOTE_ATTEMPT_WINDOW_MS = 60_000;
 const MAX_REMOTE_ATTEMPTS = 5;
 const MAX_RATE_LIMIT_KEYS = 256;
+const DESKTOP_CAPABILITY_HEADER = "x-hermes-office-desktop-capability";
+const DESKTOP_PROTOCOL_PREFIX = "hermes-office.desktop.";
+const DEFAULT_DESKTOP_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] as const;
 
 export interface OfficePrincipal {
   id: string;
@@ -38,6 +41,8 @@ export interface OfficeAuditRecord extends OfficePublicAuditRecord {
 
 export interface OfficeAuthOptions {
   remoteToken?: string;
+  desktopCapability?: string;
+  desktopOrigins?: readonly string[];
   onAudit?: (record: OfficeAuditRecord) => void;
 }
 
@@ -57,17 +62,35 @@ interface AttemptWindow {
 export class OfficeAuth {
   readonly #sessions = new Map<string, StoredSession>();
   readonly #remoteTokenDigest: Buffer | undefined;
+  readonly #desktopCapabilityDigest: Buffer | undefined;
+  readonly #desktopSession: OfficeAuthSession | undefined;
+  readonly #desktopOrigins: ReadonlySet<string>;
   readonly #onAudit: ((record: OfficeAuditRecord) => void) | undefined;
   readonly #audit: OfficeAuditRecord[] = [];
   readonly #attempts = new Map<string, AttemptWindow>();
 
   constructor(options: OfficeAuthOptions = {}) {
+    this.#desktopOrigins = validateDesktopOrigins(options.desktopOrigins ?? DEFAULT_DESKTOP_ORIGINS);
     const remoteToken = options.remoteToken;
     if (remoteToken !== undefined) {
       if (remoteToken.length < 32 || remoteToken.length > 4_096 || remoteToken.includes("\0")) {
         throw new Error("Remote access token must contain 32 to 4096 characters.");
       }
       this.#remoteTokenDigest = secretDigest(remoteToken);
+    }
+    const desktopCapability = options.desktopCapability;
+    if (desktopCapability !== undefined) {
+      if (!isValidDesktopCapability(desktopCapability)) {
+        throw new Error("Desktop capability must contain 32 to 256 URL-safe characters.");
+      }
+      this.#desktopCapabilityDigest = secretDigest(desktopCapability);
+      this.#desktopSession = {
+        principal: { id: "local-desktop", tier: "owner", local: true, deviceName: "Local desktop" },
+        // Desktop mutations are protected by the launch-scoped capability and
+        // an exact Tauri origin check, rather than a cross-site cookie CSRF token.
+        csrfToken: randomBytes(24).toString("base64url"),
+        expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+      };
     }
     this.#onAudit = options.onAudit;
   }
@@ -115,6 +138,8 @@ export class OfficeAuth {
   }
 
   authenticate(request: IncomingMessage): OfficeAuthSession | undefined {
+    const desktop = this.#authenticateDesktop(request);
+    if (desktop !== undefined) return desktop;
     this.#prune();
     const rawToken = readCookie(request.headers.cookie, COOKIE_NAME);
     if (rawToken === undefined || rawToken.length > 128) return undefined;
@@ -123,10 +148,28 @@ export class OfficeAuth {
   }
 
   authorizeMutation(request: IncomingMessage): OfficeAuthSession | undefined {
+    const desktop = this.#authenticateDesktop(request);
+    if (desktop !== undefined) return desktop;
     const session = this.authenticate(request);
     const supplied = request.headers["x-csrf-token"];
     if (session === undefined || typeof supplied !== "string") return undefined;
     return safeEqual(supplied, session.csrfToken) ? session : undefined;
+  }
+
+  #authenticateDesktop(request: IncomingMessage): OfficeAuthSession | undefined {
+    if (this.#desktopCapabilityDigest === undefined || this.#desktopSession === undefined) return undefined;
+    if (!isTrustedDesktopRequest(request, this.#desktopOrigins)) return undefined;
+    const supplied = readDesktopCapability(request);
+    if (supplied === undefined || !isValidDesktopCapability(supplied)) return undefined;
+    return timingSafeEqual(secretDigest(supplied), this.#desktopCapabilityDigest)
+      ? {
+          ...this.#desktopSession,
+          principal: { ...this.#desktopSession.principal },
+          // The capability itself is launch-scoped. Keep individual WebSocket
+          // leases bounded while allowing a long-running desktop app to renew.
+          expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+        }
+      : undefined;
   }
 
   readAudit(session: OfficeAuthSession): { records: OfficePublicAuditRecord[] } | undefined {
@@ -285,6 +328,40 @@ function isTrustedLocalRequest(request: IncomingMessage): boolean {
     && request.headers["x-forwarded-for"] === undefined
     && request.headers["x-forwarded-host"] === undefined
     && request.headers["x-real-ip"] === undefined;
+}
+
+function isTrustedDesktopRequest(request: IncomingMessage, allowedOrigins: ReadonlySet<string>): boolean {
+  if (!isLoopbackAddress(request.socket.remoteAddress)) return false;
+  if (request.headers.origin === undefined || !allowedOrigins.has(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  return request.headers.forwarded === undefined
+    && request.headers["x-forwarded-for"] === undefined
+    && request.headers["x-forwarded-host"] === undefined
+    && request.headers["x-real-ip"] === undefined;
+}
+
+function validateDesktopOrigins(values: readonly string[]): ReadonlySet<string> {
+  const origins = new Set<string>();
+  for (const value of values) {
+    if (!isTrustedLocalOrigin(value)) throw new Error("Desktop origins must be explicit trusted local origins.");
+    origins.add(value);
+  }
+  if (origins.size === 0) throw new Error("At least one desktop origin is required.");
+  return origins;
+}
+
+function readDesktopCapability(request: IncomingMessage): string | undefined {
+  const header = request.headers[DESKTOP_CAPABILITY_HEADER];
+  if (typeof header === "string") return header;
+  const protocol = request.headers["sec-websocket-protocol"];
+  if (typeof protocol !== "string" || protocol.length > 512) return undefined;
+  for (const candidate of protocol.split(",").map((value) => value.trim())) {
+    if (candidate.startsWith(DESKTOP_PROTOCOL_PREFIX)) return candidate.slice(DESKTOP_PROTOCOL_PREFIX.length);
+  }
+  return undefined;
+}
+
+function isValidDesktopCapability(value: string): boolean {
+  return value.length >= 32 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value);
 }
 
 function isTrustedLocalHost(value: string | undefined): boolean {

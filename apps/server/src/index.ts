@@ -8,6 +8,10 @@ const configuredOrigins = process.env.HERMES_OFFICE_ALLOWED_ORIGINS
   ?.split(",")
   .map((origin) => origin.trim())
   .filter((origin) => origin.length > 0);
+const desktopOrigins = process.env.HERMES_OFFICE_DESKTOP_ORIGINS
+  ?.split(",")
+  .map((origin) => origin.trim())
+  .filter((origin) => origin.length > 0);
 
 const hermesMode = process.env.HERMES_OFFICE_HERMES_MODE ?? "managed";
 const runtimeSource = hermesMode === "demo"
@@ -26,6 +30,8 @@ const server = createOfficeServer({
   ...(configuredOrigins === undefined ? {} : { allowedOrigins: configuredOrigins }),
   allowNonLoopback: process.env.HERMES_OFFICE_ALLOW_NON_LOOPBACK === "true",
   ...(process.env.HERMES_OFFICE_REMOTE_TOKEN === undefined ? {} : { remoteToken: process.env.HERMES_OFFICE_REMOTE_TOKEN }),
+  ...(process.env.HERMES_OFFICE_DESKTOP_CAPABILITY === undefined ? {} : { desktopCapability: process.env.HERMES_OFFICE_DESKTOP_CAPABILITY }),
+  ...(desktopOrigins === undefined ? {} : { desktopOrigins }),
   ...(process.env.HERMES_OFFICE_WEB_ROOT === undefined ? {} : { staticWebRoot: process.env.HERMES_OFFICE_WEB_ROOT }),
   ...(runtimeSource === undefined ? {} : { runtimeSource }),
 });

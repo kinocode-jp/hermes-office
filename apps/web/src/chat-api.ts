@@ -1,5 +1,6 @@
 import type { ApprovalChoice, ChatMessage } from "./domain";
 import { officeFetchJson, officeServerUrl } from "./office-api";
+import { createAuthenticatedOfficeWebSocket } from "./desktop-transport";
 
 export type ChatTarget = {
   clientSessionId: string;
@@ -64,6 +65,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
   const historyLoads = new Set<string>();
   const loadedHistories = new Set<string>();
   let socket: WebSocket | undefined;
+  let socketOpening = false;
   let stopped = false;
   let reconnectAttempt = 0;
   let reconnectTimer: number | undefined;
@@ -82,7 +84,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     reconnectAttempt += 1;
     reconnectTimer = window.setTimeout(() => {
       reconnectTimer = undefined;
-      openSocket();
+      void openSocket();
     }, delay);
   };
 
@@ -145,10 +147,21 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     request.resolve(frame.result);
   };
 
-  const openSocket = () => {
-    if (stopped || socket) return;
+  const openSocket = async () => {
+    if (stopped || socket || socketOpening) return;
+    socketOpening = true;
     callbacks.onSocketState("connecting");
-    const nextSocket = new WebSocket(chatWebSocketUrl(serverUrl));
+    let nextSocket: WebSocket;
+    try {
+      nextSocket = await createAuthenticatedOfficeWebSocket(chatWebSocketUrl(serverUrl));
+    } catch (error) {
+      socketOpening = false;
+      callbacks.onSocketState("error", errorText(error));
+      scheduleReconnect();
+      return;
+    }
+    socketOpening = false;
+    if (stopped || socket) { nextSocket.close(1000, "Client stopped"); return; }
     socket = nextSocket;
     nextSocket.addEventListener("open", () => {
       if (socket !== nextSocket || stopped) return;
@@ -248,7 +261,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     }
   };
 
-  openSocket();
+  void openSocket();
 
   return {
     ensureSession(target) {
@@ -298,7 +311,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
       rejectPending("Chat接続を再試行します。");
       socket?.close();
       socket = undefined;
-      openSocket();
+      void openSocket();
     },
     stop() {
       stopped = true;

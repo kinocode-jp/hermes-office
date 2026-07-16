@@ -11,6 +11,7 @@ import {
   settingsTab
 } from "../store";
 import { StatusPill } from "./status-pill";
+import { CharacterPortrait } from "./character-portrait";
 
 const tabs: { id: InspectorTab; label: string }[] = [
   { id: "chat", label: "会話" },
@@ -96,7 +97,7 @@ export function ProfilePanel() {
     <aside class={`profile-panel ${mobileInspectorOpen.value ? "is-mobile-open" : ""}`} aria-label="Profile詳細">
       <header class="profile-panel-head">
         <button class="mobile-close" onClick={() => { mobileInspectorOpen.value = false; }} aria-label="閉じる">←</button>
-        <span class="portrait" style={{ "--agent-color": profile.color }}><i /><b /></span>
+        <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--panel" />
         <div><h2>{profile.name}</h2><p>{profile.role}</p></div>
         <StatusPill status={profile.status} />
       </header>
