@@ -34,6 +34,102 @@ test("a durable pending resume cannot be closed before its live identity binds",
   assert.equal(hermes.isLive("live-pending"), true);
 });
 
+test("a guessed live close cannot race ahead of its pending resume on the same socket", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+
+  client.rpc(3, "session.resume", { session_id: "pending-only", profile: "coder" });
+  await settle();
+  client.rpc(4, "session.close", { session_id: "live-pending" });
+  await settle();
+  assert.equal(client.errorCode(4), -32000);
+  assert.deepEqual(hermes.sessionCloseRequests, []);
+
+  hermes.resolvePendingOnly();
+  await settle(4);
+  assert.equal(client.errorCode(3), undefined);
+  assert.ok(coordinator.ownerForLive("live-pending"));
+  assert.equal(hermes.isLive("live-pending"), true);
+});
+
+test("another socket cannot close a guessed live id while resume is pending", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const owner = new FakeWebSocket();
+  const other = new FakeWebSocket();
+  handleOfficeChatConnection(owner as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(other as unknown as WebSocket, dependencies);
+  await settle();
+
+  owner.rpc(5, "session.resume", { session_id: "pending-only", profile: "coder" });
+  await settle();
+  other.rpc(6, "session.close", { session_id: "live-pending" });
+  await settle();
+  assert.equal(other.errorCode(6), -32000);
+  assert.deepEqual(hermes.sessionCloseRequests, []);
+
+  hermes.resolvePendingOnly();
+  await settle(4);
+  assert.equal(owner.errorCode(5), undefined);
+  assert.ok(coordinator.ownerForLive("live-pending"));
+  assert.equal(hermes.isLive("live-pending"), true);
+});
+
+test("unknown live and durable ids never reach explicit upstream close", async () => {
+  const { hermes, dependencies } = setup();
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+
+  client.rpc(7, "session.close", { session_id: "unknown-live" });
+  client.rpc(8, "session.close", { session_id: "unknown-durable" });
+  await settle(4);
+  assert.equal(client.errorCode(7), -32000);
+  assert.equal(client.errorCode(8), -32000);
+  assert.deepEqual(hermes.sessionCloseRequests, []);
+});
+
+test("an owned durable alias closes its authoritative live session", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+  client.rpc(9, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle();
+  client.rpc(10, "session.close", { session_id: "parent" });
+  await settle(4);
+
+  assert.equal(client.errorCode(10), undefined);
+  assert.deepEqual(hermes.sessionCloseRequests, ["live-old"]);
+  assert.equal(hermes.isLive("live-old"), false);
+  assert.equal(coordinator.ownerForLive("live-old"), undefined);
+});
+
+test("an owned close reservation blocks rebind after a lease release TOCTOU", () => {
+  const coordinator = new ChatSessionCoordinator();
+  const oldOwner = {};
+  const first = coordinator.claimCreate(oldOwner, "coder");
+  assert.equal(coordinator.bind(first, { storedSessionId: "stored", liveSessionId: "live" }, true), "bound");
+  const snapshot = coordinator.leaseForSession(oldOwner, "live");
+  assert.ok(snapshot);
+  const closeToken = coordinator.claimOwnedLeaseClose(oldOwner, snapshot);
+  assert.ok(closeToken);
+  assert.equal(coordinator.releaseLease(oldOwner, snapshot.token), true);
+
+  const racingOwner = {};
+  const racing = coordinator.claimResume(racingOwner, "coder", "stored");
+  assert.ok(racing);
+  assert.equal(coordinator.bind(racing, { storedSessionId: "stored", liveSessionId: "live" }, false), "conflict");
+  assert.equal(coordinator.ownerForLive("live"), undefined);
+
+  coordinator.finishOwnedLeaseClose(snapshot, closeToken);
+  const retry = coordinator.claimResume(racingOwner, "coder", "stored");
+  assert.ok(retry);
+  assert.equal(coordinator.bind(retry, { storedSessionId: "stored", liveSessionId: "live" }, false), "bound");
+  assert.equal(coordinator.ownerForLive("live"), racingOwner);
+});
+
 test("a late duplicate result is closed after its old bound lease was explicitly closed", async () => {
   const { hermes, coordinator, dependencies } = setup();
   const client = new FakeWebSocket();

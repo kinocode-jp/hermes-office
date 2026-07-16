@@ -586,6 +586,7 @@ class LegacyMultiLiveCoordinator extends ChatSessionCoordinator {
   readonly #owner: ChatSessionOwner;
   readonly #token = Symbol("legacy-multi-live");
   readonly #liveIds: string[];
+  #closeToken: symbol | undefined;
   released = false;
 
   constructor(owner: ChatSessionOwner, liveIds: string[]) {
@@ -610,6 +611,16 @@ class LegacyMultiLiveCoordinator extends ChatSessionCoordinator {
     if (owner !== this.#owner || token !== this.#token || this.released) return false;
     this.released = true;
     return true;
+  }
+
+  override claimOwnedLeaseClose(owner: ChatSessionOwner, snapshot: ChatSessionLeaseSnapshot): symbol | undefined {
+    if (owner !== this.#owner || snapshot.token !== this.#token || this.released || this.#closeToken !== undefined) return undefined;
+    this.#closeToken = Symbol("legacy-close");
+    return this.#closeToken;
+  }
+
+  override finishOwnedLeaseClose(_snapshot: ChatSessionLeaseSnapshot, token: symbol): void {
+    if (this.#closeToken === token) this.#closeToken = undefined;
   }
 
   #snapshot(): ChatSessionLeaseSnapshot {

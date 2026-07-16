@@ -71,6 +71,9 @@ export class ChatUpstreamHub {
     internal?: HermesChatInternalRequestOptions,
   ): Promise<HermesChatResult> {
     if (this.#stopping) throw new Error("Chat hub is stopping.");
+    if (request.method === "session.close") {
+      throw new Error("Explicit session close requires Office ownership.");
+    }
     if (!this.#subscribers.has(owner) && this.#coordinator.ownedLiveSessionIds(owner).length === 0) {
       throw new Error("Chat owner is detached.");
     }
@@ -133,10 +136,7 @@ export class ChatUpstreamHub {
   async closeOwnedSession(owner: ChatSessionOwner, sessionId: string): Promise<HermesChatResult> {
     const lease = this.#coordinator.leaseForSession(owner, sessionId);
     if (lease === undefined) {
-      const result = await this.request(owner, { method: "session.close", params: { session_id: sessionId } });
-      if (typeof result.value.closed !== "boolean") throw new Error("Hermes returned an invalid close result.");
-      this.discardBufferedSession(sessionId);
-      return result;
+      throw new Error("Hermes session is not owned by this Office connection.");
     }
     if (lease.liveSessionIds.length === 0) {
       // A durable-only lease represents create/resume I/O that has not yet
@@ -181,23 +181,29 @@ export class ChatUpstreamHub {
     maxAttempts: number,
     targetSessionId?: string,
   ): Promise<{ completed: boolean; targetResult?: HermesChatResult }> {
+    const closeToken = this.#coordinator.claimOwnedLeaseClose(owner, lease);
+    if (closeToken === undefined) return { completed: false };
     const remaining = new Set(lease.liveSessionIds);
     let targetResult: HermesChatResult | undefined;
-    for (let attempt = 0; attempt < maxAttempts && remaining.size > 0; attempt += 1) {
-      for (const liveId of [...remaining]) {
-        this.discardBufferedSession(liveId);
-        try {
-          const result = await this.request(owner, { method: "session.close", params: { session_id: liveId } });
-          if (typeof result.value.closed !== "boolean") continue;
-          remaining.delete(liveId);
-          if (liveId === targetSessionId) targetResult = result;
-        } catch { /* Keep the whole lease fail-closed and retry unresolved IDs. */ }
+    try {
+      for (let attempt = 0; attempt < maxAttempts && remaining.size > 0; attempt += 1) {
+        for (const liveId of [...remaining]) {
+          this.discardBufferedSession(liveId);
+          try {
+            const result = await this.#requestUnchecked({ method: "session.close", params: { session_id: liveId } });
+            if (typeof result.value.closed !== "boolean") continue;
+            remaining.delete(liveId);
+            if (liveId === targetSessionId) targetResult = result;
+          } catch { /* Keep the whole lease fail-closed and retry unresolved IDs. */ }
+        }
       }
+      if (remaining.size > 0) return { completed: false };
+      this.#coordinator.releaseLease(owner, lease.token);
+      for (const liveId of lease.liveSessionIds) this.discardBufferedSession(liveId);
+      return { completed: true, ...(targetResult === undefined ? {} : { targetResult }) };
+    } finally {
+      this.#coordinator.finishOwnedLeaseClose(lease, closeToken);
     }
-    if (remaining.size > 0) return { completed: false };
-    this.#coordinator.releaseLease(owner, lease.token);
-    for (const liveId of lease.liveSessionIds) this.discardBufferedSession(liveId);
-    return { completed: true, ...(targetResult === undefined ? {} : { targetResult }) };
   }
 
   async close(): Promise<void> {

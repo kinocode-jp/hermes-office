@@ -151,6 +151,26 @@ export class ChatSessionCoordinator {
     return true;
   }
 
+  claimOwnedLeaseClose(owner: ChatSessionOwner, snapshot: ChatSessionLeaseSnapshot): symbol | undefined {
+    const lease = this.#leases.get(snapshot.token);
+    if (lease?.owner !== owner || lease.liveIds.size !== snapshot.liveSessionIds.length
+      || snapshot.liveSessionIds.length === 0) return undefined;
+    for (const liveId of snapshot.liveSessionIds) {
+      if (this.#live.get(liveId) !== lease || this.#closingLive.has(liveId)) return undefined;
+    }
+    const token = Symbol("chat-owned-live-close");
+    // Keep this reservation even if the lease is released while Hermes I/O is
+    // pending, so the same live id cannot bind to a replacement lease.
+    for (const liveId of snapshot.liveSessionIds) this.#closingLive.set(liveId, token);
+    return token;
+  }
+
+  finishOwnedLeaseClose(snapshot: ChatSessionLeaseSnapshot, token: symbol): void {
+    for (const liveId of snapshot.liveSessionIds) {
+      if (this.#closingLive.get(liveId) === token) this.#closingLive.delete(liveId);
+    }
+  }
+
   claimUnownedLiveClose(liveSessionId: string): symbol | undefined {
     if (this.#live.has(liveSessionId) || this.#closingLive.has(liveSessionId)) return undefined;
     const token = Symbol("chat-live-close");

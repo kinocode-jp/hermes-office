@@ -273,6 +273,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       sessionCoordinator.releaseFailedClaim(sessionClaim);
       const promoted = restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
+      if (closed) cleanupOwnedSessions();
       sendRpcError(send, frame.id, -32000, "Hermes request failed.");
     }
   };
