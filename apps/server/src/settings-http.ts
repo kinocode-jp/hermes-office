@@ -1,4 +1,9 @@
 import type { IncomingMessage } from "node:http";
+import {
+  GLOBAL_SETTINGS_MAX_REQUEST_UTF8_BYTES,
+  GLOBAL_SETTINGS_MAX_SKILLS,
+  isGlobalContextWithinBudget,
+} from "@hermes-office/protocol";
 import type {
   HermesSettingsAdapter,
   OfficeGlobalSettingsStore,
@@ -37,14 +42,14 @@ export async function routeSettingsHttp(
     if (url.pathname === "/api/v1/settings/global") {
       if (request.method === "GET") return ok(await (dependencies.globalInheritance?.read() ?? dependencies.globalSettings.read()));
       if (request.method === "PATCH") {
-        const body = await readObject(request, maxBodyBytes);
+        const body = await readObject(request, Math.min(maxBodyBytes, GLOBAL_SETTINGS_MAX_REQUEST_UTF8_BYTES));
         assertOnlyKeys(body, ["expectedRevision", "sharedSkillsEnabled", "sharedContextEnabled", "skills", "context"]);
         const update = {
           expectedRevision: requiredInteger(body.expectedRevision, "expectedRevision", 0),
           ...(body.sharedSkillsEnabled === undefined ? {} : { sharedSkillsEnabled: requiredBoolean(body.sharedSkillsEnabled, "sharedSkillsEnabled") }),
           ...(body.sharedContextEnabled === undefined ? {} : { sharedContextEnabled: requiredBoolean(body.sharedContextEnabled, "sharedContextEnabled") }),
-          ...(body.skills === undefined ? {} : { skills: requiredStringArray(body.skills, "skills", 1_000) }),
-          ...(body.context === undefined ? {} : { context: requiredString(body.context, "context", 256 * 1024, true) }),
+          ...(body.skills === undefined ? {} : { skills: requiredStringArray(body.skills, "skills", GLOBAL_SETTINGS_MAX_SKILLS) }),
+          ...(body.context === undefined ? {} : { context: requiredGlobalContext(body.context) }),
         };
         const updated = dependencies.globalInheritance === undefined
           ? await dependencies.globalSettings.update(update)
@@ -187,6 +192,7 @@ function assertOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly st
 function requiredBoolean(value: unknown, name: string): boolean { if (typeof value !== "boolean") throw fieldError(name); return value; }
 function requiredInteger(value: unknown, name: string, min: number): number { if (typeof value !== "number" || !Number.isInteger(value) || value < min) throw fieldError(name); return value; }
 function requiredString(value: unknown, name: string, maxBytes: number, allowEmpty = false): string { if (typeof value !== "string" || (!allowEmpty && value.trim() === "") || value.includes("\0") || Buffer.byteLength(value) > maxBytes) throw fieldError(name); return value; }
+function requiredGlobalContext(value: unknown): string { if (typeof value !== "string" || !isGlobalContextWithinBudget(value)) throw fieldError("context"); return value; }
 function requiredRevision(value: unknown): string { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) throw fieldError("expectedRevision"); return value; }
 function requiredStringArray(value: unknown, name: string, maxItems: number): string[] { if (!Array.isArray(value) || value.length > maxItems || !value.every((item) => typeof item === "string")) throw fieldError(name); return [...value] as string[]; }
 function requiredSettingsValues(value: unknown): Record<string, boolean | string> { if (!isRecord(value) || Object.keys(value).length > 100) throw fieldError("values"); const result: Record<string, boolean | string> = {}; for (const [key, item] of Object.entries(value)) { if (typeof item !== "boolean" && typeof item !== "string") throw fieldError(`values.${key}`); result[key] = item; } return result; }

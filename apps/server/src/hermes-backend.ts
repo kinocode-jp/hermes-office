@@ -13,7 +13,7 @@ import type {
 } from "@hermes-office/protocol";
 import { OFFICE_PROTOCOL_VERSION } from "./demo-state.js";
 import { createHermesChatTransport, type HermesChatTransport } from "./hermes-chat.js";
-import { createHermesChildEnvironment } from "./hermes-child-environment.js";
+import { createHermesChildEnvironment, discardHermesChildOutput } from "./hermes-child-environment.js";
 import { createHermesKanbanHttpRequester, HermesKanbanAdapter } from "./hermes-kanban.js";
 import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import { HermesProfileBackendPool } from "./hermes-profile-pool.js";
@@ -43,7 +43,7 @@ export interface HermesRuntimeSource {
   status(): RuntimeStatus;
   snapshot(): Promise<OfficeSnapshot>;
   close(): Promise<void>;
-  chat(): HermesChatTransport;
+  chat(options?: { maxEventBytes?: number }): HermesChatTransport;
   kanban(): HermesKanbanAdapter;
   settings?(): HermesSettingsAdapter;
   globalSettings?(): OfficeGlobalSettingsStore;
@@ -69,6 +69,8 @@ export class HermesBackend implements HermesRuntimeSource {
       executable: options.executable?.trim() || "hermes",
       ...(options.startTimeoutMs === undefined ? {} : { startTimeoutMs: options.startTimeoutMs }),
       ...(options.maxProfileBackends === undefined ? {} : { maxBackends: options.maxProfileBackends }),
+      isKnownProfile: async (profile) => recordArray(await this.#requestJson("/api/profiles"), "profiles")
+        .some((item) => item.name === profile),
     });
     this.#globalSettings = new OfficeGlobalSettingsStore(
       options.globalSettingsPath ?? join(homedir(), ".hermes-office", "global-settings.json"),
@@ -84,9 +86,17 @@ export class HermesBackend implements HermesRuntimeSource {
     return { ...this.#state };
   }
 
-  chat(): HermesChatTransport {
+  chat(options: { maxEventBytes?: number } = {}): HermesChatTransport {
     const { baseUrl, token } = this.#connectionConfig();
-    return createHermesChatTransport({ baseUrl, sessionToken: token });
+    const maxEventBytes = options.maxEventBytes;
+    return createHermesChatTransport({
+      baseUrl,
+      sessionToken: token,
+      ...(maxEventBytes === undefined ? {} : {
+        maxFrameBytes: Math.max(4_096, maxEventBytes),
+        maxTextBytes: Math.max(1_024, maxEventBytes - 2_048),
+      }),
+    });
   }
 
   kanban(): HermesKanbanAdapter {
@@ -278,6 +288,7 @@ async function waitForReadyPort(child: ManagedChild, timeoutMs: number): Promise
       child.stderr.removeAllListeners("data");
       child.removeListener("error", onError);
       child.removeListener("exit", onExit);
+      discardHermesChildOutput(child);
       if (error !== undefined) reject(error);
       else resolve(port!);
     };

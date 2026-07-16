@@ -40,8 +40,8 @@ They do not make direct public binding a supported deployment.
 - Cookie-authenticated mutations require a matching CSRF token.
 - The Tauri path requires an exact Tauri origin and a random launch-scoped
   desktop capability supplied to the WebView through Tauri IPC.
-- A remote enrollment token can be spent once per server process through a
-  configured loopback HTTPS proxy. The comparison uses a digest and
+- A remote enrollment token can be spent once per configured token generation
+  through a configured loopback HTTPS proxy. The comparison uses a digest and
   constant-time equality; attempts are rate-limited globally, per client, and
   per credential digest in bounded maps.
 - Enrollment creates a separate long-lived device credential with a fixed

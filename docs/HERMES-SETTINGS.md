@@ -50,6 +50,12 @@ selection and shared context separately from every Hermes home. It uses:
 - bounded content and strict skill names;
 - rejection of likely credentials in shared context.
 
+The protocol defines one 64 KiB JSON wire budget for a global update and the
+later `session.create` seed. Shared context may occupy at most 48 KiB after JSON
+escaping, leaving a 16 KiB envelope reserve; at most 64 global skills may be
+selected. The server store, HTTP route, chat adapter, and Web byte counter all
+consume these same protocol constants.
+
 `GlobalInheritanceCoordinator` materializes the selected global skills through
 the official profile-pinned skills API. It records the exact profile/skill pairs
 that Office changed from disabled to enabled. A later global removal disables

@@ -1,3 +1,5 @@
+import type { Readable } from "node:stream";
+
 const INHERITED_ENVIRONMENT_KEYS = [
   "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "LANG", "LANGUAGE",
@@ -24,4 +26,10 @@ export function createHermesChildEnvironment(
   environment.HERMES_DESKTOP = "1";
   environment.TERMINAL_CWD = overrides.cwd;
   return environment;
+}
+
+/** Keep child pipes flowing without retaining or exposing potentially sensitive logs. */
+export function discardHermesChildOutput(child: { stdout: Readable; stderr: Readable }): void {
+  child.stdout.resume();
+  child.stderr.resume();
 }

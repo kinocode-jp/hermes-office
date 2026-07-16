@@ -1,6 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import {
+  GLOBAL_SETTINGS_MAX_SKILLS,
+  isGlobalContextWithinBudget,
+} from "@hermes-office/protocol";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -460,8 +464,8 @@ export class OfficeGlobalSettingsStore {
 function validateGlobal(value: unknown): OfficeGlobalSettingsDto {
   if (!isRecord(value) || !Number.isInteger(value.revision) || (value.revision as number) < 0 || typeof value.sharedSkillsEnabled !== "boolean" || typeof value.sharedContextEnabled !== "boolean" || !Array.isArray(value.skills) || typeof value.context !== "string" || typeof value.updatedAt !== "string") throw new HermesSettingsError("rejected", "Global settings are invalid.");
   const skills = value.skills.map((item) => requiredName(item, "global skill"));
-  if (skills.length > 1_000 || new Set(skills).size !== skills.length) throw invalid("Global skill selection is invalid.");
-  if (Buffer.byteLength(value.context) > 256 * 1024 || value.context.includes("\0") || containsLikelySecret(value.context)) throw invalid("Global context is invalid or contains a possible secret.");
+  if (skills.length > GLOBAL_SETTINGS_MAX_SKILLS || new Set(skills).size !== skills.length) throw invalid("Global skill selection is invalid.");
+  if (!isGlobalContextWithinBudget(value.context) || containsLikelySecret(value.context)) throw invalid("Global context is invalid, too large, or contains a possible secret.");
   if (Number.isNaN(Date.parse(value.updatedAt))) throw new HermesSettingsError("rejected", "Global settings timestamp is invalid.");
   const sync = isRecord(value.skillSync) ? value.skillSync : { state: "ready", failures: [] };
   const state = sync.state === "pending" ? "pending" : "ready";

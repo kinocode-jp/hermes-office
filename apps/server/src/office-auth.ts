@@ -417,7 +417,8 @@ export class OfficeAuth {
     } catch {
       if (fileDescriptor !== undefined) try { closeSync(fileDescriptor); } catch { /* best effort */ }
       try { unlinkSync(temporary); } catch { /* best effort */ }
-      // A write failure never expands access. Process-local enrollment remains one-time.
+      // A write failure never expands access. This token generation remains
+      // consumed in memory even when durable registry persistence fails.
       return false;
     }
   }

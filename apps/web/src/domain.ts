@@ -1,3 +1,5 @@
+import type { Operation } from "@hermes-office/protocol";
+
 export type ProfileStatus = "working" | "waiting" | "idle" | "blocked";
 
 export type Profile = {
@@ -141,7 +143,7 @@ export type OfficeSnapshot = {
       tier: "viewer" | "operator" | "manager" | "owner";
       exposure: "loopback" | "tailnet" | "public";
       authentication: "desktop-capability" | "local-cookie" | "device-cookie" | "tailscale-identity" | "oidc";
-      allowedOperations: string[];
+      allowedOperations: Operation[];
     };
   };
   profiles: OfficeSnapshotProfile[];

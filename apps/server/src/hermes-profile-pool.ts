@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import type { HermesProfileBackendAccess } from "./hermes-settings.js";
-import { createHermesChildEnvironment } from "./hermes-child-environment.js";
+import { HermesSettingsError, type HermesProfileBackendAccess } from "./hermes-settings.js";
+import { createHermesChildEnvironment, discardHermesChildOutput } from "./hermes-child-environment.js";
 
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 type ManagedChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -12,6 +12,7 @@ export interface HermesProfileBackendPoolOptions {
   startTimeoutMs?: number;
   maxBackends?: number;
   cwd?: string;
+  isKnownProfile?: (profile: string) => Promise<boolean>;
 }
 
 interface PoolEntry extends HermesProfileBackendAccess {
@@ -21,9 +22,11 @@ interface PoolEntry extends HermesProfileBackendAccess {
 
 /** Small LRU pool for Hermes APIs whose scope is the process HERMES_HOME. */
 export class HermesProfileBackendPool {
-  readonly #options: Required<HermesProfileBackendPoolOptions>;
+  readonly #options: Required<Omit<HermesProfileBackendPoolOptions, "isKnownProfile">>
+    & Pick<HermesProfileBackendPoolOptions, "isKnownProfile">;
   readonly #entries = new Map<string, PoolEntry>();
   readonly #starts = new Map<string, Promise<PoolEntry>>();
+  #allocationTail = Promise.resolve();
   #closed = false;
 
   constructor(options: HermesProfileBackendPoolOptions) {
@@ -33,12 +36,16 @@ export class HermesProfileBackendPool {
       startTimeoutMs: bounded(options.startTimeoutMs, 20_000, 1_000, 60_000),
       maxBackends: bounded(options.maxBackends, 4, 1, 16),
       cwd: options.cwd ?? process.cwd(),
+      ...(options.isKnownProfile === undefined ? {} : { isKnownProfile: options.isKnownProfile }),
     };
   }
 
   async resolve(profile: string): Promise<HermesProfileBackendAccess> {
     if (this.#closed) throw new Error("Hermes profile backend pool is closed.");
     if (!PROFILE_PATTERN.test(profile)) throw new Error("Hermes profile name is invalid.");
+    if (this.#options.isKnownProfile !== undefined && !await this.#options.isKnownProfile(profile)) {
+      throw new HermesSettingsError("not_found", "Hermes profile does not exist.");
+    }
     const existing = this.#entries.get(profile);
     if (existing !== undefined && existing.child.exitCode === null) {
       existing.lastUsed = Date.now();
@@ -48,15 +55,14 @@ export class HermesProfileBackendPool {
     const starting = this.#starts.get(profile);
     if (starting !== undefined) return publicAccess(await starting);
 
-    const promise = this.#start(profile);
-    this.#starts.set(profile, promise);
-    try { return publicAccess(await promise); }
-    finally { this.#starts.delete(profile); }
+    const allocation = await this.#allocate(profile);
+    return publicAccess(await allocation.promise);
   }
 
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    await this.#allocationTail;
     await Promise.allSettled([...this.#starts.values()]);
     const entries = [...this.#entries.values()];
     this.#entries.clear();
@@ -64,7 +70,6 @@ export class HermesProfileBackendPool {
   }
 
   async #start(profile: string): Promise<PoolEntry> {
-    if (this.#entries.size >= this.#options.maxBackends) await this.#evictOldest();
     const sessionToken = randomBytes(32).toString("base64url");
     const child = spawn(
       this.#options.executable,
@@ -83,9 +88,56 @@ export class HermesProfileBackendPool {
     });
     if (this.#closed) { await stopChild(child); throw new Error("Hermes profile backend pool is closed."); }
     const entry: PoolEntry = { child, baseUrl: `http://127.0.0.1:${port}`, sessionToken, lastUsed: Date.now() };
-    this.#entries.set(profile, entry);
     child.once("exit", () => { if (this.#entries.get(profile)?.child === child) this.#entries.delete(profile); });
     return entry;
+  }
+
+  async #allocate(profile: string): Promise<{ promise: Promise<PoolEntry> }> {
+    const previous = this.#allocationTail;
+    let release!: () => void;
+    this.#allocationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      if (this.#closed) throw new Error("Hermes profile backend pool is closed.");
+      const existing = this.#entries.get(profile);
+      if (existing !== undefined && existing.child.exitCode === null) {
+        existing.lastUsed = Date.now();
+        return { promise: Promise.resolve(existing) };
+      }
+      if (existing !== undefined) this.#entries.delete(profile);
+      const starting = this.#starts.get(profile);
+      if (starting !== undefined) return { promise: starting };
+
+      while (this.#entries.size + this.#starts.size >= this.#options.maxBackends) {
+        if (this.#entries.size > 0) {
+          await this.#evictOldest();
+        } else {
+          await Promise.race([...this.#starts.values()].map(async (start) => {
+            try { await start; } catch { /* A failed start releases its slot. */ }
+          }));
+        }
+        if (this.#closed) throw new Error("Hermes profile backend pool is closed.");
+      }
+
+      const started = this.#start(profile);
+      let tracked!: Promise<PoolEntry>;
+      tracked = started.then(
+        (entry) => {
+          if (this.#starts.get(profile) === tracked) this.#starts.delete(profile);
+          if (entry.child.exitCode !== null) throw new Error("Hermes profile process exited during startup.");
+          this.#entries.set(profile, entry);
+          return entry;
+        },
+        (error: unknown) => {
+          if (this.#starts.get(profile) === tracked) this.#starts.delete(profile);
+          throw error;
+        },
+      );
+      this.#starts.set(profile, tracked);
+      return { promise: tracked };
+    } finally {
+      release();
+    }
   }
 
   async #evictOldest(): Promise<void> {
@@ -109,6 +161,7 @@ async function waitForReadyPort(child: ManagedChild, timeoutMs: number): Promise
       child.stderr.removeListener("data", inspect);
       child.removeListener("error", onError);
       child.removeListener("exit", onExit);
+      discardHermesChildOutput(child);
       if (error !== undefined) reject(error); else resolve(port!);
     };
     const inspect = (chunk: Buffer): void => {

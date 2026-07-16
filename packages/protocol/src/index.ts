@@ -8,6 +8,32 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 
+/**
+ * Global context crosses the settings HTTP boundary and is later embedded in
+ * a `session.create` JSON-RPC frame. Keep one wire contract for every layer.
+ * The context count is its UTF-8 size after JSON string escaping; the reserve
+ * leaves room for the settings/RPC envelope and bounded skill selection.
+ */
+export const GLOBAL_SETTINGS_MAX_REQUEST_UTF8_BYTES = 64 * 1024;
+export const GLOBAL_CONTEXT_ENVELOPE_RESERVE_UTF8_BYTES = 16 * 1024;
+export const GLOBAL_CONTEXT_MAX_UTF8_BYTES =
+  GLOBAL_SETTINGS_MAX_REQUEST_UTF8_BYTES - GLOBAL_CONTEXT_ENVELOPE_RESERVE_UTF8_BYTES;
+export const GLOBAL_SETTINGS_MAX_SKILLS = 64;
+
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+/** UTF-8 bytes occupied by the context inside a JSON string, excluding quotes. */
+export function globalContextUtf8Bytes(value: string): number {
+  const encoded = JSON.stringify(value);
+  return utf8ByteLength(encoded.slice(1, -1));
+}
+
+export function isGlobalContextWithinBudget(value: string): boolean {
+  return !value.includes("\0") && globalContextUtf8Bytes(value) <= GLOBAL_CONTEXT_MAX_UTF8_BYTES;
+}
+
 export type ProtocolVersion = typeof PROTOCOL_VERSION;
 export type IsoDateTime = string;
 export type EntityId = string;

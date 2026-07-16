@@ -1,0 +1,215 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import test from "node:test";
+import { WebSocket } from "ws";
+import type { HermesRuntimeSource } from "./hermes-backend.js";
+import type { HermesChatEvent, HermesChatRequest } from "./hermes-chat.js";
+import { ChatDeviceRateLimiter, handleOfficeChatConnection, serializeOfficeChatEvent } from "./chat-gateway.js";
+import { OfficeAuth, type OfficeAuthSession } from "./office-auth.js";
+
+const REMOTE_SESSION: OfficeAuthSession = {
+  principal: { id: "device-test", tier: "operator", local: false, deviceName: "Test device" },
+  csrfToken: "c".repeat(32), expiresAt: "2099-01-01T00:00:00.000Z",
+};
+
+test("event serialization truncates UTF-8 safely within the exact envelope budget", () => {
+  const boundaryEvent: HermesChatEvent = { type: "message.complete", sessionId: "s-boundary", payload: { text: "境界🦊", role: "assistant" } };
+  const exactBoundary = JSON.stringify({ jsonrpc: "2.0", method: "event", params: boundaryEvent });
+  assert.equal(serializeOfficeChatEvent(boundaryEvent, Buffer.byteLength(exactBoundary)), exactBoundary);
+  assert.ok(Buffer.byteLength(serializeOfficeChatEvent(boundaryEvent, Buffer.byteLength(exactBoundary) - 1)) <= Buffer.byteLength(exactBoundary) - 1);
+
+  const event: HermesChatEvent = { type: "message.complete", sessionId: "s-1", payload: { text: "🦊日本語".repeat(2_000), role: "assistant" } };
+  const body = serializeOfficeChatEvent(event, 1_024);
+  assert.ok(Buffer.byteLength(body) <= 1_024);
+  const parsed = JSON.parse(body) as { params: { type: string; payload: { text?: string; truncated?: boolean; role?: string } } };
+  assert.equal(parsed.params.type, "message.complete");
+  assert.equal(parsed.params.payload.truncated, true);
+  assert.equal(parsed.params.payload.role, "assistant");
+  assert.equal(parsed.params.payload.text?.includes("�"), false);
+
+  const approval = serializeOfficeChatEvent({
+    type: "approval.request", sessionId: "s-2",
+    payload: { command: "実行🦊".repeat(2_000), description: "説明", choices: ["once", "deny"], allowPermanent: false },
+  }, 1_024);
+  const approvalPayload = (JSON.parse(approval) as { params: { payload: { choices: string[]; description: string; truncated: boolean } } }).params.payload;
+  assert.deepEqual(approvalPayload.choices, ["once", "deny"]);
+  assert.equal(approvalPayload.description, "説明");
+  assert.equal(approvalPayload.truncated, true);
+});
+
+test("gateway delivers a bounded multibyte event instead of silently dropping it", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publish = onEvent; return connection(); }),
+    maxJsonBytes: 1_024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+  });
+  await flush();
+  publish({ type: "tool.progress", sessionId: "s-1", payload: { name: "browser", summary: "進捗🦊".repeat(2_000), status: "running" } });
+  const eventBody = client.sent.at(-1)!;
+  assert.ok(Buffer.byteLength(eventBody) <= 1_024);
+  const event = JSON.parse(eventBody) as { method: string; params: { type: string; payload: { truncated?: boolean; status?: string } } };
+  assert.equal(event.method, "event");
+  assert.equal(event.params.type, "tool.progress");
+  assert.equal(event.params.payload.status, "running");
+  assert.equal(event.params.payload.truncated, true);
+});
+
+test("approval and clarification remain exact-socket, one-shot, expiring, and disconnect-bounded", async () => {
+  let now = 1_000;
+  const callbacks: Array<(event: HermesChatEvent) => void> = [];
+  const requests: HermesChatRequest[][] = [[], []];
+  const closes = [0, 0];
+  let connectionIndex = 0;
+  const runtime = runtimeWithConnections((onEvent) => {
+    const index = connectionIndex++;
+    callbacks[index] = onEvent;
+    return {
+      closed: false,
+      request: async (request: HermesChatRequest) => { requests[index]!.push(request); return { method: request.method, value: { status: "ok" } }; },
+      close: async () => { closes[index]! += 1; },
+    };
+  });
+  const auth = new OfficeAuth();
+  const limiter = new ChatDeviceRateLimiter({ now: () => now, capacity: 100, ratePerSecond: 0 });
+  const a = new FakeWebSocket();
+  const b = new FakeWebSocket();
+  const dependencies = { auth, officeSession: REMOTE_SESSION, runtimeSource: runtime, maxJsonBytes: 64 * 1024, deviceLimiter: limiter, now: () => now, limits: { approvalTtlMs: 50, socketRateCapacity: 100 } };
+  handleOfficeChatConnection(a as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(b as unknown as WebSocket, dependencies);
+  await flush();
+
+  callbacks[0]!({ type: "approval.request", sessionId: "s-1", payload: { choices: ["once", "deny"], allowPermanent: false } });
+  a.rpc(1, "approval.respond", { session_id: "s-1", choice: "once" });
+  b.rpc(2, "approval.respond", { session_id: "s-1", choice: "once" });
+  await flush();
+  assert.deepEqual(requests.map((items) => items.map((item) => item.method)), [["approval.respond"], []]);
+  assert.equal(b.errorCode(2), -32004);
+
+  a.rpc(3, "approval.respond", { session_id: "s-1", choice: "once" });
+  callbacks[0]!({ type: "approval.request", sessionId: "s-invalid", payload: { choices: ["once"], allowPermanent: false } });
+  a.rpc(4, "approval.respond", { session_id: "s-invalid", choice: "deny" });
+  callbacks[0]!({ type: "approval.request", sessionId: "s-permanent", payload: { choices: ["always"], allowPermanent: true } });
+  a.rpc(5, "approval.respond", { session_id: "s-permanent", choice: "always" });
+  callbacks[0]!({ type: "approval.request", sessionId: "s-expired", payload: { choices: ["once"], allowPermanent: false } });
+  now += 51;
+  a.rpc(6, "approval.respond", { session_id: "s-expired", choice: "once" });
+  callbacks[0]!({ type: "clarify.request", sessionId: "s-1", payload: { requestId: "q-1", question: "Proceed?" } });
+  b.rpc(7, "clarify.respond", { request_id: "q-1", answer: "yes" });
+  a.rpc(8, "clarify.respond", { request_id: "q-1", answer: "yes" });
+  a.rpc(9, "clarify.respond", { request_id: "q-1", answer: "again" });
+  callbacks[0]!({ type: "clarify.request", sessionId: "s-1", payload: { requestId: "q-expired", question: "Late?" } });
+  now += 51;
+  a.rpc(10, "clarify.respond", { request_id: "q-expired", answer: "late" });
+  await flush();
+  for (const id of [3, 4, 5, 6, 7, 9, 10]) assert.ok(a.hasError(id) || b.hasError(id));
+  assert.equal(requests[0]!.filter((item) => item.method === "clarify.respond").length, 1);
+  a.emit("close");
+  await flush();
+  assert.equal(closes[0], 1);
+  const requestsAfterDisconnect = requests[0]!.length;
+  a.rpc(12, "session.interrupt", { session_id: "s-1" });
+  await flush();
+  assert.equal(requests[0]!.length, requestsAfterDisconnect);
+
+  let localPublish!: (event: HermesChatEvent) => void;
+  const localRequests: HermesChatRequest[] = [];
+  const localClient = new FakeWebSocket();
+  handleOfficeChatConnection(localClient as unknown as WebSocket, {
+    auth,
+    officeSession: { ...REMOTE_SESSION, principal: { id: "local-browser", tier: "owner", local: true, deviceName: "Local browser" } },
+    runtimeSource: runtimeWithConnections((onEvent) => {
+      localPublish = onEvent;
+      return connection(async (request) => { localRequests.push(request); return { method: request.method, value: { status: "ok" } }; });
+    }),
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 10, ratePerSecond: 0 }),
+  });
+  await flush();
+  localPublish({ type: "approval.request", sessionId: "s-local", payload: { choices: ["always"], allowPermanent: true } });
+  localClient.rpc(11, "approval.respond", { session_id: "s-local", choice: "always" });
+  await flush();
+  assert.deepEqual(localRequests.map((request) => request.method), ["approval.respond"]);
+});
+
+test("queue, in-flight, socket rate, and shared device rate limits are deterministic", async () => {
+  const auth = new OfficeAuth();
+  const waiting = deferred<ReturnType<typeof connection>>();
+  const queuedClient = new FakeWebSocket();
+  handleOfficeChatConnection(queuedClient as unknown as WebSocket, {
+    auth, officeSession: REMOTE_SESSION, runtimeSource: runtimeWithConnect(() => waiting.promise), maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }), limits: { socketRateCapacity: 100 },
+  });
+  for (let index = 0; index < 17; index += 1) queuedClient.rpc(index, "session.interrupt", { session_id: "s-1" });
+  assert.deepEqual(queuedClient.closed, { code: 1013, reason: "Chat queue is full" });
+
+  const gates = Array.from({ length: 5 }, () => deferred<void>());
+  let started = 0;
+  const activeClient = new FakeWebSocket();
+  handleOfficeChatConnection(activeClient as unknown as WebSocket, {
+    auth, officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnect(async () => connection(async (request) => { const index = started++; await gates[index]!.promise; return { method: request.method, value: { status: "ok" } }; })),
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }), limits: { socketRateCapacity: 100 },
+  });
+  await flush();
+  for (let index = 0; index < 5; index += 1) activeClient.rpc(index, "session.interrupt", { session_id: "s-1" });
+  await flush();
+  assert.equal(started, 4);
+  gates[0]!.resolve(undefined);
+  await flush();
+  assert.equal(started, 5);
+
+  const rateClient = new FakeWebSocket();
+  handleOfficeChatConnection(rateClient as unknown as WebSocket, {
+    auth, officeSession: REMOTE_SESSION, runtimeSource: runtimeWithConnect(async () => connection()), maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }), limits: { socketRateCapacity: 2, socketRatePerSecond: 0 },
+  });
+  await flush();
+  for (let index = 0; index < 3; index += 1) rateClient.rpc(index, "session.interrupt", { session_id: "s-1" });
+  assert.equal(rateClient.closed?.reason, "Chat rate limit exceeded");
+
+  let clock = 0;
+  const sharedLimiter = new ChatDeviceRateLimiter({ now: () => clock, capacity: 2, ratePerSecond: 0 });
+  const deviceA = new FakeWebSocket();
+  const deviceB = new FakeWebSocket();
+  for (const client of [deviceA, deviceB]) handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth, officeSession: REMOTE_SESSION, runtimeSource: runtimeWithConnect(async () => connection()), maxJsonBytes: 64 * 1024,
+    deviceLimiter: sharedLimiter, limits: { socketRateCapacity: 10, socketRatePerSecond: 0 }, now: () => clock,
+  });
+  await flush();
+  deviceA.rpc(1, "session.interrupt", { session_id: "s-1" });
+  deviceB.rpc(2, "session.interrupt", { session_id: "s-1" });
+  deviceA.rpc(3, "session.interrupt", { session_id: "s-1" });
+  assert.equal(deviceA.closed?.reason, "Device chat rate limit exceeded");
+
+  const deviceLimiter = new ChatDeviceRateLimiter({ now: () => clock, capacity: 2, ratePerSecond: 1 });
+  assert.equal(deviceLimiter.consume("same-device"), true);
+  assert.equal(deviceLimiter.consume("same-device"), true);
+  assert.equal(deviceLimiter.consume("same-device"), false);
+  clock = 1_000;
+  assert.equal(deviceLimiter.consume("same-device"), true);
+});
+
+class FakeWebSocket extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+  readonly sent: string[] = [];
+  closed?: { code: number; reason: string };
+  send(body: string): void { this.sent.push(body); }
+  close(code: number, reason: string): void { this.closed = { code, reason }; this.readyState = WebSocket.CLOSED; this.emit("close"); }
+  rpc(id: number, method: string, params: Record<string, unknown>): void { this.emit("message", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params })), false); }
+  errorCode(id: number): number | undefined { return (this.frames().find((frame) => frame.id === id)?.error as { code?: number } | undefined)?.code; }
+  hasError(id: number): boolean { return this.errorCode(id) !== undefined; }
+  frames(): Array<Record<string, unknown>> { return this.sent.map((body) => JSON.parse(body) as Record<string, unknown>); }
+}
+
+function runtimeWithConnections(factory: (onEvent: (event: HermesChatEvent) => void) => ReturnType<typeof connection>): HermesRuntimeSource { return runtimeWithConnect(async (onEvent) => factory(onEvent)); }
+function runtimeWithConnect(connect: (onEvent: (event: HermesChatEvent) => void) => Promise<ReturnType<typeof connection>>): HermesRuntimeSource {
+  return { chat: () => ({ connect, fetchHistory: async () => { throw new Error("unused"); } }) } as unknown as HermesRuntimeSource;
+}
+function connection(request: (request: HermesChatRequest) => Promise<{ method: HermesChatRequest["method"]; value: Record<string, string> }> = async (input) => ({ method: input.method, value: { status: "ok" } })) {
+  return { closed: false, request, close: async () => undefined };
+}
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
+async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }

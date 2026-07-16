@@ -1,4 +1,5 @@
 import { WebSocket } from "ws";
+import { isGlobalContextWithinBudget } from "@hermes-office/protocol";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_FRAME_BYTES = 256 * 1024;
@@ -234,7 +235,7 @@ async function openConnection(
       const params = validateParams(method, request.params ?? {}, config.maxTextBytes);
       if (internal?.sessionCreateSystemSeed !== undefined) {
         if (method !== "session.create") throw publicError("invalid_request", "Session context can only seed a new chat.");
-        const content = requiredText(internal.sessionCreateSystemSeed, "session context", config.maxTextBytes);
+        const content = requiredGlobalContext(internal.sessionCreateSystemSeed);
         params.messages = [{ role: "system", content }];
       }
       const id = ++sequence;
@@ -419,6 +420,11 @@ function normalizeOptions(options: HermesChatTransportOptions): NormalizedOption
   if (baseUrl.protocol !== "http:" || baseUrl.username !== "" || baseUrl.password !== "" || baseUrl.pathname !== "/" || baseUrl.search !== "" || baseUrl.hash !== "" || !isLoopback(baseUrl.hostname)) throw new Error("Hermes chat requires a credential-free loopback HTTP origin.");
   if (options.sessionToken.length < 16 || options.sessionToken.length > 512 || options.sessionToken.includes("\0")) throw new Error("Hermes chat token is invalid.");
   return { baseUrl, sessionToken: options.sessionToken, timeoutMs: boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, 250, 60_000), maxFrameBytes: boundedInteger(options.maxFrameBytes, DEFAULT_MAX_FRAME_BYTES, 4_096, 1024 * 1024), maxHistoryBytes: boundedInteger(options.maxHistoryBytes, DEFAULT_MAX_HISTORY_BYTES, 4_096, 8 * 1024 * 1024), maxTextBytes: boundedInteger(options.maxTextBytes, DEFAULT_MAX_TEXT_BYTES, 1_024, 512 * 1024) };
+}
+
+function requiredGlobalContext(value: string): string {
+  if (!isGlobalContextWithinBudget(value)) throw publicError("invalid_request", "Session context is too large.");
+  return value;
 }
 
 async function readBoundedText(response: Response, limit: number): Promise<string> {

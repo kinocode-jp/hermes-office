@@ -1,3 +1,4 @@
+import { OPERATION_POLICIES } from "@hermes-office/protocol";
 import type { OfficeRuntimeState, OfficeSnapshot } from "./domain";
 import { classifyDeviceLoginFailure, isLocalOfficeClient, normalizeDeviceName, type DeviceLoginFailure } from "./auth-state";
 import { createAuthenticatedOfficeWebSocket, desktopCapability, desktopCapabilityHeader } from "./desktop-transport";
@@ -347,7 +348,7 @@ function isOfficeAccess(value: unknown): boolean {
     && ["desktop-capability", "local-cookie", "device-cookie", "tailscale-identity", "oidc"].includes(String(access.authentication))
     && Array.isArray(access.allowedOperations)
     && access.allowedOperations.length <= 128
-    && access.allowedOperations.every((operation) => typeof operation === "string" && operation.length > 0 && operation.length <= 80);
+    && access.allowedOperations.every((operation) => typeof operation === "string" && Object.hasOwn(OPERATION_POLICIES, operation));
 }
 
 function errorMessage(error: unknown): string {

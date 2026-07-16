@@ -33,4 +33,11 @@ test("snapshot validator requires bounded effective access capabilities", () => 
     authentication: "device-cookie",
     allowedOperations: "state.read",
   })), false);
+  assert.equal(isOfficeSnapshot(snapshot({
+    deviceId: "device-123",
+    tier: "operator",
+    exposure: "tailnet",
+    authentication: "device-cookie",
+    allowedOperations: ["state.read", "invented.operation"],
+  })), false);
 });
