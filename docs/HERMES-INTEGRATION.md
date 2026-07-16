@@ -268,6 +268,10 @@ administration.
    `truncated` is false. A zero-row partial/unavailable read retains the
    client's last-known-good Profile, session and open-chat state; only a
    complete zero-row read confirms deletion or a genuinely empty runtime.
+8. A missing Hermes session timestamp is represented by the stable
+   `UNKNOWN_INVENTORY_TIMESTAMP` DTO sentinel. Timestamp `0` remains the Unix
+   epoch and is not treated as unknown; invalid present values make that row
+   partial instead of receiving a time-dependent fallback.
 
 ## Known uncertainties
 

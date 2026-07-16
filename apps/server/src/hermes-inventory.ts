@@ -8,6 +8,7 @@ import type {
   OfficeInventoryPagination,
   ProfileSummary,
 } from "@hermes-office/protocol";
+import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-office/protocol";
 
 const UPSTREAM_PAGE_SIZE = 100;
 const SNAPSHOT_PAGE_SIZE = 100;
@@ -92,6 +93,7 @@ async function collectSessions(
   let total: number | undefined;
   let truncated = false;
   let requestFailures = 0;
+  let rowFailures = 0;
 
   for (let page = 0; page < MAX_SESSION_PAGES && rows.length < MAX_SESSION_ROWS; page += 1) {
     let value: unknown;
@@ -126,14 +128,16 @@ async function collectSessions(
       failedProfiles.add(readString(failure, "profile") ?? "unknown");
     }
     for (const row of pageRows) {
-      const id = readString(row, "id");
-      const profile = readString(row, "profile");
-      if (id === undefined || profile === undefined) continue;
-      const key = `${profile}\0${id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push(row);
-      if (rows.length === MAX_SESSION_ROWS) break;
+      try {
+        const id = readString(row, "id");
+        const profile = readString(row, "profile");
+        if (id === undefined || profile === undefined) { rowFailures += 1; continue; }
+        const key = `${profile}\0${id}`;
+        if (seen.has(key)) { rowFailures += 1; continue; }
+        seen.add(key);
+        rows.push(row);
+        if (rows.length === MAX_SESSION_ROWS) break;
+      } catch { rowFailures += 1; }
     }
 
     if (pageSource.wireLength === 0) {
@@ -146,12 +150,13 @@ async function collectSessions(
     if (page === MAX_SESSION_PAGES - 1 || rows.length === MAX_SESSION_ROWS) truncated = true;
   }
 
+  if (rowFailures > 0) truncated = true;
   if (total !== undefined && rows.length < Math.min(total, MAX_SESSION_ROWS) && !truncated) {
     truncated = true;
     requestFailures += 1;
   }
   if (failedProfiles.size > 0) truncated = true;
-  return { rows, ...(total === undefined ? {} : { total }), truncated, partialFailures: failedProfiles.size + requestFailures };
+  return { rows, ...(total === undefined ? {} : { total }), truncated, partialFailures: failedProfiles.size + requestFailures + rowFailures };
 }
 
 async function boundedRequest(
@@ -329,12 +334,11 @@ function mapSessions(rows: Record<string, unknown>[]): MappingResult<ChatSession
       const profile = readString(row, "profile");
       if (id === undefined || profile === undefined) throw new Error("Hermes session identity is invalid.");
       const preview = readString(row, "preview");
-      const fallback = new Date().toISOString();
       const startedAt = optionalEpochToIso(row, "started_at");
       const lastActive = optionalEpochToIso(row, "last_active");
       const endedAt = optionalEpochToIso(row, "ended_at");
-      const createdAt = startedAt ?? fallback;
-      const updatedAt = lastActive ?? endedAt ?? fallback;
+      const createdAt = startedAt ?? UNKNOWN_INVENTORY_TIMESTAMP;
+      const updatedAt = lastActive ?? endedAt ?? UNKNOWN_INVENTORY_TIMESTAMP;
       items.push({ id, profileId: profile, title: readString(row, "title") || "Untitled session", activity: row.is_active === true ? "thinking" : "idle", createdAt, updatedAt, ...(preview === undefined ? {} : { lastMessagePreview: preview.slice(0, 240) }) });
     } catch { failures += 1; }
   }

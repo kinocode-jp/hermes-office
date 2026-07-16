@@ -36,6 +36,8 @@ export function isGlobalContextWithinBudget(value: string): boolean {
 
 export type ProtocolVersion = typeof PROTOCOL_VERSION;
 export type IsoDateTime = string;
+/** Stable DTO sentinel used only when Hermes omits an inventory timestamp. */
+export const UNKNOWN_INVENTORY_TIMESTAMP = "0001-01-01T00:00:00.000Z" as const;
 export type EntityId = string;
 export type ProfileId = EntityId;
 export type SessionId = EntityId;
@@ -309,7 +311,9 @@ export interface ChatSessionSummary {
   profileId: ProfileId;
   title: string;
   activity: AgentActivity;
+  /** `UNKNOWN_INVENTORY_TIMESTAMP` means the upstream field was absent. */
   createdAt: IsoDateTime;
+  /** `UNKNOWN_INVENTORY_TIMESTAMP` means both update fields were absent. */
   updatedAt: IsoDateTime;
   lastMessagePreview?: string;
 }
