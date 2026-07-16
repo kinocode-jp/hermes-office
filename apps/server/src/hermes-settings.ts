@@ -343,11 +343,19 @@ export interface OfficePendingSkillOverride extends OfficeManagedSkill {
   expectedEnabled: boolean;
   createdAt: string;
 }
+export interface OfficePendingGlobalSkillMutation extends OfficeManagedSkill {
+  id: string;
+  revision: number;
+  desiredEnabled: boolean;
+  expectedEnabled: boolean;
+  createdAt: string;
+}
 export interface OfficeGlobalMaterializationState {
   settings: OfficeGlobalSettingsDto;
   managedSkills: OfficeManagedSkill[];
   skillOverrides: OfficeManagedSkill[];
   pendingSkillOverrides: OfficePendingSkillOverride[];
+  pendingGlobalSkillMutations: OfficePendingGlobalSkillMutation[];
 }
 
 export interface OfficeGlobalSettingsStoreOptions {
@@ -425,25 +433,6 @@ export class OfficeGlobalSettingsStore {
       const next = { ...current, settings, managedSkills: validateManagedSkills(managedSkills), skillOverrides: validateManagedSkills(skillOverrides) };
       await this.#writeState(next);
       return settings;
-    });
-  }
-
-  /** Persist ownership progress without claiming that the whole sync is ready. */
-  async checkpointMaterialization(
-    expectedRevision: number,
-    managedSkills: OfficeManagedSkill[],
-    skillOverrides: OfficeManagedSkill[],
-  ): Promise<void> {
-    await this.#mutate(async () => {
-      const current = await this.#readStateUnsafe();
-      if (current.settings.revision !== expectedRevision || current.settings.skillSync.state !== "pending") {
-        throw new HermesSettingsError("conflict", "Global settings changed while skills were being synchronized.");
-      }
-      await this.#writeState({
-        ...current,
-        managedSkills: validateManagedSkills(managedSkills),
-        skillOverrides: validateManagedSkills(skillOverrides),
-      });
     });
   }
 
@@ -531,12 +520,69 @@ export class OfficeGlobalSettingsStore {
     });
   }
 
+  async prepareGlobalSkillMutation(
+    revision: number,
+    profile: string,
+    skill: string,
+    desiredEnabled: boolean,
+    expectedEnabled: boolean,
+  ): Promise<{ transaction: OfficePendingGlobalSkillMutation; existing: boolean }> {
+    return await this.#mutate(async () => {
+      const current = await this.#readStateUnsafe();
+      if (current.settings.revision !== revision) throw new HermesSettingsError("conflict", "Global settings changed before skill mutation was prepared.");
+      const validProfile = requiredProfile(profile);
+      const validSkill = requiredName(skill, "managed skill");
+      const existing = current.pendingGlobalSkillMutations.find((item) => item.profile === validProfile && item.skill === validSkill);
+      if (existing !== undefined) {
+        if (existing.revision !== revision || existing.desiredEnabled !== desiredEnabled || existing.expectedEnabled !== expectedEnabled) {
+          throw new HermesSettingsError("conflict", "A different global skill mutation is pending reconciliation.");
+        }
+        return { transaction: existing, existing: true };
+      }
+      const transaction: OfficePendingGlobalSkillMutation = {
+        id: randomBytes(32).toString("base64url"), revision, profile: validProfile, skill: validSkill,
+        desiredEnabled, expectedEnabled, createdAt: new Date().toISOString(),
+      };
+      await this.#writeState({ ...current, pendingGlobalSkillMutations: [...current.pendingGlobalSkillMutations, transaction] });
+      return { transaction, existing: false };
+    });
+  }
+
+  async commitGlobalSkillMutation(transaction: OfficePendingGlobalSkillMutation): Promise<void> {
+    await this.#mutate(async () => {
+      const current = await this.#readStateUnsafe();
+      const pending = current.pendingGlobalSkillMutations.find((item) => item.id === transaction.id);
+      if (pending === undefined) return;
+      if (current.settings.revision !== pending.revision) throw new HermesSettingsError("conflict", "Global skill mutation revision is no longer current.");
+      const key = `${pending.profile}\0${pending.skill}`;
+      const managedSkills = pending.desiredEnabled
+        ? (current.managedSkills.some((item) => `${item.profile}\0${item.skill}` === key) ? current.managedSkills : [...current.managedSkills, { profile: pending.profile, skill: pending.skill }])
+        : current.managedSkills.filter((item) => `${item.profile}\0${item.skill}` !== key);
+      await this.#writeState({
+        ...current,
+        managedSkills,
+        pendingGlobalSkillMutations: current.pendingGlobalSkillMutations.filter((item) => item.id !== pending.id),
+      });
+    });
+  }
+
+  async abortGlobalSkillMutation(transaction: OfficePendingGlobalSkillMutation): Promise<void> {
+    await this.#mutate(async () => {
+      const current = await this.#readStateUnsafe();
+      if (!current.pendingGlobalSkillMutations.some((item) => item.id === transaction.id)) return;
+      await this.#writeState({
+        ...current,
+        pendingGlobalSkillMutations: current.pendingGlobalSkillMutations.filter((item) => item.id !== transaction.id),
+      });
+    });
+  }
+
   async #readStateUnsafe(): Promise<OfficeGlobalMaterializationState> {
     try {
       const text = await readFile(this.#filePath, "utf8");
       return validateGlobalState(JSON.parse(text) as unknown);
     } catch (error) {
-      if (isNodeError(error, "ENOENT")) return { settings: defaultGlobalSettings(), managedSkills: [], skillOverrides: [], pendingSkillOverrides: [] };
+      if (isNodeError(error, "ENOENT")) return { settings: defaultGlobalSettings(), managedSkills: [], skillOverrides: [], pendingSkillOverrides: [], pendingGlobalSkillMutations: [] };
       if (error instanceof HermesSettingsError) throw error;
       throw new HermesSettingsError("rejected", "Global settings could not be read.");
     }
@@ -544,13 +590,14 @@ export class OfficeGlobalSettingsStore {
 
   async #writeState(state: OfficeGlobalMaterializationState): Promise<void> {
     await this.#options.beforeWrite?.(state);
-    await atomicWriteJson(this.#filePath, state.managedSkills.length === 0 && state.skillOverrides.length === 0 && state.pendingSkillOverrides.length === 0
+    await atomicWriteJson(this.#filePath, state.managedSkills.length === 0 && state.skillOverrides.length === 0 && state.pendingSkillOverrides.length === 0 && state.pendingGlobalSkillMutations.length === 0
       ? state.settings
       : {
           ...state.settings,
           managedSkills: state.managedSkills,
           skillOverrides: state.skillOverrides,
           pendingSkillOverrides: state.pendingSkillOverrides,
+          pendingGlobalSkillMutations: state.pendingGlobalSkillMutations,
         });
   }
 
@@ -585,12 +632,27 @@ function validateGlobalState(value: unknown): OfficeGlobalMaterializationState {
   const managed = isRecord(value) && Array.isArray(value.managedSkills) ? value.managedSkills : [];
   const overrides = isRecord(value) && Array.isArray(value.skillOverrides) ? value.skillOverrides : [];
   const pending = isRecord(value) && Array.isArray(value.pendingSkillOverrides) ? value.pendingSkillOverrides : [];
+  const pendingGlobal = isRecord(value) && Array.isArray(value.pendingGlobalSkillMutations) ? value.pendingGlobalSkillMutations : [];
   return {
     settings,
     managedSkills: validateManagedSkills(managed),
     skillOverrides: validateManagedSkills(overrides),
     pendingSkillOverrides: validatePendingSkillOverrides(pending),
+    pendingGlobalSkillMutations: validatePendingGlobalSkillMutations(pendingGlobal),
   };
+}
+
+function validatePendingGlobalSkillMutations(value: unknown[]): OfficePendingGlobalSkillMutation[] {
+  if (value.length > 10_000) throw invalid("Pending global skill mutations are too large.");
+  const result = value.map((item): OfficePendingGlobalSkillMutation => {
+    if (!isRecord(item) || typeof item.id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(item.id)
+      || !Number.isInteger(item.revision) || (item.revision as number) < 0
+      || typeof item.desiredEnabled !== "boolean" || typeof item.expectedEnabled !== "boolean"
+      || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt))) throw invalid("Pending global skill mutation is invalid.");
+    return { id: item.id, revision: item.revision as number, profile: requiredProfile(item.profile), skill: requiredName(item.skill, "managed skill"), desiredEnabled: item.desiredEnabled, expectedEnabled: item.expectedEnabled, createdAt: item.createdAt };
+  });
+  if (new Set(result.map((item) => item.id)).size !== result.length || new Set(result.map((item) => `${item.profile}\0${item.skill}`)).size !== result.length) throw invalid("Pending global skill mutations contain duplicates.");
+  return result;
 }
 
 function validatePendingSkillOverrides(value: unknown[]): OfficePendingSkillOverride[] {

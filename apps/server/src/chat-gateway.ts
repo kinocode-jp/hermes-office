@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { WebSocket } from "ws";
 import type { Operation } from "@hermes-office/protocol";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
@@ -10,6 +11,8 @@ const RATE_CAPACITY = 30;
 const RATE_PER_SECOND = 10;
 const APPROVAL_TTL_MS = 5 * 60_000;
 const MAX_BUFFERED_BYTES = 256 * 1024;
+const MAX_APPROVAL_QUEUE = 8;
+const MAX_APPROVAL_SESSIONS = 128;
 
 export interface ChatGatewayLimits {
   maxInFlight: number;
@@ -18,6 +21,7 @@ export interface ChatGatewayLimits {
   socketRatePerSecond: number;
   approvalTtlMs: number;
   maxBufferedBytes: number;
+  maxApprovalQueue: number;
 }
 
 const DEFAULT_LIMITS: ChatGatewayLimits = {
@@ -27,6 +31,7 @@ const DEFAULT_LIMITS: ChatGatewayLimits = {
   socketRatePerSecond: RATE_PER_SECOND,
   approvalTtlMs: APPROVAL_TTL_MS,
   maxBufferedBytes: MAX_BUFFERED_BYTES,
+  maxApprovalQueue: MAX_APPROVAL_QUEUE,
 };
 
 export interface ChatGatewayDependencies {
@@ -46,8 +51,12 @@ interface PendingResponse {
   expiresAt: number;
   state: PendingResponseState;
 }
-interface PendingApproval extends PendingResponse { choices: ReadonlySet<string>; }
-interface PendingApprovalSlot { active: PendingApproval; successor?: PendingApproval; }
+interface PendingApproval extends PendingResponse {
+  id: string;
+  choices: ReadonlySet<string>;
+  event: HermesChatEvent;
+  fingerprint: string;
+}
 type PendingClaim =
   | { kind: "approval"; key: string; entry: PendingApproval }
   | { kind: "clarification"; key: string; entry: PendingResponse };
@@ -93,7 +102,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   catch { client.close(1013, "Hermes runtime unavailable"); return; }
 
   const queued: Array<{ body: string; receivedAt: number; receivedOrder: number }> = [];
-  const pendingApprovals = new Map<string, PendingApprovalSlot>();
+  const pendingApprovals = new Map<string, PendingApproval[]>();
   const pendingClarifications = new Map<string, PendingResponse>();
   let upstream: Awaited<ReturnType<ReturnType<HermesRuntimeSource["chat"]>["connect"]>> | undefined;
   let closed = false;
@@ -155,10 +164,14 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
           sendRpcError(send, frame.id, -32003, "Permanent approval requires verified local owner access.");
           return;
         }
-        const slot = targetId === undefined ? undefined : pendingApprovals.get(targetId);
-        const pending = slot?.active;
-        if (pending === undefined || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
-          if (slot !== undefined && pending?.expiresAt !== undefined && pending.expiresAt <= receivedAt) promoteApprovalSuccessor(pendingApprovals, targetId!, slot);
+        const approvalId = typeof frame.params?.approval_id === "string" ? frame.params.approval_id : "";
+        const queue = targetId === undefined ? undefined : pendingApprovals.get(targetId);
+        const pending = queue?.[0];
+        if (pending === undefined || pending.id !== approvalId || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
+          if (targetId !== undefined && pending?.id === approvalId && pending.expiresAt <= receivedAt) {
+            const promoted = expireApproval(pendingApprovals, targetId, pending);
+            if (promoted !== undefined) sendWire(serializeOfficeChatEvent(promoted, maxJsonBytes));
+          }
           sendRpcError(send, frame.id, -32004, "Pending approval was not found or has expired.");
           return;
         }
@@ -180,13 +193,15 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         ? await runtimeSource.globalInheritance?.().sessionCreateContext()
         : undefined;
       const result = await upstream!.request(
-        { method: frame.method, ...(frame.params === undefined ? {} : { params: frame.params }) },
+        { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
         seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
       );
-      consumeClaim(claim, pendingApprovals, pendingClarifications);
+      const promoted = consumeClaim(claim, pendingApprovals, pendingClarifications);
+      if (promoted !== undefined) sendWire(serializeOfficeChatEvent(promoted, maxJsonBytes));
       send({ jsonrpc: "2.0", id: frame.id, result: result.value });
     } catch {
-      restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
+      const promoted = restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
+      if (promoted !== undefined) sendWire(serializeOfficeChatEvent(promoted, maxJsonBytes));
       sendRpcError(send, frame.id, -32000, "Hermes request failed.");
     }
   };
@@ -230,13 +245,23 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         : [];
       const createdAt = now();
       const createdOrder = ++chronology;
-      const approval: PendingApproval = { choices: new Set(choices), createdAt, createdOrder, expiresAt: createdAt + limits.approvalTtlMs, state: "pending" };
-      const existing = pendingApprovals.get(event.sessionId);
-      // Responses have only a session id, so preserve the first successor and
-      // never let a later event replace it while the active request is claimed.
-      if (existing?.active.state === "claimed") existing.successor ??= approval;
-      else pendingApprovals.set(event.sessionId, { active: approval });
-      trimOldest(pendingApprovals, 128);
+      const fingerprint = approvalFingerprint(event);
+      const queue = pendingApprovals.get(event.sessionId) ?? [];
+      if (queue.some((approval) => approval.fingerprint === fingerprint)) return;
+      if ((queue.length === 0 && pendingApprovals.size >= MAX_APPROVAL_SESSIONS) || queue.length >= limits.maxApprovalQueue) {
+        sendWire(serializeOfficeChatEvent({ type: "error", sessionId: event.sessionId, payload: { status: "resync_required", message: "Approval queue overflow. Reload the session." } }, maxJsonBytes));
+        client.close(1013, "Approval queue overflow; reload history");
+        return;
+      }
+      const approval: PendingApproval = {
+        id: `approval_${randomBytes(16).toString("base64url")}`,
+        choices: new Set(choices), event, fingerprint, createdAt, createdOrder,
+        expiresAt: createdAt + limits.approvalTtlMs, state: "pending",
+      };
+      queue.push(approval);
+      pendingApprovals.set(event.sessionId, queue);
+      if (queue.length === 1) sendWire(serializeOfficeChatEvent(officeApprovalEvent(approval), maxJsonBytes));
+      return;
     }
     if (event.type === "clarify.request" && typeof event.payload.requestId === "string") {
       const createdAt = now();
@@ -284,47 +309,65 @@ function sendRpcError(send: (value: unknown) => void, id: string | number, code:
 
 function consumeClaim(
   claim: PendingClaim | undefined,
-  approvals: Map<string, PendingApprovalSlot>,
+  approvals: Map<string, PendingApproval[]>,
   clarifications: ReadonlyMap<string, PendingResponse>,
-): void {
-  if (claim === undefined) return;
+): HermesChatEvent | undefined {
+  if (claim === undefined) return undefined;
   if (claim.kind === "approval") {
-    const slot = approvals.get(claim.key);
-    if (slot?.active !== claim.entry || claim.entry.state !== "claimed") return;
+    const queue = approvals.get(claim.key);
+    if (queue?.[0] !== claim.entry || claim.entry.state !== "claimed") return undefined;
     claim.entry.state = "consumed";
-    promoteApprovalSuccessor(approvals, claim.key, slot);
-    return;
+    queue.shift();
+    if (queue.length === 0) { approvals.delete(claim.key); return undefined; }
+    return officeApprovalEvent(queue[0]!);
   }
   const current = clarifications.get(claim.key);
   if (current === claim.entry && claim.entry.state === "claimed") claim.entry.state = "consumed";
+  return undefined;
 }
 
 function restoreClaim(
   claim: PendingClaim | undefined,
-  approvals: Map<string, PendingApprovalSlot>,
+  approvals: Map<string, PendingApproval[]>,
   clarifications: ReadonlyMap<string, PendingResponse>,
   closed: boolean,
   currentTime: number,
-): void {
-  if (claim === undefined || closed) return;
+): HermesChatEvent | undefined {
+  if (claim === undefined || closed) return undefined;
   if (claim.kind === "approval") {
-    const slot = approvals.get(claim.key);
-    if (slot?.active !== claim.entry || claim.entry.state !== "claimed") return;
-    // Restoring A beside B would make the next session-scoped response
-    // ambiguous. Once B exists it is the only safe request to promote.
-    if (slot.successor !== undefined) promoteApprovalSuccessor(approvals, claim.key, slot);
-    else if (claim.entry.expiresAt > currentTime) claim.entry.state = "pending";
-    else approvals.delete(claim.key);
-    return;
+    const queue = approvals.get(claim.key);
+    if (queue?.[0] !== claim.entry || claim.entry.state !== "claimed") return undefined;
+    if (claim.entry.expiresAt > currentTime) { claim.entry.state = "pending"; return undefined; }
+    return expireApproval(approvals, claim.key, claim.entry);
   }
   const current = clarifications.get(claim.key);
   if (claim.entry.expiresAt > currentTime && current === claim.entry && claim.entry.state === "claimed") claim.entry.state = "pending";
+  return undefined;
 }
 
-function promoteApprovalSuccessor(approvals: Map<string, PendingApprovalSlot>, key: string, slot: PendingApprovalSlot): void {
-  if (slot.successor === undefined) { approvals.delete(key); return; }
-  slot.active = slot.successor;
-  delete slot.successor;
+function expireApproval(approvals: Map<string, PendingApproval[]>, key: string, entry: PendingApproval): HermesChatEvent | undefined {
+  const queue = approvals.get(key);
+  if (queue?.[0] !== entry) return undefined;
+  queue.shift();
+  if (queue.length === 0) { approvals.delete(key); return undefined; }
+  return officeApprovalEvent(queue[0]!);
+}
+
+function upstreamRequestParams(method: HermesChatMethod, params: Record<string, unknown> | undefined): { params?: Record<string, unknown> } {
+  if (params === undefined) return {};
+  if (method !== "approval.respond") return { params };
+  return { params: {
+    ...(typeof params.session_id === "string" ? { session_id: params.session_id } : {}),
+    ...(typeof params.choice === "string" ? { choice: params.choice } : {}),
+  } };
+}
+
+function officeApprovalEvent(approval: PendingApproval): HermesChatEvent {
+  return { ...approval.event, payload: { ...approval.event.payload, approvalId: approval.id } };
+}
+
+function approvalFingerprint(event: HermesChatEvent): string {
+  return createHash("sha256").update(JSON.stringify(event) ?? "").digest("base64url");
 }
 
 function trimOldest<T>(collection: Map<string, T> | Set<string>, maximum: number): void {

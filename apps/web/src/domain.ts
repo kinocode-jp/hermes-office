@@ -42,6 +42,7 @@ export type ChatPendingInteraction =
   | {
       id: string;
       kind: "approval";
+      approvalId: string;
       command?: string | undefined;
       description?: string | undefined;
       choices: ApprovalChoice[];

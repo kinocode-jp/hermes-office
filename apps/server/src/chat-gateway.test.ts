@@ -250,7 +250,7 @@ test("a same-session approval arriving during a claim survives both success and 
       return connection(async (request) => {
         requests.push(request);
         if (requests.length === 1) await firstSuccess.promise;
-        if (requests.length === 3) await firstFailure.promise;
+        if (requests.length === 4) await firstFailure.promise;
         return { method: request.method, value: { status: "ok" } };
       });
     }),
@@ -262,12 +262,20 @@ test("a same-session approval arriving during a claim survives both success and 
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["once"], allowPermanent: false } });
   client.rpc(40, "approval.respond", { session_id: "s-successor", choice: "once" });
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["deny"], allowPermanent: false } });
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["deny"], allowPermanent: false } });
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["later"], allowPermanent: false } });
+  const completedApprovalId = client.approvalId("s-successor");
+  assert.equal(client.frames().filter((frame) => (frame.params as { type?: string } | undefined)?.type === "approval.request").length, 1);
   firstSuccess.resolve(undefined);
   await flush();
+  client.rpc(48, "approval.respond", { session_id: "s-successor", approval_id: completedApprovalId, choice: "once" });
+  await flush();
+  assert.equal(client.errorCode(48), -32004);
   client.rpc(41, "approval.respond", { session_id: "s-successor", choice: "deny" });
   await flush();
-  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 2);
+  client.rpc(44, "approval.respond", { session_id: "s-successor", choice: "later" });
+  await flush();
+  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 3);
   assert.equal(client.hasError(41), false);
 
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["once"], allowPermanent: false } });
@@ -277,10 +285,32 @@ test("a same-session approval arriving during a claim survives both success and 
   firstFailure.reject(new Error("predecessor failed"));
   await flush();
   assert.equal(client.errorCode(42), -32000);
-  client.rpc(43, "approval.respond", { session_id: "s-successor", choice: "deny" });
+  client.rpc(45, "approval.respond", { session_id: "s-successor", choice: "once" });
   await flush();
-  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 4);
-  assert.equal(client.hasError(43), false);
+  client.rpc(46, "approval.respond", { session_id: "s-successor", choice: "deny" });
+  await flush();
+  client.rpc(47, "approval.respond", { session_id: "s-successor", choice: "later" });
+  await flush();
+  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 7);
+  assert.equal(requests.some((request) => "approval_id" in (request.params ?? {})), false);
+  assert.equal(client.hasError(47), false);
+});
+
+test("approval queue overflow is explicit and closes the socket", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publish = onEvent; return connection(); }),
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    limits: { maxApprovalQueue: 2 },
+  });
+  await flush();
+  for (const command of ["A", "B", "C"]) publish({ type: "approval.request", sessionId: "s-overflow", payload: { command, choices: ["once"], allowPermanent: false } });
+  assert.deepEqual(client.closed, { code: 1013, reason: "Approval queue overflow; reload history" });
+  const error = client.frames().find((frame) => (frame.params as { type?: string } | undefined)?.type === "error");
+  assert.equal((error?.params as { payload?: { status?: string } } | undefined)?.payload?.status, "resync_required");
 });
 
 test("a queued response received before its request stays stale at the same clock tick", async () => {
@@ -384,7 +414,16 @@ class FakeWebSocket extends EventEmitter {
   sendError?: Error;
   send(body: string, callback?: (error?: Error) => void): void { this.sent.push(body); callback?.(this.sendError); }
   close(code: number, reason: string): void { this.closed = { code, reason }; this.readyState = WebSocket.CLOSED; this.emit("close"); }
-  rpc(id: number, method: string, params: Record<string, unknown>): void { this.emit("message", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params })), false); }
+  rpc(id: number, method: string, params: Record<string, unknown>): void {
+    const enriched = method === "approval.respond" && params.approval_id === undefined
+      ? { ...params, approval_id: this.approvalId(typeof params.session_id === "string" ? params.session_id : "") }
+      : params;
+    this.emit("message", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params: enriched })), false);
+  }
+  approvalId(sessionId: string): string {
+    const events = this.frames().filter((frame) => frame.method === "event").map((frame) => frame.params as { sessionId?: string; type?: string; payload?: { approvalId?: string } });
+    return [...events].reverse().find((event) => event.type === "approval.request" && event.sessionId === sessionId)?.payload?.approvalId ?? "";
+  }
   errorCode(id: number): number | undefined { return (this.frames().find((frame) => frame.id === id)?.error as { code?: number } | undefined)?.code; }
   hasError(id: number): boolean { return this.errorCode(id) !== undefined; }
   frames(): Array<Record<string, unknown>> { return this.sent.map((body) => JSON.parse(body) as Record<string, unknown>); }

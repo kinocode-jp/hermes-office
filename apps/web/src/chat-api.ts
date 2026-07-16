@@ -32,7 +32,7 @@ export type ChatApiConnection = {
   submitPrompt(clientSessionId: string, text: string): void;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
-  respondApproval(clientSessionId: string, choice: ApprovalChoice): Promise<void>;
+  respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
   retry(): void;
   stop(): void;
 };
@@ -322,10 +322,10 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
       if (!liveSessionId) throw new Error("Live Sessionが未接続です。");
       await rpc("clarify.respond", { request_id: requestId, answer });
     },
-    async respondApproval(clientSessionId, choice) {
+    async respondApproval(clientSessionId, approvalId, choice) {
       const liveSessionId = liveSessionIdFor(clientSessionId, liveToClient);
       if (!liveSessionId) throw new Error("Live Sessionが未接続です。");
-      await rpc("approval.respond", { session_id: liveSessionId, choice });
+      await rpc("approval.respond", { session_id: liveSessionId, approval_id: approvalId, choice });
     },
     retry() {
       stopped = false;

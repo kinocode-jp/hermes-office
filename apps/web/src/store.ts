@@ -55,7 +55,7 @@ let releaseChatSession = (_clientSessionId: string) => {};
 let submitChatPrompt = (_clientSessionId: string, _text: string) => {};
 let interruptChatSession = (_clientSessionId: string) => {};
 let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
-let respondApproval = async (_clientSessionId: string, _choice: ApprovalChoice) => {};
+let respondApproval = async (_clientSessionId: string, _approvalId: string, _choice: ApprovalChoice) => {};
 let kanbanApi: KanbanApi | undefined;
 let kanbanMutations = 0;
 let kanbanRefresh: Promise<void> | undefined;
@@ -101,7 +101,7 @@ export function registerChatRuntime(actions: {
   submitPrompt(clientSessionId: string, text: string): void;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
-  respondApproval(clientSessionId: string, choice: ApprovalChoice): Promise<void>;
+  respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
 }): void {
   ensureChatSession = actions.ensureSession;
   releaseChatSession = actions.releaseSession;
@@ -427,7 +427,7 @@ export async function respondToApproval(sessionId: string, choice: ApprovalChoic
   if (!pending.choices.includes(choice) || (choice === "always" && !pending.allowPermanent)) return;
   markInteractionSubmitting(sessionId, pending.id);
   try {
-    await respondApproval(sessionId, choice);
+    await respondApproval(sessionId, pending.approvalId, choice);
     clearInteraction(sessionId, pending.id);
   } catch {
     failInteraction(sessionId, pending.id, "承認結果を送信できませんでした。接続を確認して再試行してください。");
@@ -528,14 +528,16 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     });
   }
   if (event.type === "approval.request") {
+    const approvalId = stringValue(payload.approvalId) ?? stringValue(payload.approval_id);
     const command = stringValue(payload.command);
     const description = stringValue(payload.description);
     const allowPermanent = payload.allowPermanent === true || payload.allow_permanent === true;
     const choices = approvalChoices(payload.choices, allowPermanent);
-    if (choices.length === 0) return session;
+    if (!approvalId || choices.length === 0) return session;
     return withPendingInteraction(session, {
-      id: `approval:${event.liveSessionId}:${command ?? ""}:${description ?? ""}`,
+      id: `approval:${approvalId}`,
       kind: "approval",
+      approvalId,
       ...(command ? { command } : {}),
       ...(description ? { description } : {}),
       choices,

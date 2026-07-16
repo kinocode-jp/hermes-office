@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatSession } from "../src/domain.ts";
-import { reduceChatGatewayEvent } from "../src/store.ts";
+import { applyChatGatewayEvent, reduceChatGatewayEvent, registerChatRuntime, respondToApproval, sessions } from "../src/store.ts";
 
 const session: ChatSession = {
   id: "client-1",
@@ -35,11 +35,46 @@ test("permanent approval is removed unless the gateway explicitly permits it", (
   const next = reduceChatGatewayEvent(session, {
     type: "approval.request",
     liveSessionId: "live-1",
-    payload: { command: "rm temp.txt", choices: ["once", "always", "deny"], allowPermanent: false }
+    payload: { approvalId: "approval-one", command: "rm temp.txt", choices: ["once", "always", "deny"], allowPermanent: false }
   });
 
   assert.equal(next.pendingInteraction?.kind, "approval");
   assert.deepEqual(next.pendingInteraction?.choices, ["once", "deny"]);
+});
+
+test("an older approval completion cannot clear a newly promoted approval", async () => {
+  let resolve!: () => void;
+  const submitted: string[] = [];
+  registerChatRuntime({
+    ensureSession() {}, releaseSession() {}, submitPrompt() {}, interrupt() {},
+    async respondClarify() {},
+    respondApproval: async (_sessionId, approvalId) => {
+      submitted.push(approvalId);
+      await new Promise<void>((done) => { resolve = done; });
+    },
+  });
+  sessions.value = [reduceChatGatewayEvent(session, {
+    type: "approval.request", liveSessionId: "live-1",
+    payload: { approvalId: "approval-A", choices: ["once"], allowPermanent: false },
+  })];
+  const submission = respondToApproval(session.id, "once");
+  applyChatGatewayEvent(session.id, {
+    type: "approval.request", liveSessionId: "live-1",
+    payload: { approvalId: "approval-B", choices: ["deny"], allowPermanent: false },
+  });
+  resolve();
+  await submission;
+  assert.deepEqual(submitted, ["approval-A"]);
+  assert.equal(sessions.value[0]!.pendingInteraction?.id, "approval:approval-B");
+  const submissionB = respondToApproval(session.id, "deny");
+  applyChatGatewayEvent(session.id, {
+    type: "approval.request", liveSessionId: "live-1",
+    payload: { approvalId: "approval-C", choices: ["once"], allowPermanent: false },
+  });
+  resolve();
+  await submissionB;
+  assert.deepEqual(submitted, ["approval-A", "approval-B"]);
+  assert.equal(sessions.value[0]!.pendingInteraction?.id, "approval:approval-C");
 });
 
 test("duplicate events retain submit lock and completion clears the interaction", () => {

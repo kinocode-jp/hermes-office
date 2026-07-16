@@ -3,6 +3,7 @@ import type {
   OfficeGlobalSettingsDto,
   OfficeGlobalSettingsStore,
   OfficeGlobalSettingsUpdate,
+  OfficePendingGlobalSkillMutation,
   OfficePendingSkillOverride,
 } from "./hermes-settings.js";
 import { HermesSettingsError } from "./hermes-settings.js";
@@ -27,12 +28,16 @@ export class GlobalInheritanceCoordinator {
 
   async read(): Promise<OfficeGlobalSettingsDto> {
     const state = await this.#options.store.readMaterialization();
-    if (state.pendingSkillOverrides.length === 0) return state.settings;
+    if (state.pendingSkillOverrides.length === 0 && state.pendingGlobalSkillMutations.length === 0) return state.settings;
+    const pending = [
+      ...state.pendingSkillOverrides.map((item) => ({ profile: item.profile, skill: item.skill, desiredEnabled: item.desiredEnabled })),
+      ...state.pendingGlobalSkillMutations.map((item) => ({ profile: item.profile, skill: item.skill, desiredEnabled: item.desiredEnabled })),
+    ];
     return {
       ...state.settings,
       skillSync: {
         state: "pending",
-        failures: state.pendingSkillOverrides.slice(0, 100).map((item) => ({
+        failures: pending.slice(0, 100).map((item) => ({
           profile: item.profile,
           skill: item.skill,
           operation: item.desiredEnabled ? "enable" as const : "disable" as const,
@@ -50,6 +55,7 @@ export class GlobalInheritanceCoordinator {
   async update(input: OfficeGlobalSettingsUpdate): Promise<OfficeGlobalSettingsDto> {
     return await this.#serialized(async () => {
       await this.#reconcilePendingSkillOverrides();
+      await this.#reconcilePendingGlobalSkillMutations();
       const staged = await this.#options.store.beginMaterialization(input);
       const desired = new Set(staged.settings.sharedSkillsEnabled ? staged.settings.skills : []);
       const managed = new Map(staged.managedSkills.map((item) => [keyOf(item.profile, item.skill), item]));
@@ -97,9 +103,8 @@ export class GlobalInheritanceCoordinator {
           }
           if (current.enabled) continue; // Already enabled by the Profile/user; never claim it.
           try {
-            await this.#options.settings.setSkillEnabled(profile, skill, true, false);
+            await this.#applyGlobalSkillMutation(staged.settings.revision, profile, skill, true, false);
             managed.set(key, { profile, skill });
-            await this.#options.store.checkpointMaterialization(staged.settings.revision, [...managed.values()], [...overrides.values()]);
           } catch {
             failures.push({ profile, skill, operation: "enable" });
           }
@@ -113,9 +118,8 @@ export class GlobalInheritanceCoordinator {
             continue;
           }
           try {
-            await this.#options.settings.setSkillEnabled(profile, item.skill, false, true);
+            await this.#applyGlobalSkillMutation(staged.settings.revision, profile, item.skill, false, true);
             managed.delete(keyOf(item.profile, item.skill));
-            await this.#options.store.checkpointMaterialization(staged.settings.revision, [...managed.values()], [...overrides.values()]);
           } catch {
             failures.push({ profile, skill: item.skill, operation: "disable" });
           }
@@ -147,6 +151,7 @@ export class GlobalInheritanceCoordinator {
     mutation: () => Promise<void>,
   ): Promise<void> {
     await this.#serialized(async () => {
+      await this.#reconcilePendingGlobalSkillMutations();
       const ownership = await this.#options.store.readMaterialization();
       const alreadyOwned = ownership.skillOverrides.some((item) => item.profile === profile && item.skill === skill);
       if (alreadyOwned) {
@@ -183,6 +188,54 @@ export class GlobalInheritanceCoordinator {
     for (const transaction of state.pendingSkillOverrides) {
       await this.#reconcilePendingSkillOverride(transaction);
     }
+  }
+
+  async #applyGlobalSkillMutation(
+    revision: number,
+    profile: string,
+    skill: string,
+    desiredEnabled: boolean,
+    expectedEnabled: boolean,
+  ): Promise<void> {
+    const prepared = await this.#options.store.prepareGlobalSkillMutation(revision, profile, skill, desiredEnabled, expectedEnabled);
+    if (prepared.existing) {
+      await this.#reconcilePendingGlobalSkillMutation(prepared.transaction);
+      return;
+    }
+    try {
+      await this.#options.settings.setSkillEnabled(profile, skill, desiredEnabled, expectedEnabled);
+    } catch (error) {
+      if (isDefinitePreconditionFailure(error)) {
+        try { await this.#options.store.abortGlobalSkillMutation(prepared.transaction); }
+        catch { throw unavailable(); }
+      }
+      throw unavailable();
+    }
+    try { await this.#options.store.commitGlobalSkillMutation(prepared.transaction); }
+    catch { throw unavailable(); }
+  }
+
+  async #reconcilePendingGlobalSkillMutations(): Promise<void> {
+    const state = await this.#options.store.readMaterialization();
+    for (const transaction of state.pendingGlobalSkillMutations) {
+      await this.#reconcilePendingGlobalSkillMutation(transaction);
+    }
+  }
+
+  async #reconcilePendingGlobalSkillMutation(transaction: OfficePendingGlobalSkillMutation): Promise<void> {
+    let skills;
+    try { skills = await this.#options.settings.listSkills(transaction.profile); }
+    catch { throw unavailable(); }
+    const current = skills.find((skill) => skill.name === transaction.skill);
+    if (current === undefined) throw unavailable();
+    if (current.enabled !== transaction.desiredEnabled) {
+      if (current.enabled !== transaction.expectedEnabled) throw new HermesSettingsError("conflict", "Global skill changed while reconciliation was pending.");
+      try {
+        await this.#options.settings.setSkillEnabled(transaction.profile, transaction.skill, transaction.desiredEnabled, transaction.expectedEnabled);
+      } catch { throw unavailable(); }
+    }
+    try { await this.#options.store.commitGlobalSkillMutation(transaction); }
+    catch { throw unavailable(); }
   }
 
   async #reconcilePendingSkillOverride(transaction: OfficePendingSkillOverride): Promise<void> {
