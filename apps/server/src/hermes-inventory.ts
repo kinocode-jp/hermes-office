@@ -94,6 +94,11 @@ async function collectSessions(
   let truncated = false;
   let requestFailures = 0;
   let rowFailures = 0;
+  let totalFailures = 0;
+  let previousReportedTotal: number | undefined;
+  let sawReportedTotal = false;
+  let sawMissingTotal = false;
+  let totalContractInconsistent = false;
 
   for (let page = 0; page < MAX_SESSION_PAGES && rows.length < MAX_SESSION_ROWS; page += 1) {
     let value: unknown;
@@ -119,8 +124,26 @@ async function collectSessions(
     }
     const pageRows = pageSource.records;
     if (pageSource.invalid) { truncated = true; requestFailures += 1; }
+    const pageEnd = offset + pageSource.wireLength;
+    const rawTotal = isRecord(value) ? value.total : undefined;
     const reportedTotal = readNonNegativeInteger(value, "total");
-    if (reportedTotal !== undefined) total = Math.max(total ?? 0, reportedTotal);
+    let pageTotalInconsistent = false;
+    if (reportedTotal === undefined) {
+      if (rawTotal !== undefined || sawReportedTotal) pageTotalInconsistent = true;
+      sawMissingTotal = true;
+    } else {
+      if (sawMissingTotal || (previousReportedTotal !== undefined && reportedTotal !== previousReportedTotal) || reportedTotal < pageEnd) {
+        pageTotalInconsistent = true;
+      }
+      sawReportedTotal = true;
+      previousReportedTotal = reportedTotal;
+      total = Math.max(total ?? 0, reportedTotal);
+    }
+    if (pageTotalInconsistent) {
+      totalContractInconsistent = true;
+      truncated = true;
+      totalFailures += 1;
+    }
     let failures: Record<string, unknown>[] = [];
     try { failures = optionalRecordArray(value, "errors"); }
     catch { truncated = true; requestFailures += 1; }
@@ -145,7 +168,9 @@ async function collectSessions(
       break;
     }
     offset += pageSource.wireLength;
-    const upstreamHasMore = total === undefined ? pageSource.wireLength >= UPSTREAM_PAGE_SIZE : offset < total;
+    const upstreamHasMore = !totalContractInconsistent && reportedTotal !== undefined
+      ? offset < reportedTotal
+      : pageSource.wireLength >= UPSTREAM_PAGE_SIZE;
     if (!upstreamHasMore) break;
     if (page === MAX_SESSION_PAGES - 1 || rows.length === MAX_SESSION_ROWS) truncated = true;
   }
@@ -156,7 +181,7 @@ async function collectSessions(
     requestFailures += 1;
   }
   if (failedProfiles.size > 0) truncated = true;
-  return { rows, ...(total === undefined ? {} : { total }), truncated, partialFailures: failedProfiles.size + requestFailures + rowFailures };
+  return { rows, ...(total === undefined ? {} : { total }), truncated, partialFailures: failedProfiles.size + requestFailures + rowFailures + totalFailures };
 }
 
 async function boundedRequest(

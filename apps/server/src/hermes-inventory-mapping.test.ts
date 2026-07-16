@@ -89,6 +89,61 @@ test("total-free pagination is complete while overlapping duplicate pages are ex
   assert.deepEqual(overlapping.sessionsState, { truncated: true, partialFailures: 1 });
 });
 
+test("contradictory reported totals continue full pages and remain explicitly partial", async () => {
+  const rows = Array.from({ length: 101 }, (_, index) => session(`session-${index}`, index));
+  const scenarios: Array<{
+    name: string;
+    total: number | ((offset: number) => number);
+    expectedTotal: number;
+  }> = [
+    { name: "undersized", total: 1, expectedTotal: 101 },
+    { name: "zero with rows", total: 0, expectedTotal: 101 },
+    { name: "decreasing", total: (offset) => offset === 0 ? 200 : 101, expectedTotal: 200 },
+    { name: "increasing", total: (offset) => offset === 0 ? 101 : 102, expectedTotal: 102 },
+  ];
+  for (const scenario of scenarios) {
+    const offsets: number[] = [];
+    const inventory = await collectHermesInventory(requester([profile()], rows, { reportedTotal: scenario.total, onOffset: (offset) => offsets.push(offset) }));
+    assert.equal(inventory.sessions.length, 101, scenario.name);
+    assert.equal(inventory.sessions.at(-1)?.id, "session-100", scenario.name);
+    assert.deepEqual(offsets, [0, 100], scenario.name);
+    assert.equal(inventory.sessionsState.total, scenario.expectedTotal, scenario.name);
+    assert.equal(inventory.sessionsState.truncated, true, scenario.name);
+    assert.ok(inventory.sessionsState.partialFailures > 0, scenario.name);
+  }
+
+  const normal = await collectHermesInventory(requester([profile()], rows, { reportedTotal: 101 }));
+  assert.equal(normal.sessions.length, 101);
+  assert.deepEqual(normal.sessionsState, { total: 101, truncated: false, partialFailures: 0 });
+
+  const offsets: number[] = [];
+  const oversized = await collectHermesInventory(requester([profile()], rows.slice(0, 100), { reportedTotal: 1_000, onOffset: (offset) => offsets.push(offset) }));
+  assert.equal(oversized.sessions.length, 100);
+  assert.deepEqual(offsets, [0, 100]);
+  assert.deepEqual(oversized.sessionsState, { total: 1_000, truncated: true, partialFailures: 1 });
+});
+
+test("contradictory totals combine safely with invalid and duplicate rows within the page bound", async () => {
+  const rows = Array.from({ length: 101 }, (_, index): Record<string, unknown> => session(`session-${index}`, index));
+  rows[98] = { id: "invalid-without-profile" };
+  rows[99] = { ...rows[0]! };
+  const mixed = await collectHermesInventory(requester([profile()], rows, { reportedTotal: 1 }));
+  assert.equal(mixed.sessions.at(-1)?.id, "session-100");
+  assert.equal(mixed.sessions.length, 99);
+  assert.equal(mixed.sessionsState.total, 99);
+  assert.equal(mixed.sessionsState.truncated, true);
+  assert.equal(mixed.sessionsState.partialFailures, 4);
+
+  const offsets: number[] = [];
+  const invalidRows = Array.from({ length: 2_100 }, (_, index) => ({ id: `invalid-${index}` }));
+  const bounded = await collectHermesInventory(requester([profile()], invalidRows, { includeTotal: false, onOffset: (offset) => offsets.push(offset) }));
+  assert.deepEqual(bounded.sessions, []);
+  assert.equal(bounded.sessionsState.truncated, true);
+  assert.equal(bounded.sessionsState.partialFailures, 2_000);
+  assert.equal(offsets.length, 20);
+  assert.equal(offsets.at(-1), 1_900);
+});
+
 test("missing timestamps use a stable unknown sentinel and preserve cursor generations", async () => {
   const fields = [
     { id: "missing", profile: "profile-0" },
@@ -117,16 +172,25 @@ test("missing timestamps use a stable unknown sentinel and preserve cursor gener
 function requester(
   profiles: Record<string, unknown>[],
   sessions: Record<string, unknown>[],
-  options: { includeTotal?: boolean; overlapSecondPage?: boolean } = {},
+  options: {
+    includeTotal?: boolean;
+    overlapSecondPage?: boolean;
+    reportedTotal?: number | ((offset: number) => number | undefined);
+    onOffset?: (offset: number) => void;
+  } = {},
 ) {
   return async (path: string): Promise<HermesJsonResult> => {
     if (path === "/api/profiles") return { value: { profiles }, bytes: 1 };
     if (path.startsWith("/api/profiles/sessions?")) {
       const offset = Number(new URL(path, "http://fixture.local").searchParams.get("offset") ?? 0);
+      options.onOffset?.(offset);
       const page = options.overlapSecondPage && offset === 100
         ? [sessions[99]!, sessions[100]!]
         : sessions.slice(offset, offset + 100);
-      return { value: { sessions: page, ...(options.includeTotal === false ? {} : { total: sessions.length }), errors: [] }, bytes: 1 };
+      const reportedTotal = typeof options.reportedTotal === "function"
+        ? options.reportedTotal(offset)
+        : options.reportedTotal ?? sessions.length;
+      return { value: { sessions: page, ...(options.includeTotal === false || reportedTotal === undefined ? {} : { total: reportedTotal }), errors: [] }, bytes: 1 };
     }
     throw new Error("unexpected fixture route");
   };

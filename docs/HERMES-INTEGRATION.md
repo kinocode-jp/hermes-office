@@ -268,6 +268,9 @@ administration.
    `truncated` is false. A zero-row partial/unavailable read retains the
    client's last-known-good Profile, session and open-chat state; only a
    complete zero-row read confirms deletion or a genuinely empty runtime.
+   A `total` that conflicts with the current page or changes between pages is
+   partial metadata; full pages then continue under the fixed page/row/byte
+   and deadline limits instead of using that `total` as a terminal condition.
 8. A missing Hermes session timestamp is represented by the stable
    `UNKNOWN_INVENTORY_TIMESTAMP` DTO sentinel. Timestamp `0` remains the Unix
    epoch and is not treated as unknown; invalid present values make that row

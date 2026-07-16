@@ -40,21 +40,25 @@ test("mixed mapper failures and unavailable fallback retain panes until authorit
 
   applyOfficeSnapshot(snapshot("complete", [stored("valid"), stored("malformed")], completePage(2), 3), SERVER_URL);
   assert.equal(sessions.value.find((session) => session.id === malformedId)?.messages[0]?.body, "keep live state");
+
+  applyOfficeSnapshot(snapshot("complete", [stored("valid")], partialPage(1, 2), 4), SERVER_URL);
+  assert.deepEqual(openSessionIds.value, [malformedId]);
+  assert.deepEqual(released, []);
   const ensuresBeforeFallback = ensured.length;
 
-  applyOfficeSnapshot(snapshot("unavailable", [], unavailablePage(), 4), SERVER_URL);
+  applyOfficeSnapshot(snapshot("unavailable", [], unavailablePage(), 5), SERVER_URL);
   assert.deepEqual(profileList.value.map((profile) => profile.id), ["profile-0"]);
   assert.deepEqual(openSessionIds.value, [malformedId]);
   assert.equal(ensured.length, ensuresBeforeFallback, "top-level mapper fallback must not create another target");
   assert.deepEqual(released, []);
 
-  applyOfficeSnapshot(snapshot("complete", [stored("valid")], completePage(1), 5), SERVER_URL);
+  applyOfficeSnapshot(snapshot("complete", [stored("valid")], completePage(1), 6), SERVER_URL);
   assert.deepEqual(profileList.value.map((profile) => profile.id), ["profile-0"]);
   assert.deepEqual(sessions.value.map((session) => session.storedSessionId), ["valid"]);
   assert.deepEqual(openSessionIds.value, []);
   assert.deepEqual(released, [malformedId]);
 
-  applyOfficeSnapshot(snapshot("empty", [], completePage(0), 6), SERVER_URL);
+  applyOfficeSnapshot(snapshot("empty", [], completePage(0), 7), SERVER_URL);
   assert.deepEqual(profileList.value, []);
   assert.deepEqual(sessions.value, []);
   assert.deepEqual(openSessionIds.value, []);
@@ -89,8 +93,8 @@ function completePage(count: number): Page {
   return { returned: count, available: count, total: count, hasMore: false, truncated: false, partialFailures: 0 };
 }
 
-function partialPage(returned: number): Page {
-  return { returned, available: returned, hasMore: false, truncated: true, partialFailures: 1 };
+function partialPage(returned: number, total?: number): Page {
+  return { returned, available: returned, ...(total === undefined ? {} : { total }), hasMore: false, truncated: true, partialFailures: 1 };
 }
 
 function unavailablePage(): Page {
