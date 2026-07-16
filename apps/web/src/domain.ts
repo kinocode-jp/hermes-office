@@ -137,7 +137,7 @@ export type OfficeSnapshot = {
   capabilities: {
     protocolVersion: number;
     serverVersion: string;
-    runtime: { state: OfficeRuntimeState; hermesVersion?: string };
+    runtime: { state: OfficeRuntimeState; hermesVersion?: string; adapterVersion?: string };
     access: {
       deviceId: string;
       tier: "viewer" | "operator" | "manager" | "owner";
@@ -145,6 +145,7 @@ export type OfficeSnapshot = {
       authentication: "desktop-capability" | "local-cookie" | "device-cookie" | "tailscale-identity" | "oidc";
       allowedOperations: Operation[];
     };
+    features: Array<"chat" | "profiles" | "skills" | "memory" | "kanban" | "global-inheritance" | "demo">;
   };
   profiles: OfficeSnapshotProfile[];
   sessions: Array<{ id: string; profileId: string; title: string; activity: string }>;

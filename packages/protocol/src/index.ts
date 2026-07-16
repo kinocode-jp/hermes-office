@@ -186,6 +186,7 @@ export interface Capabilities {
     | "memory"
     | "kanban"
     | "global-inheritance"
+    | "demo"
   )[];
 }
 

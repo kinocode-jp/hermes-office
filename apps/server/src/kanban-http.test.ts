@@ -25,7 +25,7 @@ const RAW_CARD = {
   api_key: "never-return-this",
 };
 
-function makeFixture() {
+function makeFixture(cardCount = 1) {
   const requests: HermesKanbanRequest[] = [];
   const adapter = new HermesKanbanAdapter({
     listAllowedProfiles: () => ["mina", "atlas"],
@@ -40,7 +40,11 @@ function makeFixture() {
       }
       if (request.method === "GET") {
         return {
-          columns: [{ name: "todo", tasks: [RAW_CARD] }],
+          columns: [{ name: "todo", tasks: Array.from({ length: cardCount }, (_, index) => ({
+            ...RAW_CARD,
+            id: `t_${index.toString(16).padStart(8, "0")}`,
+            title: `${RAW_CARD.title} ${index} ${"x".repeat(160)}`,
+          })) }],
           assignees: ["mina"],
           latest_event_id: 3,
           now: 200,
@@ -67,6 +71,23 @@ function makeFixture() {
   };
   return { requests, runtime };
 }
+
+test("Kanban responses use a bounded response budget independent from request bodies", async () => {
+  const fixture = makeFixture(1_000);
+  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, maxJsonBytes: 4 * 1024 });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const session = await bootstrap(base);
+    const response = await fetch(`${base}/api/v1/kanban`, { headers: headers(session) });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(text) > 64 * 1024);
+    assert.equal((JSON.parse(text) as { columns: Array<{ cards: unknown[] }> }).columns[0]?.cards.length, 1_000);
+  } finally {
+    await server.close();
+  }
+});
 
 async function bootstrap(base: string): Promise<{ cookie: string; csrf: string }> {
   const response = await fetch(`${base}/api/v1/auth/local`, {

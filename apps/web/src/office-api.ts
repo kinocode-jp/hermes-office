@@ -336,6 +336,8 @@ export function isOfficeSnapshot(value: unknown): value is OfficeSnapshot {
     && Array.isArray(candidate.boards)
     && typeof candidate.capabilities?.protocolVersion === "number"
     && typeof candidate.capabilities.runtime?.state === "string"
+    && Array.isArray(candidate.capabilities.features)
+    && candidate.capabilities.features.every((feature) => ["chat", "profiles", "skills", "memory", "kanban", "global-inheritance", "demo"].includes(feature))
     && isOfficeAccess(candidate.capabilities.access);
 }
 

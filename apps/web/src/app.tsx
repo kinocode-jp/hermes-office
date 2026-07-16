@@ -10,7 +10,7 @@ import { isLocalOfficeClient } from "./auth-state";
 import { logoutRemoteDevice } from "./office-api";
 import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
 import type { Surface } from "./domain";
-import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, officeAccess, officeConnection, openSessionIds, profileList, selectedProfile, settingsTab } from "./store";
+import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, officeAccess, officeConnection, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
 
 const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
   { id: "office", glyph: "⌂", label: "nav.office" },
@@ -24,7 +24,8 @@ export function App() {
   const connection = officeConnection.value;
   const connectionLabel = connection.state === "connected"
     ? (connection.eventStream === "open" ? t("connection.live") : t("connection.connected"))
-    : connection.state === "error" ? t("connection.fallback") : connection.state;
+    : connection.state === "demo" ? t("connection.demo")
+      : connection.state === "error" ? t("connection.error") : connection.state;
   return (
     <div class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}>
       <header class="topbar">
@@ -74,6 +75,12 @@ export function App() {
       </nav>
 
       <main class="main-stage">
+        {connection.state === "error" && (
+          <div class="runtime-error-banner" role="alert">
+            <span>{localizeRuntimeMessage(connection.message)}</span>
+            <button type="button" onClick={retryOfficeServer}>{t("connection.retry")}</button>
+          </div>
+        )}
         {activeSurface.value === "office" && <OfficeScene profiles={profileList.value} />}
         {activeSurface.value === "kanban" && <KanbanBoard />}
         {activeSurface.value === "library" && <LiveSettings key="global-library" profileId={null} initialTab="global" />}

@@ -124,6 +124,14 @@ export class GlobalInheritanceCoordinator {
     await this.#serialized(async () => await this.#options.store.markSkillOverride(profile, skill));
   }
 
+  /** Serialize the Hermes mutation with ownership transfer; failures keep ownership unchanged. */
+  async applyProfileSkillOverride(profile: string, skill: string, mutation: () => Promise<void>): Promise<void> {
+    await this.#serialized(async () => {
+      await mutation();
+      await this.#options.store.markSkillOverride(profile, skill);
+    });
+  }
+
   async #serialized<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.#queue.then(operation);
     this.#queue = result.then(() => undefined, () => undefined);

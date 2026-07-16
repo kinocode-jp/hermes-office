@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -301,13 +301,71 @@ test("device registry survives restart and token rotation replaces its generatio
   const rotated = createOfficeServer({ ...options, remoteToken: rotatedToken });
   const rotatedAddress = await rotated.listen();
   const rotatedBase = `http://127.0.0.1:${rotatedAddress.port}`;
+  let rotatedCookies = "";
   try {
     assert.equal((await fetch(`${rotatedBase}/api/v1/auth/device/renew`, {
       method: "POST",
       headers: { Origin: REMOTE_ORIGIN, Cookie: firstCookies, "X-Forwarded-Proto": "https" },
     })).status, 401);
-    assert.equal((await deviceLogin(rotatedBase, rotatedToken, "Replacement phone")).status, 200);
+    const replacementLogin = await deviceLogin(rotatedBase, rotatedToken, "Replacement phone");
+    assert.equal(replacementLogin.status, 200);
+    rotatedCookies = responseCookies(replacementLogin);
   } finally { await rotated.close(); }
+
+  const rotatedRestart = createOfficeServer({ ...options, remoteToken: rotatedToken });
+  const rotatedRestartAddress = await rotatedRestart.listen();
+  const rotatedRestartBase = `http://127.0.0.1:${rotatedRestartAddress.port}`;
+  try {
+    assert.equal((await deviceLogin(rotatedRestartBase, rotatedToken, "Another phone")).status, 409);
+    assert.equal((await fetch(`${rotatedRestartBase}/api/v1/auth/device/renew`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, Cookie: rotatedCookies, "X-Forwarded-Proto": "https" },
+    })).status, 200);
+  } finally { await rotatedRestart.close(); }
+});
+
+test("device registry rejects every invalid enrollment-consumed representation and inconsistency", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-schema-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const deviceRegistryPath = join(directory, "devices.json");
+  const options = {
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath,
+  } as const;
+  const enrolled = createOfficeServer(options);
+  const enrolledAddress = await enrolled.listen();
+  const enrollment = await deviceLogin(`http://127.0.0.1:${enrolledAddress.port}`, REMOTE_TOKEN);
+  assert.equal(enrollment.status, 200);
+  const enrolledCookies = responseCookies(enrollment);
+  await enrolled.close();
+  const valid = JSON.parse(await readFile(deviceRegistryPath, "utf8")) as Record<string, unknown>;
+  const validDevices = Array.isArray(valid.devices) ? valid.devices : [];
+  const invalidRegistries: unknown[] = [
+    { ...valid, enrollmentConsumed: undefined },
+    { ...valid, enrollmentConsumed: null },
+    { ...valid, enrollmentConsumed: "true" },
+    { ...valid, enrollmentConsumed: false },
+    { ...valid, devices: [...validDevices, { id: "invalid-device" }] },
+    { ...valid, devices: [...validDevices, ...validDevices] },
+    { ...valid, devices: Array.from({ length: 33 }, () => validDevices[0]) },
+  ];
+
+  for (const invalid of invalidRegistries) {
+    await writeFile(deviceRegistryPath, JSON.stringify(invalid), { mode: 0o600 });
+    const server = createOfficeServer(options);
+    const address = await server.listen();
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      assert.equal((await fetch(`${base}/api/v1/auth/device/renew`, {
+        method: "POST",
+        headers: { Origin: REMOTE_ORIGIN, Cookie: enrolledCookies, "X-Forwarded-Proto": "https" },
+      })).status, 401);
+      assert.equal((await deviceLogin(base, REMOTE_TOKEN)).status, 409);
+    } finally { await server.close(); }
+  }
 });
 
 test("malformed device registry fails closed without reopening enrollment", async (t) => {

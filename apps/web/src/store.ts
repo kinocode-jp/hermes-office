@@ -5,8 +5,8 @@ import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInter
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 
-export const profileList = signal(profiles);
-export const sessions = signal<ChatSession[]>(initialSessions);
+export const profileList = signal<Profile[]>([]);
+export const sessions = signal<ChatSession[]>([]);
 export const tasks = signal<WorkTask[]>([]);
 export const kanbanAssignees = signal<string[]>([]);
 export const expandedTaskId = signal("");
@@ -18,9 +18,9 @@ export const kanbanState = signal<{ state: KanbanConnectionState; message: strin
 export const activeSurface = signal<Surface>("office");
 export const inspectorTab = signal<InspectorTab>("chat");
 export const settingsTab = signal<SettingsTab>("skills");
-export const selectedProfileId = signal(profiles[0]?.id ?? "");
-export const openSessionIds = signal<string[]>(["s-research-1", "s-build-1"]);
-export const activeSessionId = signal("s-research-1");
+export const selectedProfileId = signal("");
+export const openSessionIds = signal<string[]>([]);
+export const activeSessionId = signal("");
 export const mobileInspectorOpen = signal(false);
 export const mobileWorkspaceOpen = signal(false);
 export const MAX_OPEN_CHAT_SESSIONS = 4;
@@ -35,11 +35,11 @@ export const officeAccess = signal<OfficeAccess>({
   message: "Office Serverを確認しています"
 });
 export const officeConnection = signal<OfficeConnection>({
-  state: "demo",
-  source: "demo",
+  state: "connecting",
+  source: "server",
   serverUrl: "",
   eventStream: "closed",
-  message: "ローカルデモデータを表示中"
+  message: "Office Serverを確認しています"
 });
 export const selectedProfile = computed(() =>
   profileList.value.find((profile) => profile.id === selectedProfileId.value)
@@ -174,19 +174,29 @@ export function setOfficeConnecting(serverUrl: string): void {
 }
 
 export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string): void {
+  const explicitDemo = snapshot.capabilities.features.includes("demo");
   officeSnapshot.value = snapshot;
   officeConnection.value = {
-    state: "connected",
-    source: "server",
+    state: explicitDemo ? "demo" : "connected",
+    source: explicitDemo ? "demo" : "server",
     serverUrl,
     runtime: snapshot.capabilities.runtime.state,
     protocolVersion: snapshot.capabilities.protocolVersion,
     generatedAt: snapshot.generatedAt,
     eventStream: officeConnection.value.eventStream,
-    message: snapshot.capabilities.runtime.state === "ready" ? "Hermes runtime ready" : `Hermes runtime ${snapshot.capabilities.runtime.state}`
+    message: explicitDemo
+      ? "明示的なデモモードで表示中"
+      : snapshot.capabilities.runtime.state === "ready" ? "Hermes runtime ready" : `Hermes runtime ${snapshot.capabilities.runtime.state}`
   };
 
-  if (snapshot.capabilities.runtime.state !== "ready" || snapshot.profiles.length === 0) return;
+  if (explicitDemo) {
+    loadExplicitDemoState();
+    return;
+  }
+  if (snapshot.capabilities.runtime.state !== "ready" || snapshot.profiles.length === 0) {
+    clearRuntimeState();
+    return;
+  }
 
   const previousProfiles = new Map(profileList.value.map((profile) => [profile.id, profile]));
   const sessionCounts = new Map<string, number>();
@@ -248,10 +258,12 @@ export function setOfficeEventStream(eventStream: OfficeConnection["eventStream"
 }
 
 export function setOfficeError(message: string, serverUrl: string): void {
+  clearRuntimeState();
+  officeSnapshot.value = undefined;
   officeConnection.value = {
     ...officeConnection.value,
     state: "error",
-    source: "demo",
+    source: "server",
     serverUrl,
     eventStream: "closed",
     message
@@ -310,6 +322,8 @@ export function closeSession(sessionId: string): void {
 
 export function createSession(profileId: string): void {
   const isLive = officeConnection.value.source === "server" && officeConnection.value.runtime === "ready";
+  const isDemo = officeConnection.value.source === "demo" && officeConnection.value.state === "demo";
+  if ((!isLive && !isDemo) || !profileList.value.some((profile) => profile.id === profileId)) return;
   const session: ChatSession = {
     id: crypto.randomUUID(),
     profileId,
@@ -323,6 +337,40 @@ export function createSession(profileId: string): void {
   };
   sessions.value = [...sessions.value, session];
   openSession(session.id);
+}
+
+function loadExplicitDemoState(): void {
+  for (const sessionId of openSessionIds.value) releaseChatSession(sessionId);
+  profileList.value = profiles.map((profile) => ({ ...profile, skills: [...profile.skills], inheritedSkills: [...profile.inheritedSkills] }));
+  sessions.value = initialSessions.map((session) => ({
+    ...session,
+    messages: session.messages.map((message) => ({ ...message })),
+    connectionState: "ready",
+    historyState: "loaded",
+    remoteKind: "demo",
+    readOnly: false
+  }));
+  selectedProfileId.value = profileList.value[0]?.id ?? "";
+  openSessionIds.value = sessions.value.slice(0, MAX_OPEN_CHAT_SESSIONS).map((session) => session.id);
+  activeSessionId.value = openSessionIds.value[0] ?? "";
+  tasks.value = [];
+  kanbanAssignees.value = [];
+}
+
+function clearRuntimeState(): void {
+  for (const sessionId of openSessionIds.value) releaseChatSession(sessionId);
+  profileList.value = [];
+  sessions.value = [];
+  tasks.value = [];
+  kanbanAssignees.value = [];
+  selectedProfileId.value = "";
+  openSessionIds.value = [];
+  activeSessionId.value = "";
+  expandedTaskId.value = "";
+  mobileWorkspaceOpen.value = false;
+  mobileInspectorOpen.value = false;
+  chatSocketState.value = { state: "disconnected", message: "Chat接続を待っています" };
+  kanbanState.value = { state: "idle", message: "Hermes runtimeの準備を待っています", latestEventId: 0 };
 }
 
 export function sendMessage(sessionId: string, body: string): void {

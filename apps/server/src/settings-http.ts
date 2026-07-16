@@ -81,8 +81,10 @@ export async function routeSettingsHttp(
         assertOnlyKeys(body, ["enabled", "expectedEnabled"]);
         const enabled = requiredBoolean(body.enabled, "enabled");
         const expectedEnabled = requiredBoolean(body.expectedEnabled, "expectedEnabled");
-        await dependencies.globalInheritance?.noteProfileSkillOverride(profile, skill);
-        await dependencies.settings.setSkillEnabled(profile, skill, enabled, expectedEnabled);
+        const mutation = async (): Promise<void> =>
+          await dependencies.settings.setSkillEnabled(profile, skill, enabled, expectedEnabled);
+        if (dependencies.globalInheritance === undefined) await mutation();
+        else await dependencies.globalInheritance.applyProfileSkillOverride(profile, skill, mutation);
         return { ...ok({ ok: true, name: skill, enabled }), changed: { kind: "skill", profile, id: skill } };
       }
       if (segments.length === 7 && segments[6] === "content") {

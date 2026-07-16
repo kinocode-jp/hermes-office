@@ -42,8 +42,12 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
   const origin = await listen(server);
   t.after(() => server.close());
   const resolved: string[] = [];
+  let releases = 0;
   const adapter = createHermesSettingsAdapter({
-    resolveProfileBackend: async (profile) => { resolved.push(profile); return { baseUrl: origin, sessionToken: TOKEN }; },
+    resolveProfileBackend: async (profile) => {
+      resolved.push(profile);
+      return { baseUrl: origin, sessionToken: TOKEN, release: () => { releases += 1; } };
+    },
   });
 
   const settings = await adapter.getProfileSettings("coder");
@@ -60,6 +64,10 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
   assert.equal(serialized.includes("/private"), false);
   assert.equal(serialized.includes("supersecretvalue"), false);
   assert.equal(serialized.includes("hidden"), false);
+  assert.equal(releases, 1, "one multi-request operation holds exactly one lease");
+
+  await assert.rejects(adapter.getProfileSoul("other"), (error: unknown) => error instanceof HermesSettingsError);
+  assert.equal(releases, 2, "failed operations release their lease in finally");
 });
 
 test("skill and memory mutations are validated and use official Hermes routes", async (t) => {
@@ -85,7 +93,9 @@ test("skill and memory mutations are validated and use official Hermes routes", 
   });
   const origin = await listen(server);
   t.after(() => server.close());
-  const adapter = createHermesSettingsAdapter({ resolveProfileBackend: async () => ({ baseUrl: origin, sessionToken: TOKEN }) });
+  const adapter = createHermesSettingsAdapter({
+    resolveProfileBackend: async () => ({ baseUrl: origin, sessionToken: TOKEN, release: () => undefined }),
+  });
 
   const content = await adapter.getSkillContent("coder", "local");
   assert.equal(content.name, "local");

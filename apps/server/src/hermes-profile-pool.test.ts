@@ -16,7 +16,16 @@ test("parallel profile starts never exceed the configured process slots", async 
     isKnownProfile: async (profile) => allowed.has(profile),
   });
   try {
-    await Promise.all([...allowed].map(async (profile) => await pool.resolve(profile)));
+    let activeLeases = 0;
+    let maxActiveLeases = 0;
+    await Promise.all([...allowed].map(async (profile) => {
+      const lease = await pool.resolve(profile);
+      activeLeases += 1;
+      maxActiveLeases = Math.max(maxActiveLeases, activeLeases);
+      try { await delay(50); }
+      finally { activeLeases -= 1; lease.release(); }
+    }));
+    assert.ok(maxActiveLeases <= 2);
     const files = await readdir(fixture.directory);
     assert.equal(files.filter((file) => file.endsWith(".pid")).length, 2);
     const observed = await Promise.all(
@@ -45,7 +54,8 @@ test("failed and timed-out starts always release their process slot", async () =
   try {
     await assert.rejects(pool.resolve("fail"), /exited before readiness/);
     await assert.rejects(pool.resolve("stall"), /startup timed out/);
-    await pool.resolve("one");
+    const lease = await pool.resolve("one");
+    lease.release();
     const files = await readdir(fixture.directory);
     assert.deepEqual(files.filter((file) => file.endsWith(".pid")), ["one.pid"]);
   } finally {
@@ -64,8 +74,93 @@ test("profile output is drained after readiness without retaining it", async () 
     isKnownProfile: async (profile) => profile === "drain-output",
   });
   try {
-    await pool.resolve("drain-output");
+    const lease = await pool.resolve("drain-output");
     await waitForFile(join(fixture.directory, "drain-output.done"), 3_000);
+    lease.release();
+  } finally {
+    await pool.close();
+    await fixture.close();
+  }
+});
+
+test("an active lease is never evicted to serve another profile", async () => {
+  const fixture = await createFixture();
+  const pool = new HermesProfileBackendPool({
+    executable: fixture.executable,
+    cwd: fixture.directory,
+    maxBackends: 1,
+    startTimeoutMs: 2_000,
+    isKnownProfile: async () => true,
+  });
+  try {
+    const first = await pool.resolve("one");
+    const firstAgain = await pool.resolve("one");
+    const secondPending = pool.resolve("two");
+    await delay(100);
+    const whileLeased = await readdir(fixture.directory);
+    assert.equal(whileLeased.includes("one.pid"), true);
+    assert.equal(whileLeased.includes("two.pid"), false);
+
+    first.release();
+    await delay(100);
+    const oneLeaseRemaining = await readdir(fixture.directory);
+    assert.equal(oneLeaseRemaining.includes("one.pid"), true);
+    assert.equal(oneLeaseRemaining.includes("two.pid"), false);
+    firstAgain.release();
+    const second = await secondPending;
+    const afterRelease = await readdir(fixture.directory);
+    assert.equal(afterRelease.includes("one.pid"), false);
+    assert.equal(afterRelease.includes("two.pid"), true);
+    second.release();
+  } finally {
+    await pool.close();
+    await fixture.close();
+  }
+});
+
+test("capacity timeout does not consume a slot and recovers after release", async () => {
+  const fixture = await createFixture();
+  const pool = new HermesProfileBackendPool({
+    executable: fixture.executable,
+    cwd: fixture.directory,
+    maxBackends: 1,
+    startTimeoutMs: 1_000,
+    isKnownProfile: async () => true,
+  });
+  try {
+    const first = await pool.resolve("one");
+    await assert.rejects(
+      pool.resolve("two"),
+      (error: unknown) => error instanceof Error && error.message.includes("capacity is busy"),
+    );
+    assert.equal((await readdir(fixture.directory)).includes("one.pid"), true);
+    first.release();
+    const second = await pool.resolve("two");
+    second.release();
+  } finally {
+    await pool.close();
+    await fixture.close();
+  }
+});
+
+test("close wakes capacity waiters and stops leased processes", async () => {
+  const fixture = await createFixture();
+  const pool = new HermesProfileBackendPool({
+    executable: fixture.executable,
+    cwd: fixture.directory,
+    maxBackends: 1,
+    startTimeoutMs: 2_000,
+    isKnownProfile: async () => true,
+  });
+  try {
+    const first = await pool.resolve("one");
+    const pending = pool.resolve("two");
+    const pendingRejection = assert.rejects(pending, /closed/);
+    await delay(100);
+    await pool.close();
+    await pendingRejection;
+    first.release();
+    assert.equal((await readdir(fixture.directory)).some((file) => file.endsWith(".pid")), false);
   } finally {
     await pool.close();
     await fixture.close();
@@ -122,4 +217,8 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

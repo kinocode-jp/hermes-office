@@ -369,7 +369,28 @@ export class OfficeAuth {
     this.#enrollmentConsumed = true;
     try {
       const parsed = JSON.parse(readFileSync(this.#deviceRegistryPath, "utf8")) as unknown;
-      if (!isRecord(parsed) || parsed.version !== 1 || typeof parsed.enrollmentTokenDigest !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(parsed.enrollmentTokenDigest) || !Array.isArray(parsed.devices)) {
+      if (!isRecord(parsed)
+        || parsed.version !== 1
+        || typeof parsed.enrollmentTokenDigest !== "string"
+        || !/^[A-Za-z0-9_-]{43}$/.test(parsed.enrollmentTokenDigest)
+        || typeof parsed.enrollmentConsumed !== "boolean"
+        || !Array.isArray(parsed.devices)
+        || parsed.devices.length > MAX_DEVICES) {
+        this.#devices.clear();
+        return;
+      }
+      const devices: DeviceRecord[] = [];
+      const deviceIds = new Set<string>();
+      for (const raw of parsed.devices) {
+        const device = parseStoredDevice(raw);
+        if (device === undefined || deviceIds.has(device.id)) {
+          this.#devices.clear();
+          return;
+        }
+        deviceIds.add(device.id);
+        devices.push(device);
+      }
+      if (!parsed.enrollmentConsumed && devices.length > 0) {
         this.#devices.clear();
         return;
       }
@@ -377,11 +398,8 @@ export class OfficeAuth {
         this.#resetRegistryGeneration();
         return;
       }
-      this.#enrollmentConsumed = parsed.enrollmentConsumed === true;
-      for (const raw of parsed.devices.slice(0, MAX_DEVICES)) {
-        const device = parseStoredDevice(raw);
-        if (device !== undefined) this.#devices.set(device.id, device);
-      }
+      this.#enrollmentConsumed = parsed.enrollmentConsumed;
+      for (const device of devices) this.#devices.set(device.id, device);
     } catch { this.#devices.clear(); }
   }
 

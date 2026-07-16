@@ -16,12 +16,15 @@ export interface HermesProfileBackendAccess {
   /** Credential-free loopback origin of a backend pinned to `profile`. */
   baseUrl: string | URL;
   sessionToken: string;
+  /** Release exactly once after all requests for this operation have settled. */
+  release(): void;
 }
 
 export interface HermesSettingsAdapterOptions {
   /**
    * Must resolve a process whose HERMES_HOME is the requested profile.
    * Hermes memory routes are process-scoped and cannot safely use ?profile=.
+   * The adapter holds the returned lease until the whole public operation settles.
    */
   resolveProfileBackend(profile: string): Promise<HermesProfileBackendAccess>;
   timeoutMs?: number;
@@ -127,25 +130,28 @@ export function createHermesSettingsAdapter(options: HermesSettingsAdapterOption
   const maxResponseBytes = bounded(options.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, 4_096, 8 * 1024 * 1024);
   const maxSkillContentBytes = bounded(options.maxSkillContentBytes, 256 * 1024, 1_024, 512 * 1024);
 
-  const access = async (profile: string): Promise<ProfileClient> => {
+  const withClient = async <T>(profile: string, operation: (client: ProfileClient) => Promise<T>): Promise<T> => {
     const validProfile = requiredProfile(profile);
-    const backend = await options.resolveProfileBackend(validProfile);
-    return new ProfileClient(validProfile, normalizeBackend(backend), timeoutMs, maxResponseBytes);
+    const lease = await options.resolveProfileBackend(validProfile);
+    try {
+      const client = new ProfileClient(validProfile, normalizeBackend(lease), timeoutMs, maxResponseBytes);
+      return await operation(client);
+    } finally {
+      lease.release();
+    }
   };
 
   const adapter: HermesSettingsAdapter = {
-    getProfileSettings: async (profile) => {
-      const client = await access(profile);
+    getProfileSettings: async (profile) => await withClient(profile, async (client) => {
       const [skills, memory, soul] = await Promise.all([
         listSkillsWith(client),
         memoryStatusWith(client),
         soulWith(client),
       ]);
       return { profile: client.profile, skills, memory, soul };
-    },
-    listSkills: async (profile) => listSkillsWith(await access(profile)),
-    setSkillEnabled: async (profile, name, enabled, expectedEnabled) => {
-      const client = await access(profile);
+    }),
+    listSkills: async (profile) => await withClient(profile, listSkillsWith),
+    setSkillEnabled: async (profile, name, enabled, expectedEnabled) => await withClient(profile, async (client) => {
       const skill = requiredName(name, "skill");
       if (expectedEnabled !== undefined) {
         const current = (await listSkillsWith(client)).find((item) => item.name === skill);
@@ -153,36 +159,30 @@ export function createHermesSettingsAdapter(options: HermesSettingsAdapterOption
         if (current.enabled !== expectedEnabled) throw conflict();
       }
       await client.request("/api/skills/toggle", "PUT", { name: skill, enabled });
-    },
-    getSkillContent: async (profile, name) => {
-      const client = await access(profile);
-      const skill = requiredName(name, "skill");
-      const raw = await client.request(`/api/skills/content?name=${encodeURIComponent(skill)}`, "GET");
-      if (!isRecord(raw) || typeof raw.content !== "string") throw invalidBackend();
-      const safe = redactSecrets(truncateUtf8(raw.content, maxSkillContentBytes));
-      return { name: skill, content: safe.value, redacted: safe.redacted, revision: revisionOf(raw.content) };
-    },
+    }),
+    getSkillContent: async (profile, name) => await withClient(profile, async (client) =>
+      await skillContentWith(client, requiredName(name, "skill"), maxSkillContentBytes)),
     updateSkillContent: async (profile, name, content, expectedRevision) => {
       if (Buffer.byteLength(content) > maxSkillContentBytes || content.includes("\0")) throw invalid("Skill content is invalid or too large.");
       if (containsLikelySecret(content)) throw invalid("Skill content appears to contain a secret. Store credentials through the dedicated secret channel.");
-      const client = await access(profile);
-      const skill = requiredName(name, "skill");
-      if (expectedRevision !== undefined) {
-        const current = await adapter.getSkillContent(profile, skill);
-        if (current.redacted || current.revision !== requiredRevision(expectedRevision)) throw conflict();
-      }
-      await client.request("/api/skills/content", "PUT", { name: skill, content });
+      await withClient(profile, async (client) => {
+        const skill = requiredName(name, "skill");
+        if (expectedRevision !== undefined) {
+          const current = await skillContentWith(client, skill, maxSkillContentBytes);
+          if (current.redacted || current.revision !== requiredRevision(expectedRevision)) throw conflict();
+        }
+        await client.request("/api/skills/content", "PUT", { name: skill, content });
+      });
     },
-    getMemoryStatus: async (profile) => memoryStatusWith(await access(profile)),
-    setMemoryProvider: async (profile, provider, expectedProvider) => {
-      const client = await access(profile);
+    getMemoryStatus: async (profile) => await withClient(profile, memoryStatusWith),
+    setMemoryProvider: async (profile, provider, expectedProvider) => await withClient(profile, async (client) => {
       const selected = requiredProvider(provider, true);
       if (expectedProvider !== undefined && (await memoryStatusWith(client)).activeProvider !== requiredProvider(expectedProvider, true)) throw conflict();
       await client.request("/api/memory/provider", "PUT", { provider: selected });
-    },
-    getMemoryProviderConfig: async (profile, provider) => providerConfigWith(await access(profile), requiredProvider(provider, false)),
-    updateMemoryProviderConfig: async (profile, provider, values, expectedRevision) => {
-      const client = await access(profile);
+    }),
+    getMemoryProviderConfig: async (profile, provider) => await withClient(profile, async (client) =>
+      await providerConfigWith(client, requiredProvider(provider, false))),
+    updateMemoryProviderConfig: async (profile, provider, values, expectedRevision) => await withClient(profile, async (client) => {
       const validProvider = requiredProvider(provider, false);
       const schema = await providerConfigWith(client, validProvider);
       if (expectedRevision !== undefined && schema.revision !== requiredRevision(expectedRevision)) throw conflict();
@@ -197,21 +197,22 @@ export function createHermesSettingsAdapter(options: HermesSettingsAdapterOption
         clean[key] = value;
       }
       await client.request(`/api/memory/providers/${encodeURIComponent(validProvider)}/config?surface=declared`, "PUT", { values: clean });
-    },
+    }),
     resetBuiltinMemory: async (profile, target) => {
       if (target !== "all" && target !== "memory" && target !== "user") throw invalid("Memory reset target is invalid.");
-      await (await access(profile)).request("/api/memory/reset", "POST", { target });
+      await withClient(profile, async (client) => await client.request("/api/memory/reset", "POST", { target }));
     },
-    getProfileSoul: async (profile) => soulWith(await access(profile)),
+    getProfileSoul: async (profile) => await withClient(profile, soulWith),
     updateProfileSoul: async (profile, content, expectedRevision) => {
       if (Buffer.byteLength(content) > 256 * 1024 || content.includes("\0")) throw invalid("Profile identity is invalid or too large.");
       if (containsLikelySecret(content)) throw invalid("Profile identity appears to contain a secret.");
-      const client = await access(profile);
-      if (expectedRevision !== undefined) {
-        const current = await soulWith(client);
-        if (current.redacted || current.revision !== requiredRevision(expectedRevision)) throw conflict();
-      }
-      await client.request(`/api/profiles/${encodeURIComponent(client.profile)}/soul`, "PUT", { content });
+      await withClient(profile, async (client) => {
+        if (expectedRevision !== undefined) {
+          const current = await soulWith(client);
+          if (current.redacted || current.revision !== requiredRevision(expectedRevision)) throw conflict();
+        }
+        await client.request(`/api/profiles/${encodeURIComponent(client.profile)}/soul`, "PUT", { content });
+      });
     },
   };
   return adapter;
@@ -276,6 +277,13 @@ async function listSkillsWith(client: ProfileClient): Promise<SkillSettingsDto[]
       usage: Math.max(0, Math.trunc(finiteNumber(item.usage) ?? 0)),
     }];
   });
+}
+
+async function skillContentWith(client: ProfileClient, skill: string, maxBytes: number): Promise<SkillContentDto> {
+  const raw = await client.request(`/api/skills/content?name=${encodeURIComponent(skill)}`, "GET");
+  if (!isRecord(raw) || typeof raw.content !== "string") throw invalidBackend();
+  const safe = redactSecrets(truncateUtf8(raw.content, maxBytes));
+  return { name: skill, content: safe.value, redacted: safe.redacted, revision: revisionOf(raw.content) };
 }
 
 async function memoryStatusWith(client: ProfileClient): Promise<MemoryStatusDto> {

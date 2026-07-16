@@ -57,6 +57,35 @@ test("gateway delivers a bounded multibyte event instead of silently dropping it
   assert.equal(event.params.payload.truncated, true);
 });
 
+test("slow or failed chat clients are closed with a resynchronization policy", async () => {
+  let publishSlow!: (event: HermesChatEvent) => void;
+  const slow = new FakeWebSocket();
+  handleOfficeChatConnection(slow as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publishSlow = onEvent; return connection(); }),
+    maxJsonBytes: 1_024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    limits: { maxBufferedBytes: 512 },
+  });
+  await flush();
+  slow.bufferedAmount = 1_000;
+  publishSlow({ type: "status.update", sessionId: "slow-1", payload: { status: "running" } });
+  assert.deepEqual(slow.closed, { code: 1013, reason: "Client too slow; reload history" });
+
+  let publishFailed!: (event: HermesChatEvent) => void;
+  const failed = new FakeWebSocket();
+  handleOfficeChatConnection(failed as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publishFailed = onEvent; return connection(); }),
+    maxJsonBytes: 1_024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+  });
+  await flush();
+  failed.sendError = new Error("socket write failed");
+  publishFailed({ type: "status.update", sessionId: "failed-1", payload: { status: "running" } });
+  assert.deepEqual(failed.closed, { code: 1013, reason: "Client too slow; reload history" });
+});
+
 test("approval and clarification remain exact-socket, one-shot, expiring, and disconnect-bounded", async () => {
   let now = 1_000;
   const callbacks: Array<(event: HermesChatEvent) => void> = [];
@@ -134,6 +163,115 @@ test("approval and clarification remain exact-socket, one-shot, expiring, and di
   assert.deepEqual(localRequests.map((request) => request.method), ["approval.respond"]);
 });
 
+test("approval and clarification claims are exclusive and recover only after timely upstream failure", async () => {
+  let now = 1_000;
+  let publish!: (event: HermesChatEvent) => void;
+  const approvalFailure = deferred<never>();
+  const clarificationFailure = deferred<never>();
+  const expiredFailure = deferred<never>();
+  const requests: HermesChatRequest[] = [];
+  let attempt = 0;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => {
+      publish = onEvent;
+      return connection(async (request) => {
+        requests.push(request);
+        attempt += 1;
+        if (attempt === 1) return await approvalFailure.promise;
+        if (attempt === 3) return await clarificationFailure.promise;
+        if (attempt === 5) return await expiredFailure.promise;
+        return { method: request.method, value: { status: "ok" } };
+      });
+    }),
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    now: () => now,
+    limits: { approvalTtlMs: 50, socketRateCapacity: 100 },
+  });
+  await flush();
+
+  publish({ type: "approval.request", sessionId: "s-retry", payload: { choices: ["once"], allowPermanent: false } });
+  client.rpc(20, "approval.respond", { session_id: "s-retry", choice: "once" });
+  client.rpc(21, "approval.respond", { session_id: "s-retry", choice: "once" });
+  await flush();
+  assert.equal(requests.length, 1);
+  assert.equal(client.errorCode(21), -32004);
+  approvalFailure.reject(new Error("temporary approval failure"));
+  await flush();
+  assert.equal(client.errorCode(20), -32000);
+  client.rpc(22, "approval.respond", { session_id: "s-retry", choice: "once" });
+  await flush();
+  assert.equal(requests.length, 2);
+  client.rpc(23, "approval.respond", { session_id: "s-retry", choice: "once" });
+  await flush();
+  assert.equal(client.errorCode(23), -32004);
+
+  publish({ type: "clarify.request", sessionId: "s-retry", payload: { requestId: "q-retry", question: "Retry?" } });
+  client.rpc(24, "clarify.respond", { request_id: "q-retry", answer: "yes" });
+  client.rpc(25, "clarify.respond", { request_id: "q-retry", answer: "competing" });
+  await flush();
+  assert.equal(requests.length, 3);
+  assert.equal(client.errorCode(25), -32004);
+  clarificationFailure.reject(new Error("temporary clarification failure"));
+  await flush();
+  assert.equal(client.errorCode(24), -32000);
+  client.rpc(26, "clarify.respond", { request_id: "q-retry", answer: "retry" });
+  await flush();
+  assert.equal(requests.length, 4);
+  client.rpc(27, "clarify.respond", { request_id: "q-retry", answer: "again" });
+  await flush();
+  assert.equal(client.errorCode(27), -32004);
+
+  publish({ type: "approval.request", sessionId: "s-failure-expired", payload: { choices: ["once"], allowPermanent: false } });
+  client.rpc(28, "approval.respond", { session_id: "s-failure-expired", choice: "once" });
+  await flush();
+  assert.equal(requests.length, 5);
+  now += 51;
+  expiredFailure.reject(new Error("late failure"));
+  await flush();
+  client.rpc(29, "approval.respond", { session_id: "s-failure-expired", choice: "once" });
+  await flush();
+  assert.equal(requests.length, 5);
+  assert.equal(client.errorCode(29), -32004);
+});
+
+test("a queued response received before its request stays stale at the same clock tick", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  const gates = Array.from({ length: 4 }, () => deferred<void>());
+  const requests: HermesChatRequest[] = [];
+  let interruptIndex = 0;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => {
+      publish = onEvent;
+      return connection(async (request) => {
+        requests.push(request);
+        if (request.method === "session.interrupt") await gates[interruptIndex++]!.promise;
+        return { method: request.method, value: { status: "ok" } };
+      });
+    }),
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    now: () => 1_000,
+    limits: { socketRateCapacity: 100 },
+  });
+  await flush();
+  for (let id = 30; id < 34; id += 1) client.rpc(id, "session.interrupt", { session_id: "s-block" });
+  client.rpc(34, "approval.respond", { session_id: "s-new", choice: "once" });
+  publish({ type: "approval.request", sessionId: "s-new", payload: { choices: ["once"], allowPermanent: false } });
+  for (const gate of gates) gate.resolve(undefined);
+  await flush();
+  assert.equal(client.errorCode(34), -32004);
+  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 0);
+
+  client.rpc(35, "approval.respond", { session_id: "s-new", choice: "once" });
+  await flush();
+  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 1);
+});
+
 test("queue, in-flight, socket rate, and shared device rate limits are deterministic", async () => {
   const auth = new OfficeAuth();
   const waiting = deferred<ReturnType<typeof connection>>();
@@ -194,9 +332,11 @@ test("queue, in-flight, socket rate, and shared device rate limits are determini
 
 class FakeWebSocket extends EventEmitter {
   readyState: number = WebSocket.OPEN;
+  bufferedAmount = 0;
   readonly sent: string[] = [];
   closed?: { code: number; reason: string };
-  send(body: string): void { this.sent.push(body); }
+  sendError?: Error;
+  send(body: string, callback?: (error?: Error) => void): void { this.sent.push(body); callback?.(this.sendError); }
   close(code: number, reason: string): void { this.closed = { code, reason }; this.readyState = WebSocket.CLOSED; this.emit("close"); }
   rpc(id: number, method: string, params: Record<string, unknown>): void { this.emit("message", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params })), false); }
   errorCode(id: number): number | undefined { return (this.frames().find((frame) => frame.id === id)?.error as { code?: number } | undefined)?.code; }
@@ -211,5 +351,10 @@ function runtimeWithConnect(connect: (onEvent: (event: HermesChatEvent) => void)
 function connection(request: (request: HermesChatRequest) => Promise<{ method: HermesChatRequest["method"]; value: Record<string, string> }> = async (input) => ({ method: input.method, value: { status: "ok" } })) {
   return { closed: false, request, close: async () => undefined };
 }
-function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
 async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }

@@ -15,17 +15,23 @@ export interface HermesProfileBackendPoolOptions {
   isKnownProfile?: (profile: string) => Promise<boolean>;
 }
 
-interface PoolEntry extends HermesProfileBackendAccess {
+interface PoolEntry {
+  baseUrl: string;
+  sessionToken: string;
   child: ManagedChild;
   lastUsed: number;
+  leases: number;
 }
 
-/** Small LRU pool for Hermes APIs whose scope is the process HERMES_HOME. */
+interface StartSlot { promise: Promise<PoolEntry>; leases: number }
+
+/** Lease-aware LRU pool for Hermes APIs whose scope is the process HERMES_HOME. */
 export class HermesProfileBackendPool {
   readonly #options: Required<Omit<HermesProfileBackendPoolOptions, "isKnownProfile">>
     & Pick<HermesProfileBackendPoolOptions, "isKnownProfile">;
   readonly #entries = new Map<string, PoolEntry>();
-  readonly #starts = new Map<string, Promise<PoolEntry>>();
+  readonly #starts = new Map<string, StartSlot>();
+  readonly #capacityWaiters = new Set<() => void>();
   #allocationTail = Promise.resolve();
   #closed = false;
 
@@ -48,22 +54,26 @@ export class HermesProfileBackendPool {
     }
     const existing = this.#entries.get(profile);
     if (existing !== undefined && existing.child.exitCode === null) {
-      existing.lastUsed = Date.now();
-      return publicAccess(existing);
+      existing.leases += 1;
+      return this.#publicLease(existing);
     }
     if (existing !== undefined) this.#entries.delete(profile);
     const starting = this.#starts.get(profile);
-    if (starting !== undefined) return publicAccess(await starting);
+    if (starting !== undefined) {
+      starting.leases += 1;
+      return this.#publicLease(await starting.promise);
+    }
 
     const allocation = await this.#allocate(profile);
-    return publicAccess(await allocation.promise);
+    return this.#publicLease(await allocation.promise);
   }
 
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#notifyCapacity();
     await this.#allocationTail;
-    await Promise.allSettled([...this.#starts.values()]);
+    await Promise.allSettled([...this.#starts.values()].map((slot) => slot.promise));
     const entries = [...this.#entries.values()];
     this.#entries.clear();
     await Promise.all(entries.map(async (entry) => await stopChild(entry.child)));
@@ -87,8 +97,11 @@ export class HermesProfileBackendPool {
       throw error;
     });
     if (this.#closed) { await stopChild(child); throw new Error("Hermes profile backend pool is closed."); }
-    const entry: PoolEntry = { child, baseUrl: `http://127.0.0.1:${port}`, sessionToken, lastUsed: Date.now() };
-    child.once("exit", () => { if (this.#entries.get(profile)?.child === child) this.#entries.delete(profile); });
+    const entry: PoolEntry = { child, baseUrl: `http://127.0.0.1:${port}`, sessionToken, lastUsed: Date.now(), leases: 0 };
+    child.once("exit", () => {
+      if (this.#entries.get(profile)?.child === child) this.#entries.delete(profile);
+      this.#notifyCapacity();
+    });
     return entry;
   }
 
@@ -101,51 +114,105 @@ export class HermesProfileBackendPool {
       if (this.#closed) throw new Error("Hermes profile backend pool is closed.");
       const existing = this.#entries.get(profile);
       if (existing !== undefined && existing.child.exitCode === null) {
-        existing.lastUsed = Date.now();
+        existing.leases += 1;
         return { promise: Promise.resolve(existing) };
       }
       if (existing !== undefined) this.#entries.delete(profile);
       const starting = this.#starts.get(profile);
-      if (starting !== undefined) return { promise: starting };
+      if (starting !== undefined) {
+        starting.leases += 1;
+        return { promise: starting.promise };
+      }
 
       while (this.#entries.size + this.#starts.size >= this.#options.maxBackends) {
-        if (this.#entries.size > 0) {
-          await this.#evictOldest();
+        if (this.#oldestIdle() !== undefined) {
+          await this.#evictOldestIdle();
         } else {
-          await Promise.race([...this.#starts.values()].map(async (start) => {
-            try { await start; } catch { /* A failed start releases its slot. */ }
-          }));
+          await this.#waitForCapacity();
         }
         if (this.#closed) throw new Error("Hermes profile backend pool is closed.");
       }
 
       const started = this.#start(profile);
+      const slot = { promise: started, leases: 1 } satisfies StartSlot;
       let tracked!: Promise<PoolEntry>;
       tracked = started.then(
         (entry) => {
-          if (this.#starts.get(profile) === tracked) this.#starts.delete(profile);
-          if (entry.child.exitCode !== null) throw new Error("Hermes profile process exited during startup.");
+          if (this.#starts.get(profile) === slot) this.#starts.delete(profile);
+          if (entry.child.exitCode !== null) {
+            this.#notifyCapacity();
+            throw new Error("Hermes profile process exited during startup.");
+          }
+          entry.leases = slot.leases;
           this.#entries.set(profile, entry);
           return entry;
         },
         (error: unknown) => {
-          if (this.#starts.get(profile) === tracked) this.#starts.delete(profile);
+          if (this.#starts.get(profile) === slot) this.#starts.delete(profile);
+          this.#notifyCapacity();
           throw error;
         },
       );
-      this.#starts.set(profile, tracked);
+      slot.promise = tracked;
+      this.#starts.set(profile, slot);
       return { promise: tracked };
     } finally {
       release();
     }
   }
 
-  async #evictOldest(): Promise<void> {
+  #oldestIdle(): [string, PoolEntry] | undefined {
     let oldest: [string, PoolEntry] | undefined;
-    for (const item of this.#entries) if (oldest === undefined || item[1].lastUsed < oldest[1].lastUsed) oldest = item;
+    for (const item of this.#entries) {
+      if (item[1].leases === 0 && (oldest === undefined || item[1].lastUsed < oldest[1].lastUsed)) oldest = item;
+    }
+    return oldest;
+  }
+
+  async #evictOldestIdle(): Promise<void> {
+    const oldest = this.#oldestIdle();
     if (oldest === undefined) return;
     this.#entries.delete(oldest[0]);
     await stopChild(oldest[1].child);
+    this.#notifyCapacity();
+  }
+
+  async #waitForCapacity(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: HermesSettingsError): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.#capacityWaiters.delete(ready);
+        if (error === undefined) resolve(); else reject(error);
+      };
+      const ready = (): void => finish();
+      const timer = setTimeout(() => finish(new HermesSettingsError("timed_out", "Hermes profile capacity is busy.")), this.#options.startTimeoutMs);
+      timer.unref();
+      this.#capacityWaiters.add(ready);
+    });
+  }
+
+  #notifyCapacity(): void {
+    const waiters = [...this.#capacityWaiters];
+    this.#capacityWaiters.clear();
+    for (const ready of waiters) ready();
+  }
+
+  #publicLease(entry: PoolEntry): HermesProfileBackendAccess {
+    let released = false;
+    return {
+      baseUrl: entry.baseUrl,
+      sessionToken: entry.sessionToken,
+      release: () => {
+        if (released) return;
+        released = true;
+        entry.leases = Math.max(0, entry.leases - 1);
+        entry.lastUsed = Date.now();
+        this.#notifyCapacity();
+      },
+    };
   }
 }
 
@@ -192,5 +259,4 @@ async function stopChild(child: ManagedChild): Promise<void> {
   });
 }
 
-function publicAccess(entry: PoolEntry): HermesProfileBackendAccess { return { baseUrl: entry.baseUrl, sessionToken: entry.sessionToken }; }
 function bounded(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }

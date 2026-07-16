@@ -55,6 +55,8 @@ type PendingRequest = {
 const RPC_TIMEOUT_MS = 15_000;
 const HISTORY_TIMEOUT_MS = 10_000;
 const RECONNECT_MAX_MS = 8_000;
+const HISTORY_PAGE_LIMIT = 25;
+const MAX_HISTORY_PAGES = 2_000;
 
 export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
   const serverUrl = officeServerUrl();
@@ -88,13 +90,18 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     }, delay);
   };
 
-  const handleClose = () => {
+  const handleClose = (event?: CloseEvent) => {
+    const historyResyncRequired = event?.code === 1013 && event.reason.includes("reload history");
     socket = undefined;
     opening.clear();
     liveToClient.clear();
+    if (historyResyncRequired) loadedHistories.clear();
     rejectPending("Chat接続が切断されました。");
     for (const clientSessionId of targets.keys()) callbacks.onSessionDisconnected(clientSessionId);
-    callbacks.onSocketState("disconnected", stopped ? undefined : "再接続を待っています");
+    callbacks.onSocketState(
+      "disconnected",
+      stopped ? undefined : historyResyncRequired ? "接続復旧後に履歴を再同期します" : "再接続を待っています",
+    );
     scheduleReconnect();
   };
 
@@ -167,11 +174,14 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
       if (socket !== nextSocket || stopped) return;
       reconnectAttempt = 0;
       callbacks.onSocketState("ready");
-      for (const target of targets.values()) void openRemoteSession(target);
+      for (const target of targets.values()) {
+        void loadHistory(target);
+        void openRemoteSession(target);
+      }
     });
     nextSocket.addEventListener("message", (event) => handleMessage(event.data));
-    nextSocket.addEventListener("close", () => {
-      if (socket === nextSocket) handleClose();
+    nextSocket.addEventListener("close", (event) => {
+      if (socket === nextSocket) handleClose(event);
     });
     nextSocket.addEventListener("error", () => {
       callbacks.onSocketState("error", "Chat WebSocketへ接続できませんでした。");
@@ -242,18 +252,31 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     historyLoads.add(target.clientSessionId);
     callbacks.onHistoryLoading(target.clientSessionId);
     try {
-      const query = new URLSearchParams({ profile: target.profileId });
-      const body = await officeFetchJson<unknown>(
-        `/api/v1/sessions/${encodeURIComponent(target.storedSessionId)}/messages?${query.toString()}`,
-        { timeoutMs: HISTORY_TIMEOUT_MS },
-        serverUrl
-      );
-      const history = normalizeHistory(body, target.storedSessionId);
-      if (history.resolvedStoredSessionId) {
-        targets.set(target.clientSessionId, { ...target, storedSessionId: history.resolvedStoredSessionId });
+      const messages: ChatMessage[] = [];
+      let cursor: string | undefined;
+      let resolvedStoredSessionId: string | undefined;
+      for (let pageNumber = 0; pageNumber < MAX_HISTORY_PAGES; pageNumber += 1) {
+        const query = new URLSearchParams({ profile: target.profileId, limit: String(HISTORY_PAGE_LIMIT) });
+        if (cursor !== undefined) query.set("cursor", cursor);
+        const body = await officeFetchJson<unknown>(
+          `/api/v1/sessions/${encodeURIComponent(target.storedSessionId)}/messages?${query.toString()}`,
+          { timeoutMs: HISTORY_TIMEOUT_MS },
+          serverUrl
+        );
+        const page = normalizeHistoryPage(body, target.storedSessionId);
+        messages.push(...page.messages);
+        resolvedStoredSessionId = page.resolvedStoredSessionId ?? resolvedStoredSessionId;
+        if (!page.hasMore) break;
+        if (page.nextCursor === undefined || page.messages.length === 0 || pageNumber === MAX_HISTORY_PAGES - 1) {
+          throw new Error("保存済み履歴がOfficeの安全な読込上限を超えました。");
+        }
+        cursor = page.nextCursor;
+      }
+      if (resolvedStoredSessionId) {
+        targets.set(target.clientSessionId, { ...target, storedSessionId: resolvedStoredSessionId });
       }
       loadedHistories.add(target.clientSessionId);
-      callbacks.onHistory(target.clientSessionId, history.messages, history.resolvedStoredSessionId);
+      callbacks.onHistory(target.clientSessionId, messages, resolvedStoredSessionId);
     } catch (error) {
       callbacks.onHistoryError(target.clientSessionId, errorText(error));
     } finally {
@@ -341,7 +364,12 @@ function liveSessionIdFor(clientSessionId: string, liveToClient: Map<string, str
   return [...liveToClient.entries()].find(([, clientId]) => clientId === clientSessionId)?.[0];
 }
 
-function normalizeHistory(value: unknown, storedSessionId: string): { messages: ChatMessage[]; resolvedStoredSessionId?: string } {
+export function normalizeHistoryPage(value: unknown, storedSessionId: string): {
+  messages: ChatMessage[];
+  resolvedStoredSessionId?: string;
+  hasMore: boolean;
+  nextCursor?: string;
+} {
   const record = asRecord(value);
   const entries = Array.isArray(value) ? value : Array.isArray(record?.messages) ? record.messages : [];
   const messages = entries.flatMap((entry, index) => {
@@ -351,7 +379,9 @@ function normalizeHistory(value: unknown, storedSessionId: string): { messages: 
     const body = messageText(message);
     if (!body) return [];
     return [{
-      id: typeof message.id === "string" ? message.id : `history-${storedSessionId}-${index}`,
+      id: typeof message.id === "string"
+        ? message.id
+        : `history-${storedSessionId}-${typeof message.index === "number" && Number.isSafeInteger(message.index) ? message.index : index}`,
       from: role === "user" ? "user" as const : role === "tool" || role === "system" ? "tool" as const : "agent" as const,
       body,
       at: messageTime(message),
@@ -361,7 +391,18 @@ function normalizeHistory(value: unknown, storedSessionId: string): { messages: 
   const resolvedStoredSessionId = typeof record?.sessionId === "string"
     ? record.sessionId
     : typeof record?.session_id === "string" ? record.session_id : undefined;
-  return { messages, ...(resolvedStoredSessionId ? { resolvedStoredSessionId } : {}) };
+  const pagination = asRecord(record?.pagination);
+  const hasMore = pagination?.hasMore === true;
+  const nextCursor = typeof pagination?.nextCursor === "string" && pagination.nextCursor.length <= 64
+    ? pagination.nextCursor
+    : undefined;
+  if (hasMore && nextCursor === undefined) throw new Error("Office Serverの履歴ページ情報に互換性がありません。");
+  return {
+    messages,
+    ...(resolvedStoredSessionId ? { resolvedStoredSessionId } : {}),
+    hasMore,
+    ...(nextCursor ? { nextCursor } : {}),
+  };
 }
 
 function messageText(message: Record<string, unknown>): string {

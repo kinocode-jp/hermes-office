@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import type { HermesSettingsAdapter } from "./hermes-settings.js";
 import { HermesSettingsError, OfficeGlobalSettingsStore } from "./hermes-settings.js";
 import { routeSettingsHttp } from "./settings-http.js";
@@ -108,6 +109,50 @@ test("settings HTTP maps adapter conflict and failure to stable public errors", 
   const text = await failed.text();
   assert.equal(text.includes("/Users/private"), false);
   assert.equal(text.includes("api_key"), false);
+});
+
+test("profile skill override is persisted only after the Hermes mutation succeeds", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-http-skill-override-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new OfficeGlobalSettingsStore(join(directory, "global.json"));
+  const staged = await store.beginMaterialization({ expectedRevision: 0, skills: ["local"] });
+  await store.finishMaterialization(staged.settings.revision, [{ profile: "coder", skill: "local" }], [], []);
+  const adapter = makeAdapter([]);
+  let failure: HermesSettingsError | undefined = new HermesSettingsError("conflict", "Hermes setting changed; refresh before saving.");
+  adapter.setSkillEnabled = async () => {
+    if (failure !== undefined) throw failure;
+  };
+  const inheritance = new GlobalInheritanceCoordinator({ store, settings: adapter, listProfiles: async () => ["coder"] });
+  const server = createServer(async (request, response) => {
+    const result = await routeSettingsHttp(
+      request,
+      new URL(request.url ?? "/", "http://office.local"),
+      { settings: adapter, globalSettings: store, globalInheritance: inheritance },
+      4_096,
+    );
+    response.writeHead(result.status, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(result.body));
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+
+  for (const [error, status] of [
+    [new HermesSettingsError("conflict", "changed"), 409],
+    [new HermesSettingsError("timed_out", "timed out"), 504],
+    [new HermesSettingsError("rejected", "rejected"), 502],
+  ] as const) {
+    failure = error;
+    const failed = await jsonFetch(`${origin}/api/v1/profiles/coder/skills/local`, "PATCH", { enabled: false, expectedEnabled: true });
+    assert.equal(failed.status, status);
+    assert.deepEqual((await store.readMaterialization()).managedSkills, [{ profile: "coder", skill: "local" }]);
+    assert.deepEqual((await store.readMaterialization()).skillOverrides, []);
+  }
+
+  failure = undefined;
+  const succeeded = await jsonFetch(`${origin}/api/v1/profiles/coder/skills/local`, "PATCH", { enabled: false, expectedEnabled: true });
+  assert.equal(succeeded.status, 200);
+  assert.deepEqual((await store.readMaterialization()).managedSkills, []);
+  assert.deepEqual((await store.readMaterialization()).skillOverrides, [{ profile: "coder", skill: "local" }]);
 });
 
 function makeAdapter(calls: Array<{ method: string; args: unknown[] }>): HermesSettingsAdapter {

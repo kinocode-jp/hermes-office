@@ -12,7 +12,7 @@ export type CharacterSheetPosition = {
 
 /**
  * Resolve a Hermes profile preference to the front-idle cell in the 9 × 6 atlas.
- * Known profiles keep stable cells; new profiles receive a deterministic default.
+ * Profile IDs receive a deterministic default without embedding an installation inventory.
  */
 export function characterSheetPosition(profileId: string): CharacterSheetPosition {
   const avatar = avatarForProfile(profileId);

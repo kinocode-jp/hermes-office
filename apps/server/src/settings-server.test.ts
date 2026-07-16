@@ -47,6 +47,14 @@ test("Office Server settings API requires authentication and CSRF on writes", as
   assert.equal(readable.status, 200);
   assert.equal((await readable.json() as { activeProvider: string }).activeProvider, "builtin");
 
+  const skillsResponse = await fetch(`${origin}/api/v1/profiles/coder/skills`, {
+    headers: { Origin: browserOrigin, Cookie: cookie },
+  });
+  const skillsText = await skillsResponse.text();
+  assert.equal(skillsResponse.status, 200);
+  assert.ok(Buffer.byteLength(skillsText) > 64 * 1024);
+  assert.equal((JSON.parse(skillsText) as unknown[]).length, 1_000);
+
   const denied = await fetch(`${origin}/api/v1/profiles/coder/memory/provider`, {
     method: "PUT",
     headers: { Origin: browserOrigin, Cookie: cookie, "Content-Type": "application/json" },
@@ -74,9 +82,17 @@ test("Office Server settings API requires authentication and CSRF on writes", as
 function makeSettingsAdapter(getProvider: () => string, setProvider: (provider: string) => void): HermesSettingsAdapter {
   const memory = () => ({ activeProvider: getProvider(), providers: [], builtin: { memoryBytes: 0, userBytes: 0, hasMemory: false, hasUser: false } });
   const soul = { profile: "coder", content: "identity", exists: true, redacted: false, revision: "a".repeat(43) };
+  const skills = Array.from({ length: 1_000 }, (_, index) => ({
+    name: `skill-${index}`,
+    category: "workspace",
+    description: `Safe skill ${index} ${"x".repeat(120)}`,
+    enabled: index % 2 === 0,
+    provenance: "agent" as const,
+    usage: index,
+  }));
   return {
-    getProfileSettings: async (profile) => ({ profile, skills: [], memory: memory(), soul: { ...soul, profile } }),
-    listSkills: async () => [],
+    getProfileSettings: async (profile) => ({ profile, skills, memory: memory(), soul: { ...soul, profile } }),
+    listSkills: async () => skills,
     setSkillEnabled: async () => undefined,
     getSkillContent: async (_profile, name) => ({ name, content: "", redacted: false, revision: "a".repeat(43) }),
     updateSkillContent: async () => undefined,

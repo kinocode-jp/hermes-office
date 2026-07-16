@@ -18,8 +18,6 @@ void hydrateCustomAvatars(initialAvatars);
 
 export function defaultAvatarOrdinal(profileId: string): number {
   const normalized = profileId.trim().toLocaleLowerCase("en-US");
-  const knownIndex = knownProfileIndexes[normalized];
-  if (knownIndex !== undefined) return knownIndex;
   if (!normalized) return DEFAULT_CHARACTER_COUNT - 1;
   let hash = 2166136261;
   for (const character of normalized) {
@@ -177,17 +175,3 @@ function requestResult<T = IDBValidKey>(request: IDBRequest<T>): Promise<T> {
     request.onerror = () => reject(request.error ?? new Error("avatar storage failed"));
   });
 }
-
-const knownProfileIndexes: Readonly<Record<string, number>> = {
-  default: 0,
-  profile-alpha: 1,
-  profile-beta: 2,
-  profile-gamma: 3,
-  profile-delta: 4,
-  profile-epsilon: 5,
-  profile-zeta: 6,
-  profile-eta: 7,
-  "profile-kappa": 8,
-  profile-theta: 9,
-  profile-iota: 10
-};

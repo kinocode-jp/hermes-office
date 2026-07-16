@@ -41,6 +41,7 @@ export function createDemoSnapshot(now = new Date()): OfficeSnapshot {
         "memory",
         "kanban",
         "global-inheritance",
+        "demo",
       ],
     },
     globalSettings: {

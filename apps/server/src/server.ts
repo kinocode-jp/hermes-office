@@ -8,6 +8,7 @@ import { isKanbanHttpPath, isKanbanMutation, routeKanbanHttp } from "./kanban-ht
 import { isSettingsHttpPath, isSettingsMutation, routeSettingsHttp } from "./settings-http.js";
 import { DeviceAuthBodyError, readDeviceAuthBody } from "./device-auth-http.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
+import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
 import { StaticWebAssets, type StaticWebAsset } from "./static-web.js";
 import {
   OFFICE_PROTOCOL_VERSION,
@@ -31,6 +32,7 @@ export interface OfficeServerOptions {
   trustedProxyHops?: number;
   deviceRegistryPath?: string;
   maxJsonBytes?: number;
+  maxResponseJsonBytes?: number;
   maxEventBytes?: number;
   maxWebSocketClients?: number;
   runtimeSource?: HermesRuntimeSource;
@@ -53,6 +55,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4317;
   const maxJsonBytes = boundedInteger(options.maxJsonBytes, 64 * 1024, 1_024, 1024 * 1024);
+  const maxResponseJsonBytes = boundedInteger(options.maxResponseJsonBytes, 4 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024);
   const maxEventBytes = boundedInteger(options.maxEventBytes, 64 * 1024, 1_024, 1024 * 1024);
   const maxWebSocketClients = boundedInteger(options.maxWebSocketClients, 32, 1, 256);
   const originAllowlist = new Set(makeOriginAllowlist(
@@ -145,7 +148,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       }
       const session = auth.bootstrapLocal(request, response);
       if (session === undefined) writeError(response, 403, "forbidden", "Local bootstrap is loopback-only.", maxJsonBytes);
-      else writeJson(response, 200, session, maxJsonBytes);
+      else writeJson(response, 200, session, maxResponseJsonBytes);
       return;
     }
 
@@ -158,7 +161,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       try {
         const credentials = await readDeviceAuthBody(request, maxJsonBytes);
         const result = auth.bootstrapDevice(request, response, credentials);
-        if (result.outcome === "success") writeJson(response, 200, result.session, maxJsonBytes);
+        if (result.outcome === "success") writeJson(response, 200, result.session, maxResponseJsonBytes);
         else if (result.outcome === "rate_limited") {
           writeError(response, 429, "rate_limited", "Too many device authentication attempts.", maxJsonBytes, { "Retry-After": "60" });
         } else if (result.outcome === "insecure_transport") {
@@ -183,7 +186,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     if (request.method === "POST" && requestUrl.pathname === "/api/v1/auth/device/renew") {
       if (requestHasBody(request)) { request.resume(); writeError(response, 413, "bad_request", "Renewal request bodies are not accepted.", maxJsonBytes); return; }
       const result = auth.renewDevice(request, response);
-      if (result.outcome === "success") writeJson(response, 200, result.session, maxJsonBytes);
+      if (result.outcome === "success") writeJson(response, 200, result.session, maxResponseJsonBytes);
       else if (result.outcome === "insecure_transport") writeError(response, 403, "forbidden", "Remote renewal requires a configured trusted HTTPS proxy.", maxJsonBytes);
       else writeError(response, 401, "unauthenticated", "Device credential is invalid or revoked.", maxJsonBytes);
       return;
@@ -200,7 +203,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       } else if (!auth.revoke(request, response)) {
         writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
       } else {
-        writeJson(response, 200, { ok: true }, maxJsonBytes);
+        writeJson(response, 200, { ok: true }, maxResponseJsonBytes);
       }
       return;
     }
@@ -231,7 +234,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       try {
         const result = await routeKanbanHttp(request, requestUrl, runtimeSource.kanban(), maxJsonBytes);
         if (!request.readableEnded) request.resume();
-        writeJson(response, result.status, result.body, maxJsonBytes, result.headers ?? {});
+        writeJson(response, result.status, result.body, maxResponseJsonBytes, result.headers ?? {});
         if (result.changedCardId !== undefined && result.status >= 200 && result.status < 300) {
           const event = makeEvent(++sequence, "kanban.changed", {
             cardId: result.changedCardId,
@@ -269,7 +272,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         maxJsonBytes,
       );
       if (!request.readableEnded) request.resume();
-      writeJson(response, result.status, result.body, maxJsonBytes, result.headers ?? {});
+      writeJson(response, result.status, result.body, maxResponseJsonBytes, result.headers ?? {});
       if (result.changed !== undefined && result.status >= 200 && result.status < 300) {
         const aggregateId = result.changed.profile ?? result.changed.id ?? "global";
         const event = makeEvent(++sequence, "profile.changed", result.changed, aggregateId);
@@ -289,7 +292,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       if (!auth.revokeDevice(access.session, deviceId)) { writeError(response, 404, "not_found", "Active device was not found.", maxJsonBytes); return; }
       for (const client of websocketServer.clients) if (eventSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
       for (const client of chatWebSocketServer.clients) if (chatSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
-      writeJson(response, 200, { ok: true }, maxJsonBytes);
+      writeJson(response, 200, { ok: true }, maxResponseJsonBytes);
       return;
     }
 
@@ -335,7 +338,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
           protocolVersion: OFFICE_PROTOCOL_VERSION,
           runtime: runtime.state,
         },
-        maxJsonBytes,
+        maxResponseJsonBytes,
       );
       return;
     }
@@ -351,7 +354,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       const auditAccess = auth.authorizeOperation(request, "audit.read", false);
       const audit = auditAccess.allowed ? auth.readAudit(auditAccess.session) : undefined;
       if (audit === undefined) writeError(response, 403, "forbidden", "Owner access is required.", maxJsonBytes);
-      else writeJson(response, 200, audit, maxJsonBytes);
+      else writeJson(response, 200, audit, maxResponseJsonBytes);
       return;
     }
 
@@ -359,7 +362,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       const deviceAccess = auth.authorizeOperation(request, "device.revoke", false);
       const devices = deviceAccess.allowed ? auth.listDevices(deviceAccess.session) : undefined;
       if (devices === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
-      else writeJson(response, 200, devices, maxJsonBytes);
+      else writeJson(response, 200, devices, maxResponseJsonBytes);
       return;
     }
 
@@ -373,14 +376,15 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       try { sessionId = decodeURIComponent(historyMatch[1]!); }
       catch { writeError(response, 400, "bad_request", "Session identifier is malformed.", maxJsonBytes); return; }
       try {
-        const history = await runtimeSource.chat().fetchHistory({
-          sessionId,
-          profile: requestUrl.searchParams.get("profile") ?? "default",
-          limit: 200,
-          offset: 0,
-        });
-        writeJson(response, 200, history, maxJsonBytes);
-      } catch {
+        const history = await fetchOfficeHistoryPage(
+          runtimeSource.chat(), requestUrl, sessionId, maxResponseJsonBytes,
+        );
+        writeJson(response, 200, history, maxResponseJsonBytes);
+      } catch (error) {
+        if (error instanceof HistoryHttpInputError) {
+          writeError(response, 400, "bad_request", error.message, maxJsonBytes);
+          return;
+        }
         writeError(response, 502, "runtime_unavailable", "Hermes history is unavailable.", maxJsonBytes);
       }
       return;
@@ -393,7 +397,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       writeJson(response, 200, {
         ...snapshot,
         capabilities: { ...snapshot.capabilities, access: auth.effectiveAccess(authenticatedSession) },
-      }, maxJsonBytes);
+      }, maxResponseJsonBytes);
       return;
     }
 
