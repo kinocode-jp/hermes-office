@@ -52,7 +52,7 @@ export type ChatApiConnection = {
 export type ChatApiDependencies = {
   serverUrl?: string;
   createWebSocket?: (url: string) => Promise<WebSocket>;
-  openWebSocket?: (url: string, serverUrl: string) => Promise<OfficeWebSocketLease>;
+  openWebSocket?: (url: string, serverUrl: string, signal?: AbortSignal) => Promise<OfficeWebSocketLease>;
   recoverAuthentication?: (serverUrl: string, rejectedAuthRevision: number) => Promise<void>;
   reconnectDelay?: (attempt: number, minimumDelayMs: number) => number;
   fetchJson?: typeof officeFetchJson;
@@ -106,6 +106,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   let socket: WebSocket | undefined;
   let socketOpening = false;
   let socketOpenAttempt: symbol | undefined;
+  let socketOpenAbort: AbortController | undefined;
   let stopped = false;
   let lifecycleGeneration = 0;
   let reconnectAttempt = 0;
@@ -249,16 +250,19 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   const openSocket = async () => {
     if (stopped || socket || socketOpening) return;
     const attempt = Symbol("chat-socket-open");
+    const abort = new AbortController();
     socketOpening = true;
     socketOpenAttempt = attempt;
+    socketOpenAbort = abort;
     callbacks.onSocketState("connecting");
     let lease: OfficeWebSocketLease;
     try {
-      lease = await openWebSocket(chatWebSocketUrl(serverUrl), serverUrl);
+      lease = await openWebSocket(chatWebSocketUrl(serverUrl), serverUrl, abort.signal);
     } catch (error) {
       if (socketOpenAttempt !== attempt) return;
       socketOpening = false;
       socketOpenAttempt = undefined;
+      socketOpenAbort = undefined;
       if (error instanceof OfficeDeviceAuthRequiredError) haltTransport("端末の再認証が必要です。");
       else {
         callbacks.onSocketState("disconnected", errorText(error));
@@ -271,6 +275,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     if (socketOpenAttempt !== attempt) { lease.socket.close(1000, "Superseded connection"); return; }
     socketOpening = false;
     socketOpenAttempt = undefined;
+    socketOpenAbort = undefined;
     const nextSocket = lease.socket;
     if (stopped || socket) { nextSocket.close(1000, "Client stopped"); return; }
     socket = nextSocket;
@@ -434,6 +439,8 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     stopped = false;
     transportHalted = false;
     lifecycleGeneration += 1;
+    socketOpenAbort?.abort();
+    socketOpenAbort = undefined;
     socketOpenAttempt = undefined;
     socketOpening = false;
     if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
@@ -522,6 +529,8 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       unsubscribeSessionSynchronizations();
       unsubscribeSessionSynchronizations = () => {};
       lifecycleGeneration += 1;
+      socketOpenAbort?.abort();
+      socketOpenAbort = undefined;
       socketOpenAttempt = undefined;
       socketOpening = false;
       if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);

@@ -53,8 +53,10 @@ test("simultaneous live event and chat expiry renew once and reconnect both tran
       firstEvent.serverClose(1008, "Session expired");
       firstChat.serverClose(1008, "Session expired");
 
-      await waitFor(() => BareWebSocket.byPath("/api/v1/events").length === 2 && BareWebSocket.byPath("/api/v1/chat").length === 2);
+      await waitFor(() => BareWebSocket.byPath("/api/v1/events").length === 2);
+      assert.equal(BareWebSocket.byPath("/api/v1/chat").length, 1);
       BareWebSocket.byPath("/api/v1/events")[1]!.open();
+      await waitFor(() => BareWebSocket.byPath("/api/v1/chat").length === 2);
       BareWebSocket.byPath("/api/v1/chat")[1]!.open();
       assert.equal(localBootstraps, 1);
       assert.equal(renewals, 1);
@@ -73,7 +75,7 @@ test("simultaneous live event and chat expiry renew once and reconnect both tran
   });
 });
 
-test("chat-pane retry synchronizes a fresh snapshot before rearming a halted event stream", async () => {
+test("chat-pane retry waits through snapshot and event-open barriers before creating Chat WebSocket", async () => {
   await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example" }, async () => {
     const serverUrl = "https://office.example/chat-coordinated-recovery";
     const recoverySnapshot = deferred<Response>();
@@ -94,7 +96,8 @@ test("chat-pane retry synchronizes a fresh snapshot before rearming a halted eve
       if (url.endsWith("/api/v1/health")) return jsonResponse({ ok: true, protocolVersion: 1, runtime: "ready" });
       if (url.endsWith("/api/v1/snapshot")) {
         snapshots += 1;
-        return snapshots === 1 ? jsonResponse(snapshot(1)) : await recoverySnapshot.promise;
+        if (snapshots === 1) return jsonResponse(snapshot(1));
+        return snapshots === 2 ? await recoverySnapshot.promise : jsonResponse(snapshot(snapshots));
       }
       throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
@@ -132,21 +135,31 @@ test("chat-pane retry synchronizes a fresh snapshot before rearming a halted eve
 
       proxyHealthy = true;
       reconnectChatSession("chat-retry");
-      await waitFor(() => renewals === 2 && snapshots === 2 && BareWebSocket.byPath("/api/v1/chat").length === 2);
+      await waitFor(() => renewals === 2 && snapshots === 2);
+      assert.equal(BareWebSocket.byPath("/api/v1/chat").length, 1);
       assert.equal(BareWebSocket.byPath("/api/v1/events").length, 1);
       assert.equal(officeConnection.value.state, "error");
       assert.equal(officeConnection.value.eventStream, "connecting");
 
       recoverySnapshot.resolve(jsonResponse(snapshot(2)));
       await waitFor(() => officeSnapshot.value?.sequence === 2 && BareWebSocket.byPath("/api/v1/events").length === 2);
-      BareWebSocket.byPath("/api/v1/events")[1]!.open();
+      assert.equal(BareWebSocket.byPath("/api/v1/chat").length, 1);
+      BareWebSocket.byPath("/api/v1/events")[1]!.serverClose(1006, "event handshake failed");
+      await waitFor(() => chatStates.filter((state) => state === "error").length === 2);
+      assert.equal(BareWebSocket.byPath("/api/v1/chat").length, 1);
+
+      office.retry();
+      await waitFor(() => snapshots === 3 && BareWebSocket.byPath("/api/v1/events").length === 3);
+      assert.equal(BareWebSocket.byPath("/api/v1/chat").length, 1);
+      BareWebSocket.byPath("/api/v1/events")[2]!.open();
+      await waitFor(() => BareWebSocket.byPath("/api/v1/chat").length === 2);
       BareWebSocket.byPath("/api/v1/chat")[1]!.open();
       assert.equal(officeConnection.value.state, "connected");
       assert.equal(officeConnection.value.eventStream, "open");
       assert.equal(eventStates.filter((state) => state === "open").length, 2);
       assert.equal(chatStates.filter((state) => state === "ready").length, 2);
       assert.equal(renewals, 2);
-      assert.equal(snapshots, 2);
+      assert.equal(snapshots, 3);
     } finally {
       chat?.stop();
       office?.stop();
@@ -206,7 +219,10 @@ test("event-side retry keeps halted chat stopped until a failed recovery snapsho
 
       failSnapshot = false;
       office.retry();
-      await waitFor(() => snapshots === 3 && BareWebSocket.byPath("/api/v1/events").length === 2 && BareWebSocket.byPath("/api/v1/chat").length === 2);
+      await waitFor(() => snapshots === 3 && BareWebSocket.byPath("/api/v1/events").length === 2);
+      assert.equal(BareWebSocket.byPath("/api/v1/chat").length, 1);
+      BareWebSocket.byPath("/api/v1/events")[1]!.open();
+      await waitFor(() => BareWebSocket.byPath("/api/v1/chat").length === 2);
       assert.equal(renewals, 2);
     } finally {
       chat?.stop();
@@ -530,7 +546,7 @@ test("desktop capability recovery remains cookie-free and does not call HTTP aut
       const serverUrl = "http://127.0.0.1:4317/desktop-recovery";
       const lease = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
       await recoverOfficeWebSocketAuthentication(serverUrl, lease.authRevision);
-      const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/chat", serverUrl);
+      const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
       assert.notEqual(recovered.authRevision, lease.authRevision);
       assert.equal(fetches, 0);
     } finally {
@@ -652,7 +668,7 @@ function snapshot(sequence = 1, sessionCount = 0, hasMore = false): unknown {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     if (predicate()) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }

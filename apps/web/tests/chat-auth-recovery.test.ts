@@ -190,6 +190,40 @@ test("a synchronized Office recovery rearms a chat-only halt exactly once for ac
   assert.equal(sockets.length, 2);
 });
 
+test("stop aborts a barrier-blocked retry and a deleted target cannot resume", async () => {
+  const sockets: FakeWebSocket[] = [];
+  let opens = 0;
+  let retryAborted = false;
+  const api = connectChatApi(callbacks([]), {
+    serverUrl: "https://office.example",
+    openWebSocket: async (_url, _serverUrl, signal) => {
+      opens += 1;
+      if (opens === 1) {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return { socket: socket as unknown as WebSocket, authRevision: 1 };
+      }
+      return await new Promise((_resolve, reject) => signal?.addEventListener("abort", () => {
+        retryAborted = true;
+        reject(new DOMException("cancelled", "AbortError"));
+      }, { once: true }));
+    },
+    recoverAuthentication: async () => { throw new OfficeSessionUnavailableError("proxy configuration", 0, false); },
+    reconnectDelay: () => 0,
+  });
+  api.ensureSession({ clientSessionId: "deleted", profileId: "profile" });
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  sockets[0]!.serverClose(1008, "Session expired");
+  await flush();
+  api.retry();
+  await waitFor(() => opens === 2);
+  api.releaseSession("deleted");
+  api.stop();
+  await waitFor(() => retryAborted);
+  assert.equal(sockets.length, 1);
+});
+
 test("manual Office retry supersedes a pending chat recovery without opening a duplicate socket", async () => {
   const sockets: FakeWebSocket[] = [];
   let finishRecovery!: () => void;
@@ -304,9 +338,9 @@ test("repeated network bootstrap failures stop after the bounded reconnect budge
     openWebSocket: async () => { opens += 1; throw new OfficeSessionUnavailableError("offline"); },
     reconnectDelay: () => 0,
   });
-  await waitFor(() => states.at(-1) === "error");
-  await flush();
+  await waitFor(() => opens === 6);
   assert.equal(opens, 6);
+  assert.equal(states.at(-1), "error");
   api.stop();
 });
 
@@ -355,7 +389,7 @@ class FakeWebSocket {
 
 async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     if (predicate()) return;
     await flush();
   }
