@@ -1,4 +1,5 @@
 import type { Profile } from "../domain";
+import { t } from "../i18n";
 import { assignTask, selectProfile, selectedProfileId, tasks } from "../store";
 import { CharacterPortrait } from "./character-portrait";
 import { StatusPill } from "./status-pill";
@@ -33,7 +34,7 @@ function ProfilePod({ profile, index, crowded, columnCount, rowCount }: { profil
         const taskId = event.dataTransfer?.getData("application/x-hermes-task");
         if (taskId) assignTask(taskId, profile.id);
       }}
-      aria-label={`${profile.name}、${profile.role}、${profile.sessions}件の会話`}
+      aria-label={t("office.profileLabel", { name: profile.name, role: profile.role, count: profile.sessions })}
     >
       <span class="desk-lamp" aria-hidden="true" />
       <span class="desk">
@@ -49,7 +50,7 @@ function ProfilePod({ profile, index, crowded, columnCount, rowCount }: { profil
       </span>
       <span class="pod-meta">
         <StatusPill status={profile.status} />
-        <span>{profile.sessions} chats</span>
+        <span>{profile.sessions} {t("office.chats")}</span>
       </span>
     </button>
   );
@@ -86,13 +87,13 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
     <section class="office-wrap" aria-labelledby="office-title">
       <header class="office-heading">
         <div>
-          <p class="eyebrow">Live floor · local runtime</p>
-          <h1 id="office-title">今日のオフィス</h1>
+          <p class="eyebrow">{t("office.eyebrow")}</p>
+          <h1 id="office-title">{t("office.title")}</h1>
         </div>
-        <div class="shift-readout" aria-label="オフィス稼働状況">
-          <span><b>{working}</b> 稼働</span>
-          <span><b>{attention}</b> 要確認</span>
-          <span><b>{profiles.length}</b> Profiles</span>
+        <div class="shift-readout" aria-label={t("office.summary")}>
+          <span><b>{working}</b> {t("office.workingCount")}</span>
+          <span><b>{attention}</b> {t("office.attentionCount")}</span>
+          <span><b>{profiles.length}</b> {t("office.profilesCount")}</span>
         </div>
       </header>
 
@@ -102,7 +103,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
         </div>
         <div class="floor-grid" aria-hidden="true" />
         <div class="meeting-table" aria-hidden="true">
-          <span>BOARD</span>
+          <span>{t("office.board")}</span>
         </div>
         <TaskCables
           cables={cables}
@@ -116,9 +117,9 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
         </div>
         {profiles.map((profile, index) => <ProfilePod key={profile.id} profile={profile} index={index} crowded={profiles.length > 4} columnCount={columnCount} rowCount={rowCount} />)}
         <div class="office-legend">
-          <span><i class="legend-light working" />working</span>
-          <span><i class="legend-light waiting" />needs you</span>
-          <span>カードを社員へドロップして担当変更</span>
+          <span><i class="legend-light working" />{t("office.working")}</span>
+          <span><i class="legend-light waiting" />{t("office.needsYou")}</span>
+          <span>{t("office.dropHint")}</span>
         </div>
       </div>
     </section>

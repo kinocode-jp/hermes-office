@@ -4,50 +4,62 @@ import { LiveSettings } from "./components/live-settings";
 import { OfficeScene } from "./components/office-scene";
 import { ProfilePanel } from "./components/profile-panel";
 import { DeviceLogin } from "./components/device-login";
+import { AppearanceSettings } from "./components/appearance-settings";
 import { isLocalOfficeClient } from "./auth-state";
 import { logoutRemoteDevice } from "./office-api";
+import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
 import type { Surface } from "./domain";
 import { activeSurface, mobileWorkspaceOpen, officeAccess, officeConnection, profileList, selectedProfile, settingsTab } from "./store";
 
-const navItems: { id: Surface; glyph: string; label: string }[] = [
-  { id: "office", glyph: "⌂", label: "Office" },
-  { id: "kanban", glyph: "▦", label: "Kanban" },
-  { id: "library", glyph: "▤", label: "Library" },
-  { id: "settings", glyph: "⚙", label: "Settings" }
+const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
+  { id: "office", glyph: "⌂", label: "nav.office" },
+  { id: "kanban", glyph: "▦", label: "nav.kanban" },
+  { id: "library", glyph: "▤", label: "nav.library" },
+  { id: "settings", glyph: "⚙", label: "nav.settings" }
 ];
 
 export function App() {
   if (officeAccess.value.state !== "authenticated") return <DeviceLogin />;
   const connection = officeConnection.value;
   const connectionLabel = connection.state === "connected"
-    ? (connection.eventStream === "open" ? "live" : "connected")
-    : connection.state === "error" ? "demo fallback" : connection.state;
+    ? (connection.eventStream === "open" ? t("connection.live") : t("connection.connected"))
+    : connection.state === "error" ? t("connection.fallback") : connection.state;
   return (
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="#" aria-label="Hermes Office home">
+        <a class="brand" href="#" aria-label={t("app.home")}>
           <span class="brand-mark">H</span>
           <span><b>Hermes</b><small>Office</small></span>
         </a>
-        <div class={`runtime-status runtime-${connection.state}`} title={connection.message}>
+        <div class={`runtime-status runtime-${connection.state}`} title={localizeRuntimeMessage(connection.message)}>
           <i />Office Server <span>{connectionLabel}</span>
         </div>
         <div class="top-actions">
+          <AppearanceSettings />
+          <button
+            class="quiet-button language-button"
+            type="button"
+            aria-label={t("language.label")}
+            title={t("language.label")}
+            onClick={() => setLocale(locale.value === "ja" ? "en" : "ja")}
+          >
+            {locale.value === "ja" ? "EN" : "日本語"}
+          </button>
           <button class="quiet-button">⌘ K</button>
           {isLocalOfficeClient(location)
-            ? <button class="user-button" title="Local owner">KO</button>
-            : <button class="user-button" type="button" aria-label="リモート端末からログアウト" onClick={() => void logoutRemoteDevice().then(() => location.reload())}>⇥</button>}
+            ? <button class="user-button" title={t("app.localOwner")}>KO</button>
+            : <button class="user-button" type="button" aria-label={t("app.logout")} onClick={() => void logoutRemoteDevice().then(() => location.reload())}>⇥</button>}
         </div>
       </header>
 
-      <nav class="side-rail" aria-label="メインナビゲーション">
+      <nav class="side-rail" aria-label={t("nav.main")}>
         {navItems.map((item) => (
           <button
             key={item.id}
             class={activeSurface.value === item.id ? "is-active" : ""}
             onClick={() => { activeSurface.value = item.id; }}
           >
-            <span>{item.glyph}</span>{item.label}
+            <span>{item.glyph}</span>{t(item.label)}
           </button>
         ))}
       </nav>

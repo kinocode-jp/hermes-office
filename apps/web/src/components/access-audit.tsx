@@ -5,34 +5,26 @@ import {
   type AccessAuditEntry,
   type AccessAuditSnapshot,
 } from "../audit-api";
+import { locale, t, type TranslationKey } from "../i18n";
 import "./access-audit.css";
 
-const operationLabels: Record<AccessAuditEntry["operation"], string> = {
-  "auth.local": "ローカル認証",
-  "auth.device": "リモート端末認証",
-  "auth.logout": "リモート端末ログアウト",
-  "audit.read": "監査ログ閲覧",
+const operationLabels: Record<AccessAuditEntry["operation"], TranslationKey> = {
+  "auth.local": "audit.operation.local",
+  "auth.device": "audit.operation.device",
+  "auth.logout": "audit.operation.logout",
+  "audit.read": "audit.operation.read",
 };
 
-const outcomeLabels: Record<AccessAuditEntry["outcome"], string> = {
-  allowed: "許可",
-  denied: "拒否",
-  rate_limited: "制限中",
+const outcomeLabels: Record<AccessAuditEntry["outcome"], TranslationKey> = {
+  allowed: "audit.outcome.allowed",
+  denied: "audit.outcome.denied",
+  rate_limited: "audit.outcome.rateLimited",
 };
-
-const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
 
 export function AccessAudit() {
   const [snapshot, setSnapshot] = useState<AccessAuditSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(false);
   const generation = useRef(0);
 
   const reload = useCallback(async (showLoading = true) => {
@@ -42,9 +34,9 @@ export function AccessAudit() {
       const next = await fetchAccessAudit();
       if (generation.current !== currentGeneration) return;
       setSnapshot(next);
-      setError(null);
+      setError(false);
     } catch {
-      if (generation.current === currentGeneration) setError("監査ログを取得できませんでした。接続を確認して再読込してください。");
+      if (generation.current === currentGeneration) setError(true);
     } finally {
       if (generation.current === currentGeneration) setLoading(false);
     }
@@ -67,44 +59,51 @@ export function AccessAudit() {
       <header class="access-audit__gate">
         <div class={`access-audit__signal is-${accessMode.toLowerCase()}`} aria-hidden="true"><span /></div>
         <div class="access-audit__title">
-          <p>ACCESS DESK / OWNER ONLY</p>
-          <h2 id="access-audit-title">Remote access &amp; audit</h2>
+          <p>{t("audit.eyebrow")}</p>
+          <h2 id="access-audit-title">{t("audit.title")}</h2>
         </div>
         <div class="access-audit__current">
           <span>SESSION · {accessMode}</span>
-          <strong>{current?.deviceName ?? "確認中"}</strong>
-          <small>{current === null || current === undefined ? "所有者セッションを確認しています" : current.local ? "この端末から安全に接続中" : "認証済みリモート端末から接続中"}</small>
+          <strong>{current?.deviceName ?? t("audit.checking")}</strong>
+          <small>{current === null || current === undefined ? t("audit.checkingOwner") : current.local ? t("audit.localSafe") : t("audit.remoteSafe")}</small>
         </div>
-        <button type="button" onClick={() => void reload()} disabled={loading}>{loading ? "読込中" : "再読込"}</button>
+        <button type="button" onClick={() => void reload()} disabled={loading}>{loading ? t("audit.loading") : t("audit.reload")}</button>
       </header>
 
       <div class="access-audit__rail">
         <div class="access-audit__rail-head" aria-hidden="true">
-          <span>TIME</span><span>DEVICE</span><span>OPERATION</span><span>RESULT</span>
+          <span>{t("audit.time")}</span><span>{t("audit.device")}</span><span>{t("audit.operation")}</span><span>{t("audit.result")}</span>
         </div>
-        {error !== null ? (
-          <div class="access-audit__message is-error" role="alert"><b>ACCESS LOG OFFLINE</b><span>{error}</span></div>
+        {error ? (
+          <div class="access-audit__message is-error" role="alert"><b>{t("audit.offline")}</b><span>{t("audit.loadFailed")}</span></div>
         ) : snapshot?.records.length === 0 ? (
-          <div class="access-audit__message"><b>NO ACTIVITY</b><span>表示できるアクセス履歴はまだありません。</span></div>
+          <div class="access-audit__message"><b>{t("audit.noActivity")}</b><span>{t("audit.noActivityDetail")}</span></div>
         ) : (
-          <ol aria-label="アクセス監査ログ">
+          <ol aria-label={t("audit.logAria")}>
             {(snapshot?.records ?? []).map((record, index) => (
               <li key={`${record.occurredAt}-${record.operation}-${index}`}>
                 <time dateTime={record.occurredAt}>{formatTime(record.occurredAt)}</time>
-                <span class="access-audit__device"><i class={record.local ? "is-local" : "is-remote"} />{record.deviceName ?? (record.local ? "このMac" : "Remote device")}</span>
-                <span>{operationLabels[record.operation]}</span>
-                <span class={`access-audit__outcome is-${record.outcome}`}>{outcomeLabels[record.outcome]}</span>
+                <span class="access-audit__device"><i class={record.local ? "is-local" : "is-remote"} />{record.deviceName ?? (record.local ? t("audit.thisMac") : t("audit.remoteDevice"))}</span>
+                <span>{t(operationLabels[record.operation])}</span>
+                <span class={`access-audit__outcome is-${record.outcome}`}>{t(outcomeLabels[record.outcome])}</span>
               </li>
             ))}
           </ol>
         )}
       </div>
 
-      <footer>端末名・接続元・操作・結果・時刻のみ表示。認証情報はこの画面に保存しません。</footer>
+      <footer>{t("audit.footer")}</footer>
     </section>
   );
 }
 
 function formatTime(timestamp: string): string {
-  return timeFormatter.format(new Date(timestamp)).replaceAll("/", ".");
+  return new Intl.DateTimeFormat(locale.value === "ja" ? "ja-JP" : "en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp)).replaceAll("/", ".");
 }

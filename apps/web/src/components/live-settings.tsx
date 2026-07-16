@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { SettingsTab } from "../domain";
+import { localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { AccessAudit } from "./access-audit";
 import {
   SettingsApiError,
@@ -27,7 +28,7 @@ export type LiveSettingsProps = {
   onChanged?: (kind: "global" | "memory" | "skill" | "soul") => void;
 };
 
-type ErrorState = { message: string; conflict: boolean };
+type ErrorState = { message?: string; messageKey?: TranslationKey; conflict: boolean };
 
 export function LiveSettings({ profileId, profileLabel, initialTab = "global", activeTab, showAccessAudit = false, onTabChange, onChanged }: LiveSettingsProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
@@ -181,7 +182,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
   }, [profile, skillQuery]);
   const visibleSkills = filteredSkills.slice(0, skillLimit);
 
-  const profileName = profileLabel || profile?.profile || profileId || "Profile未選択";
+  const profileName = profileLabel || profile?.profile || profileId || t("settings.noProfile");
   const globalDirty = global !== null && (
     global.context !== globalContext ||
     global.skills.join("\n") !== parseSkillLines(globalSkills).join("\n") ||
@@ -195,23 +196,23 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
     <section class="live-settings" aria-busy={loading}>
       <header class="live-settings__mast">
         <div>
-          <p>BUILDING SYSTEMS / LIVE</p>
-          <h1>Agent settings</h1>
+          <p>{t("settings.eyebrow")}</p>
+          <h1>{t("settings.title")}</h1>
         </div>
         <div class="live-settings__target">
-          <span>Target profile</span>
+          <span>{t("settings.target")}</span>
           <b>{profileName}</b>
         </div>
       </header>
 
       {showAccessAudit && <AccessAudit />}
 
-      <nav class="live-settings__tabs" aria-label="設定カテゴリ">
+      <nav class="live-settings__tabs" aria-label={t("settings.categories")}>
         {([
-          ["global", "Global"],
-          ["skills", "Skills"],
-          ["soul", "Identity / SOUL"],
-          ["memory", "Memory"],
+          ["global", t("settings.global")],
+          ["skills", t("settings.skills")],
+          ["soul", t("settings.identity")],
+          ["memory", t("settings.memory")],
         ] as const).map(([id, label]) => (
           <button key={id} type="button" class={visibleTab === id ? "is-active" : ""} aria-current={visibleTab === id ? "page" : undefined} onClick={() => { setTab(id); onTabChange?.(id); }} disabled={id !== "global" && !profileId}>
             {label}
@@ -221,9 +222,9 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
       {error && (
         <div class={`live-settings__notice ${error.conflict ? "is-conflict" : "is-error"}`} role="alert">
-          <span>{error.conflict ? "REVISION CONFLICT" : "SETTINGS OFFLINE"}</span>
-          <p>{error.message}</p>
-          <button type="button" onClick={() => void reload()}>再読込</button>
+          <span>{error.conflict ? t("settings.conflict") : t("settings.offline")}</span>
+          <p>{error.messageKey ? t(error.messageKey) : localizeRuntimeMessage(error.message ?? "")}</p>
+          <button type="button" onClick={() => void reload()}>{t("settings.reload")}</button>
         </div>
       )}
 
@@ -233,30 +234,30 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
         <div class="live-settings__grid live-settings__global">
           {global?.skillSync.state === "pending" && (
             <div class="live-settings__notice is-conflict settings-sync-notice" role="status">
-              <span>SKILL SYNC PENDING</span>
-              <p>一部ProfileへのGlobal Skill反映が完了していません。再読込後に同じ内容を保存すると再試行できます。</p>
-              <div class="settings-sync-failures" aria-label="未反映のGlobal Skill">
+              <span>{t("settings.syncPending")}</span>
+              <p>{t("settings.syncPendingDetail")}</p>
+              <div class="settings-sync-failures" aria-label={t("settings.syncFailures")}>
                 {global.skillSync.failures.slice(0, 5).map((failure) => (
                   <small key={`${failure.profile}-${failure.skill}-${failure.operation}`}>{failure.profile} / {failure.skill} / {failure.operation}</small>
                 ))}
               </div>
             </div>
           )}
-          <aside class="inheritance-bus" aria-label="Global inheritance bus">
-            <span>GLOBAL BUS</span><i /><b>Profiles inherit from here</b>
+          <aside class="inheritance-bus" aria-label={t("settings.globalBus")}>
+            <span>{t("settings.globalBus")}</span><i /><b>{t("settings.inherit")}</b>
           </aside>
           <div class="settings-ledger">
-            <SectionHead code="UTIL-01" title="Inheritance switches" note={`revision ${global?.revision ?? "—"}`} />
-            <SwitchRow label="Shared skills" detail="Global skill selectionを各Profileへ継承" checked={sharedSkills} onChange={setSharedSkills} />
-            <SwitchRow label="Shared context" detail="新しく開始するSessionへ共通文脈を適用" checked={sharedContext} onChange={setSharedContext} />
+            <SectionHead code="UTIL-01" title={t("settings.inheritance")} note={`revision ${global?.revision ?? "—"}`} />
+            <SwitchRow label={t("settings.sharedSkills")} detail={t("settings.sharedSkillsDetail")} checked={sharedSkills} onChange={setSharedSkills} />
+            <SwitchRow label={t("settings.sharedContext")} detail={t("settings.sharedContextDetail")} checked={sharedContext} onChange={setSharedContext} />
           </div>
           <div class="settings-ledger">
-            <SectionHead code="UTIL-02" title="Global skills" note="1行に1つ" />
+            <SectionHead code="UTIL-02" title={t("settings.globalSkills")} note={t("settings.onePerLine")} />
             <textarea value={globalSkills} onInput={(event) => setGlobalSkills(event.currentTarget.value)} rows={7} spellcheck={false} placeholder={"browser\ncoding\nresearch"} />
           </div>
           <div class="settings-ledger settings-ledger--wide">
-            <SectionHead code="UTIL-03" title="Shared context" note="秘密情報は保存できません" />
-            <textarea value={globalContext} onInput={(event) => setGlobalContext(event.currentTarget.value)} rows={8} placeholder="全Profileに共通する方針を書きます。" />
+            <SectionHead code="UTIL-03" title={t("settings.sharedContext")} note={t("settings.noSecrets")} />
+            <textarea value={globalContext} onInput={(event) => setGlobalContext(event.currentTarget.value)} rows={8} placeholder={t("settings.contextPlaceholder")} />
             <ActionBar dirty={globalDirty} retryPending={global?.skillSync.state === "pending"} busy={busy === "global"} onSave={saveGlobal} />
           </div>
         </div>
@@ -265,24 +266,24 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
       ) : visibleTab === "skills" ? (
         <div class="live-settings__skills">
           <div class="settings-toolbar">
-            <div><b>{profile.skills.filter((skill) => skill.enabled).length}</b><span>enabled / {profile.skills.length} available</span></div>
-            <input type="search" value={skillQuery} onInput={(event) => setSkillQuery(event.currentTarget.value)} placeholder="Skillを絞り込む" aria-label="Skillを絞り込む" />
+            <div><b>{profile.skills.filter((skill) => skill.enabled).length}</b><span>{t("settings.enabledAvailable", { count: profile.skills.length })}</span></div>
+            <input type="search" value={skillQuery} onInput={(event) => setSkillQuery(event.currentTarget.value)} placeholder={t("settings.skillSearch")} aria-label={t("settings.skillSearch")} />
           </div>
           <div class="skill-switchboard">
             {visibleSkills.map((skill) => (
               <article class={`skill-line ${skill.enabled ? "is-enabled" : ""}`} key={skill.name}>
                 <span class="skill-line__light" aria-hidden="true" />
-                <div><b>{skill.name}</b><p>{skill.description || "説明なし"}</p></div>
+                <div><b>{skill.name}</b><p>{skill.description || t("settings.noDescription")}</p></div>
                 <small>{skill.provenance} · {skill.category}</small>
                 <button type="button" role="switch" aria-checked={skill.enabled} disabled={busy === `skill:${skill.name}`} onClick={() => toggleSkill(skill.name, skill.enabled)}>
                   {busy === `skill:${skill.name}` ? "…" : skill.enabled ? "ON" : "OFF"}
                 </button>
               </article>
             ))}
-            {filteredSkills.length === 0 && <p class="settings-empty">一致するSkillはありません。</p>}
+            {filteredSkills.length === 0 && <p class="settings-empty">{t("settings.noSkills")}</p>}
             {filteredSkills.length > visibleSkills.length && (
               <button class="settings-load-more" type="button" onClick={() => setSkillLimit((current) => current + 30)}>
-                さらに表示（残り {filteredSkills.length - visibleSkills.length}）
+                {t("settings.showMore", { count: filteredSkills.length - visibleSkills.length })}
               </button>
             )}
           </div>
@@ -290,31 +291,31 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
       ) : visibleTab === "soul" ? (
         <div class="settings-ledger settings-ledger--editor">
           <SectionHead code="IDENTITY" title={`${profile.profile} / SOUL.md`} note={`revision ${shortRevision(profile.soul.revision)}`} />
-          {profile.soul.redacted && <p class="settings-warning">非表示の機密らしき内容があります。上書きせず、Hermes側で確認してください。</p>}
+          {profile.soul.redacted && <p class="settings-warning">{t("settings.redacted")}</p>}
           <textarea value={soulDraft} onInput={(event) => setSoulDraft(event.currentTarget.value)} rows={18} disabled={profile.soul.redacted} spellcheck={false} />
-          <p class="settings-footnote">保存内容は新しいSessionから反映されます。進行中の会話は書き換えません。</p>
+          <p class="settings-footnote">{t("settings.soulNote")}</p>
           <ActionBar dirty={soulDirty && !profile.soul.redacted} busy={busy === "soul"} onSave={saveSoul} />
         </div>
       ) : (
         <div class="live-settings__memory">
           <div class="memory-gauge">
-            <p>BUILT-IN MEMORY</p>
+            <p>{t("settings.builtinMemory")}</p>
             <div><span><b>{formatBytes(profile.memory.builtin.memoryBytes)}</b>MEMORY.md</span><i /><span><b>{formatBytes(profile.memory.builtin.userBytes)}</b>USER.md</span></div>
-            <small>この画面では内容の直接編集・resetは行いません。</small>
+            <small>{t("settings.memoryReadOnly")}</small>
           </div>
           <div class="settings-ledger">
-            <SectionHead code="MEM-01" title="Memory provider" note={profile.memory.activeProvider || "built-in"} />
-            <label class="settings-field"><span>Provider</span>
+            <SectionHead code="MEM-01" title={t("settings.memoryProvider")} note={profile.memory.activeProvider || t("settings.builtin")} />
+            <label class="settings-field"><span>{t("settings.provider")}</span>
               <select value={providerDraft} onChange={(event) => setProviderDraft(event.currentTarget.value)}>
-                <option value="">Built-in</option>
-                {profile.memory.providers.filter((provider) => provider.name !== "builtin").map((provider) => <option key={provider.name} value={provider.name}>{provider.name}{provider.configured ? "" : " — setup required"}</option>)}
+                <option value="">{t("settings.builtin")}</option>
+                {profile.memory.providers.filter((provider) => provider.name !== "builtin").map((provider) => <option key={provider.name} value={provider.name}>{provider.name}{provider.configured ? "" : ` — ${t("settings.setupRequired")}`}</option>)}
               </select>
             </label>
             <ActionBar dirty={providerDraft !== profile.memory.activeProvider} busy={busy === "provider"} onSave={saveProvider} />
           </div>
           {providerConfig && providerConfig.fields.some((field) => field.kind !== "secret") && (
             <div class="settings-ledger settings-ledger--wide">
-              <SectionHead code="MEM-02" title={`${providerConfig.label} settings`} note={`revision ${shortRevision(providerConfig.revision)}`} />
+              <SectionHead code="MEM-02" title={t("settings.providerSettings", { name: providerConfig.label })} note={`revision ${shortRevision(providerConfig.revision)}`} />
               <div class="provider-fields">
                 {providerConfig.fields.filter((field) => field.kind !== "secret").map((field) => (
                   <label class="settings-field" key={field.key}>
@@ -351,15 +352,15 @@ function SwitchRow({ label, detail, checked, onChange }: { label: string; detail
 
 function ActionBar({ dirty, retryPending = false, busy, onSave }: { dirty: boolean; retryPending?: boolean; busy: boolean; onSave(): void }) {
   const actionable = dirty || retryPending;
-  return <footer class="settings-actions"><span>{dirty ? "UNSAVED CHANGES" : retryPending ? "SYNC RETRY REQUIRED" : "UP TO DATE"}</span><button type="button" disabled={!actionable || busy} onClick={onSave}>{busy ? "保存中…" : retryPending && !dirty ? "同期を再試行" : "変更を保存"}</button></footer>;
+  return <footer class="settings-actions"><span>{dirty ? t("settings.unsaved") : retryPending ? t("settings.retryRequired") : t("settings.upToDate")}</span><button type="button" disabled={!actionable || busy} onClick={onSave}>{busy ? t("settings.saving") : retryPending && !dirty ? t("settings.retrySync") : t("settings.save")}</button></footer>;
 }
 
 function SettingsSkeleton() {
-  return <div class="settings-skeleton" aria-label="設定を読み込み中"><i /><i /><i /><span>Hermes設定を読み込んでいます…</span></div>;
+  return <div class="settings-skeleton" aria-label={t("settings.loadingAria")}><i /><i /><i /><span>{t("settings.loading")}</span></div>;
 }
 
 function EmptyProfile({ onReload }: { onReload(): Promise<void> }) {
-  return <div class="settings-empty settings-empty--profile"><b>Profileを選択してください</b><p>Profile固有のSkills、SOUL、Memory設定がここに表示されます。</p><button type="button" onClick={() => void onReload()}>再読込</button></div>;
+  return <div class="settings-empty settings-empty--profile"><b>{t("settings.selectProfile")}</b><p>{t("settings.selectProfileDetail")}</p><button type="button" onClick={() => void onReload()}>{t("settings.reload")}</button></div>;
 }
 
 function valuesFromConfig(config: MemoryProviderConfig): Record<string, boolean | string> {
@@ -372,7 +373,7 @@ function parseSkillLines(value: string): string[] {
 
 function errorState(reason: unknown): ErrorState {
   if (reason instanceof SettingsApiError) return { message: reason.message, conflict: reason.kind === "conflict" };
-  return { message: "設定を読み込めませんでした。", conflict: false };
+  return { messageKey: "settings.loadFailed", conflict: false };
 }
 
 function shortRevision(value: string): string { return value.slice(0, 8); }

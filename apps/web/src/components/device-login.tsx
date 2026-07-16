@@ -1,5 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { authenticateRemoteDevice } from "../office-api";
+import { localizeRuntimeMessage, t } from "../i18n";
 import {
   officeAccess,
   retryOfficeServer,
@@ -45,32 +46,32 @@ export function DeviceLogin() {
     <main class="device-login-shell">
       <section class="device-login-card" aria-labelledby="device-login-title">
         <div class="device-login-mark" aria-hidden="true">H</div>
-        <p class="eyebrow">Hermes Office · Remote device</p>
-        <h1 id="device-login-title">{checking ? "Officeへ接続中" : "この端末でログイン"}</h1>
+        <p class="eyebrow">{t("login.remote")}</p>
+        <h1 id="device-login-title">{checking ? t("login.connecting") : t("login.title")}</h1>
         <p class={`device-login-message ${access.failureCode ? "is-error" : ""}`} role={access.failureCode ? "alert" : "status"}>
-          {access.message}
+          {localizeRuntimeMessage(access.message)}
         </p>
 
         {!checking && (
           <form class="device-login-form" autoComplete="off" onSubmit={submit}>
             <label>
-              <span>端末名</span>
+              <span>{t("login.deviceName")}</span>
               <input name="device-name" type="text" defaultValue="My device" minLength={1} maxLength={64} autoComplete="off" required />
             </label>
             <label>
-              <span>アクセストークン</span>
+              <span>{t("login.token")}</span>
               <input name="access-token" type="password" minLength={1} maxLength={4096} autoComplete="off" autoCapitalize="none" spellcheck={false} required />
             </label>
             <button type="submit" disabled={submitting || retrySeconds > 0}>
-              {submitting ? "認証中…" : retrySeconds > 0 ? `${retrySeconds}秒後に再試行` : "端末を認証"}
+              {submitting ? t("login.authenticating") : retrySeconds > 0 ? t("login.retryAfter", { seconds: retrySeconds }) : t("login.authenticate")}
             </button>
           </form>
         )}
 
         {access.state === "unavailable" && (
-          <button class="device-retry-button" type="button" onClick={retryOfficeServer}>Office Serverへ再接続</button>
+          <button class="device-retry-button" type="button" onClick={retryOfficeServer}>{t("login.reconnect")}</button>
         )}
-        <p class="device-login-note">Tokenは保存されず、この認証リクエストにだけ使用されます。</p>
+        <p class="device-login-note">{t("login.tokenNote")}</p>
       </section>
     </main>
   );

@@ -12,12 +12,15 @@ import {
 } from "../store";
 import { StatusPill } from "./status-pill";
 import { CharacterPortrait } from "./character-portrait";
+import { AvatarPicker } from "./avatar-picker";
+import { useState } from "preact/hooks";
+import { t, type TranslationKey } from "../i18n";
 
-const tabs: { id: InspectorTab; label: string }[] = [
-  { id: "chat", label: "会話" },
-  { id: "profile", label: "Identity" },
-  { id: "skills", label: "Skills" },
-  { id: "memory", label: "Memory" }
+const tabs: { id: InspectorTab; label: TranslationKey }[] = [
+  { id: "chat", label: "profile.chat" },
+  { id: "profile", label: "settings.identity" },
+  { id: "skills", label: "settings.skills" },
+  { id: "memory", label: "settings.memory" }
 ];
 
 const settingsRoutes: Record<Exclude<InspectorTab, "chat">, SettingsTab> = {
@@ -26,21 +29,21 @@ const settingsRoutes: Record<Exclude<InspectorTab, "chat">, SettingsTab> = {
   memory: "memory"
 };
 
-const routeCopy: Record<Exclude<InspectorTab, "chat">, { code: string; title: string; description: string }> = {
+const routeCopy: Record<Exclude<InspectorTab, "chat">, { code: string; title: TranslationKey; description: TranslationKey }> = {
   profile: {
     code: "SOUL / LIVE",
-    title: "Identity / SOUL.md",
-    description: "このProfileの人格・方針をHermesの実SOUL設定で編集します。変更は新しいSessionから反映されます。"
+    title: "settings.identity",
+    description: "profile.identityDescription"
   },
   skills: {
     code: "SKILLS / LIVE",
-    title: "Profile Skills",
-    description: "Hermesが検出したSkill一覧を読み込み、Profileごとの有効・無効を実設定へ保存します。"
+    title: "profile.skillsTitle",
+    description: "profile.skillsDescription"
   },
   memory: {
     code: "MEMORY / LIVE",
-    title: "Memory provider",
-    description: "Built-in Memoryの使用量とProvider設定をHermesから読み込みます。内容の直接編集やresetは行いません。"
+    title: "settings.memoryProvider",
+    description: "profile.memoryDescription"
   }
 };
 
@@ -56,12 +59,12 @@ function ChatList() {
   if (!profile) return null;
   return (
     <div class="panel-section">
-      <button class="new-chat-button" onClick={() => createSession(profile.id)}>＋ 新しい会話</button>
+      <button class="new-chat-button" onClick={() => createSession(profile.id)}>{t("profile.newChat")}</button>
       <div class="session-list">
         {selectedProfileSessions.value.map((session) => (
           <button key={session.id} onClick={() => { openSession(session.id); mobileInspectorOpen.value = false; mobileWorkspaceOpen.value = true; }}>
             <span>{session.title}</span>
-            <small>{session.status === "streaming" ? "実行中" : "開く"}</small>
+            <small>{session.status === "streaming" ? t("profile.running") : t("profile.open")}</small>
           </button>
         ))}
       </div>
@@ -77,31 +80,35 @@ function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
     <div class="panel-section">
       <article class="profile-live-route">
         <span>{copy.code}</span>
-        <h3>{copy.title}</h3>
-        <p>{copy.description}</p>
+        <h3>{t(copy.title)}</h3>
+        <p>{t(copy.description)}</p>
         <dl>
-          <div><dt>Target</dt><dd>{profile.name}</dd></div>
-          <div><dt>Profile ID</dt><dd>{profile.id}</dd></div>
+          <div><dt>{t("profile.target")}</dt><dd>{profile.name}</dd></div>
+          <div><dt>{t("profile.id")}</dt><dd>{profile.id}</dd></div>
         </dl>
-        <button type="button" onClick={() => openLiveSettings(tab)}>Live設定を開く →</button>
+        <button type="button" onClick={() => openLiveSettings(tab)}>{t("profile.openLive")}</button>
       </article>
-      <p class="setting-note">このパネルにはローカルコピーを作りません。表示・保存はすべてHermesの現在値を使用します。</p>
+      <p class="setting-note">{t("profile.liveNote")}</p>
     </div>
   );
 }
 
 export function ProfilePanel() {
+  const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
   const profile = selectedProfile.value;
   if (!profile) return null;
   return (
-    <aside class={`profile-panel ${mobileInspectorOpen.value ? "is-mobile-open" : ""}`} aria-label="Profile詳細">
+    <aside class={`profile-panel ${mobileInspectorOpen.value ? "is-mobile-open" : ""}`} aria-label={t("profile.details")}>
       <header class="profile-panel-head">
-        <button class="mobile-close" onClick={() => { mobileInspectorOpen.value = false; }} aria-label="閉じる">←</button>
-        <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--panel" />
+        <button class="mobile-close" onClick={() => { mobileInspectorOpen.value = false; }} aria-label={t("common.close")}>←</button>
+        <button class="profile-avatar-button" type="button" onClick={() => setAvatarPickerOpen(true)} aria-label={t("profile.changeAvatar", { name: profile.name })}>
+          <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--panel" decorative />
+          <span>{t("profile.change")}</span>
+        </button>
         <div><h2>{profile.name}</h2><p>{profile.role}</p></div>
         <StatusPill status={profile.status} />
       </header>
-      <nav class="panel-tabs" aria-label="Profile設定">
+      <nav class="panel-tabs" aria-label={t("profile.settings")}>
         {tabs.map((tab) => (
           <button
             class={inspectorTab.value === tab.id ? "is-active" : ""}
@@ -111,13 +118,14 @@ export function ProfilePanel() {
             }}
             key={tab.id}
           >
-            {tab.label}
+            {t(tab.label)}
           </button>
         ))}
       </nav>
       {inspectorTab.value === "chat"
         ? <ChatList />
         : <LiveSettingsRoute tab={inspectorTab.value} />}
+      {avatarPickerOpen && <AvatarPicker profileId={profile.id} profileName={profile.name} onClose={() => setAvatarPickerOpen(false)} />}
     </aside>
   );
 }

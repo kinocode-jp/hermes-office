@@ -1,0 +1,90 @@
+.profile-avatar-button {
+  position: relative;
+  width: 66px;
+  height: 66px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.profile-avatar-button > span:last-child {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  padding: 3px 5px;
+  color: var(--night);
+  background: var(--aqua);
+  font: 800 7px/1 ui-monospace, monospace;
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--night) 30%, transparent);
+}
+
+.avatar-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(9, 16, 27, .58);
+  backdrop-filter: blur(5px);
+  z-index: 120;
+}
+
+.avatar-picker {
+  width: min(100%, 470px);
+  max-height: min(680px, calc(100dvh - 36px));
+  overflow: auto;
+  padding: 22px;
+  color: var(--paper);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 24px 80px rgba(4, 12, 24, .28);
+}
+
+.avatar-picker > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.avatar-picker h3 { margin: 4px 0 0; font-size: 19px; }
+.avatar-picker header small { color: var(--aqua); font: 800 8px/1 ui-monospace, monospace; letter-spacing: .12em; }
+.avatar-picker header button { width: 34px; height: 34px; border: 1px solid var(--line); background: transparent; cursor: pointer; }
+.avatar-picker > p { margin: 13px 0 18px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+
+.avatar-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.avatar-choice-grid > button {
+  position: relative;
+  aspect-ratio: 1;
+  padding: 4px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--draft) 38%, transparent);
+  cursor: pointer;
+}
+
+.avatar-choice-grid > button:hover,
+.avatar-choice-grid > button.is-selected { border-color: var(--aqua); box-shadow: inset 0 0 0 2px var(--aqua); }
+.avatar-choice-grid .character-portrait { width: 100%; height: 100%; }
+
+.avatar-picker-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+.avatar-picker-actions input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.avatar-picker-actions button { min-height: 40px; padding: 0 10px; border: 1px solid var(--line); background: transparent; font-size: 10px; font-weight: 750; cursor: pointer; }
+.avatar-picker-actions .avatar-upload-button { color: var(--night); border-color: var(--aqua); background: var(--aqua); }
+.avatar-picker-note { display: block; margin-top: 9px; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.avatar-picker-error { margin: 10px 0 0; padding: 8px 10px; color: var(--coral); border-left: 2px solid var(--coral); background: color-mix(in srgb, var(--coral) 8%, transparent); font-size: 10px; line-height: 1.5; }
+
+@media (max-width: 540px) {
+  .avatar-picker { padding: 16px; }
+  .avatar-choice-grid { grid-template-columns: repeat(3, 1fr); }
+  .avatar-picker-actions { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .avatar-picker-backdrop { backdrop-filter: none; }
+}

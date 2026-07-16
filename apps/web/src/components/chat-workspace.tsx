@@ -1,4 +1,5 @@
 import { useMemo } from "preact/hooks";
+import { t } from "../i18n";
 import { activeSessionId, mobileInspectorOpen, mobileWorkspaceOpen, openSession, profileList, sessions, openSessionIds } from "../store";
 import { ChatPane } from "./chat-pane";
 
@@ -11,8 +12,8 @@ export function ChatWorkspace() {
   if (openSessions.length === 0) {
     return (
       <section class="workspace-empty">
-        <span>NO OPEN THREADS</span>
-        <p>オフィスのキャラクターを選ぶと、ここに会話が開きます。</p>
+        <span>{t("workspace.emptyKicker")}</span>
+        <p>{t("workspace.empty")}</p>
       </section>
     );
   }
@@ -20,11 +21,11 @@ export function ChatWorkspace() {
   return (
     <section class="chat-workspace-shell">
       <header class="mobile-workspace-bar">
-        <button onClick={() => { mobileWorkspaceOpen.value = false; }}>← Profiles</button>
-        <b>Chats · {openSessions.length}</b>
-        <button onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}>Profile設定</button>
+        <button onClick={() => { mobileWorkspaceOpen.value = false; }}>← {t("workspace.profiles")}</button>
+        <b>{t("workspace.chats", { count: openSessions.length })}</b>
+        <button onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}>{t("workspace.profileSettings")}</button>
       </header>
-      <nav class="mobile-chat-tabs" aria-label="開いている会話を切り替え">
+      <nav class="mobile-chat-tabs" aria-label={t("workspace.switchChats")}>
         {openSessions.map((session) => session && (
           <button
             key={session.id}
@@ -37,7 +38,7 @@ export function ChatWorkspace() {
           </button>
         ))}
       </nav>
-      <div class={`chat-workspace panes-${Math.min(openSessions.length, 4)}`} aria-label="開いている会話">
+      <div class={`chat-workspace panes-${Math.min(openSessions.length, 4)}`} aria-label={t("workspace.openChats")}>
         {openSessions.map((session) => {
           if (!session) return null;
           const profile = profileList.value.find((item) => item.id === session.profileId);

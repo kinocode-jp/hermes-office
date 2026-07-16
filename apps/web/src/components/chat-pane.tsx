@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
+import { locale, localizeRuntimeMessage, t } from "../i18n";
 import { activeSessionId, closeSession, interruptSession, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage } from "../store";
 
 export function ChatPane({ session, profile }: { session: ChatSession; profile: Profile }) {
@@ -10,16 +11,16 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const isConnected = !isLiveChat || session.connectionState === "ready";
   const canSend = isConnected && !session.pendingInteraction;
   const statusText = useMemo(() => {
-    if (session.connectionState === "error") return "接続エラー";
-    if (session.connectionState === "connecting") return "接続中";
-    if (session.connectionState === "disconnected" && isLiveChat) return "再接続待ち";
-    if (session.historyState === "loading") return "履歴読込中";
-    if (session.pendingInteraction?.kind === "approval") return "承認待ち";
-    if (session.pendingInteraction?.kind === "clarify") return "回答待ち";
-    if (session.status === "streaming") return "実行中";
-    if (session.status === "waiting") return "入力待ち";
-    return "準備完了";
-  }, [isLiveChat, session.connectionState, session.historyState, session.pendingInteraction?.kind, session.status]);
+    if (session.connectionState === "error") return t("chat.status.error");
+    if (session.connectionState === "connecting") return t("chat.status.connecting");
+    if (session.connectionState === "disconnected" && isLiveChat) return t("chat.status.reconnecting");
+    if (session.historyState === "loading") return t("chat.status.loading");
+    if (session.pendingInteraction?.kind === "approval") return t("chat.status.approval");
+    if (session.pendingInteraction?.kind === "clarify") return t("chat.status.clarify");
+    if (session.status === "streaming") return t("chat.status.running");
+    if (session.status === "waiting") return t("chat.status.waiting");
+    return t("chat.status.ready");
+  }, [isLiveChat, locale.value, session.connectionState, session.historyState, session.pendingInteraction?.kind, session.status]);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -41,26 +42,26 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
           <span>{session.title}</span>
         </div>
         <span class={`chat-state state-${session.connectionState ?? session.status}`}>{statusText}</span>
-        <button class="icon-button" onClick={() => closeSession(session.id)} aria-label={`${session.title}を閉じる`}>×</button>
+        <button class="icon-button" onClick={() => closeSession(session.id)} aria-label={t("chat.close", { title: session.title })}>×</button>
       </header>
 
       <div class="message-list" aria-live="polite" ref={messageListRef}>
         {session.errorMessage ? (
           <div class="chat-connection-note is-error" role="alert">
-            <span>{session.errorMessage}</span>
-            {isLiveChat && (session.connectionState === "error" || session.historyState === "error") && <button type="button" onClick={() => reconnectChatSession(session.id)}>{session.historyState === "error" ? "再読込" : "再接続"}</button>}
+            <span>{localizeRuntimeMessage(session.errorMessage)}</span>
+            {isLiveChat && (session.connectionState === "error" || session.historyState === "error") && <button type="button" onClick={() => reconnectChatSession(session.id)}>{session.historyState === "error" ? t("chat.reload") : t("chat.reconnect")}</button>}
           </div>
         ) : session.connectionState === "disconnected" && isLiveChat ? (
-          <div class="chat-connection-note"><span>Chat接続を復旧しています。履歴はそのまま保持されます。</span></div>
+          <div class="chat-connection-note"><span>{t("chat.recovering")}</span></div>
         ) : null}
         {session.messages.length === 0 ? (
           <div class="empty-chat">
-            <span>{session.historyState === "loading" ? "LOADING HISTORY" : isLiveChat ? "HERMES SESSION" : "NEW THREAD"}</span>
-            <p>{session.historyState === "loading" ? "保存された会話を読み込んでいます。" : !canSend ? "Live Sessionを安全に接続しています。" : `${profile.name}に最初の指示を送ります。`}</p>
+            <span>{session.historyState === "loading" ? t("chat.loadingHistory") : isLiveChat ? t("chat.hermesSession") : t("chat.newThread")}</span>
+            <p>{session.historyState === "loading" ? t("chat.loadingSaved") : !canSend ? t("chat.connectingLive") : t("chat.firstInstruction", { name: profile.name })}</p>
           </div>
         ) : session.messages.map((message) => (
           <div key={message.id} class={`message message-${message.from} message-${message.status ?? "complete"}`}>
-            <span class="message-source">{message.from === "user" ? "You" : message.from === "tool" ? "Tool" : profile.name}</span>
+            <span class="message-source">{message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
             <p>{message.body || (message.status === "streaming" ? "…" : "")}</p>
             <time>{message.at}</time>
           </div>
@@ -85,13 +86,13 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
               event.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={session.pendingInteraction ? "上の確認に回答してください" : !isConnected ? "Live Sessionに接続中…" : session.status === "streaming" ? "実行中。停止すると次の指示を送れます" : `${profile.name}に指示…`}
+          placeholder={session.pendingInteraction ? t("chat.answerAbove") : !isConnected ? t("chat.connectingPlaceholder") : session.status === "streaming" ? t("chat.runningPlaceholder") : t("chat.instruct", { name: profile.name })}
           rows={1}
         />
         {session.status === "streaming" && isLiveChat ? (
-          <button type="button" class="interrupt-button" disabled={session.connectionState !== "ready"} onClick={() => interruptSession(session.id)}>停止</button>
+          <button type="button" class="interrupt-button" disabled={session.connectionState !== "ready"} onClick={() => interruptSession(session.id)}>{t("chat.stop")}</button>
         ) : (
-          <button type="submit" disabled={!canSend || !draft.trim()}>送信</button>
+          <button type="submit" disabled={!canSend || !draft.trim()}>{t("chat.send")}</button>
         )}
       </form>
     </article>
@@ -110,12 +111,12 @@ function ChatInteraction({ sessionId, interaction, connected }: {
 
   if (interaction.kind === "approval") {
     return (
-      <section class="chat-interaction approval-interaction" aria-label="Hermesの操作承認">
-        <span class="interaction-kicker">APPROVAL REQUIRED</span>
-        <h3>{interaction.description || "Hermesが操作の許可を求めています"}</h3>
+      <section class="chat-interaction approval-interaction" aria-label={t("chat.approvalAria")}>
+        <span class="interaction-kicker">{t("chat.approvalRequired")}</span>
+        <h3>{interaction.description || t("chat.approvalFallback")}</h3>
         {interaction.command && <pre><code>{interaction.command}</code></pre>}
-        {interaction.error && <p class="interaction-error" role="alert">{interaction.error}</p>}
-        {!connected && <p class="interaction-note">再接続後に選択できます。この承認は保持されています。</p>}
+        {interaction.error && <p class="interaction-error" role="alert">{localizeRuntimeMessage(interaction.error)}</p>}
+        {!connected && <p class="interaction-note">{t("chat.approvalOffline")}</p>}
         <div class="interaction-actions">
           {interaction.choices.map((choice) => (
             <button
@@ -129,17 +130,17 @@ function ChatInteraction({ sessionId, interaction, connected }: {
             </button>
           ))}
         </div>
-        {interaction.submitting && <span class="interaction-progress">送信中…</span>}
+        {interaction.submitting && <span class="interaction-progress">{t("chat.submitting")}</span>}
       </section>
     );
   }
 
   return (
-    <section class="chat-interaction clarify-interaction" aria-label="Hermesからの確認質問">
-      <span class="interaction-kicker">CLARIFICATION</span>
+    <section class="chat-interaction clarify-interaction" aria-label={t("chat.clarifyAria")}>
+      <span class="interaction-kicker">{t("chat.clarification")}</span>
       <h3>{interaction.question}</h3>
-      {interaction.error && <p class="interaction-error" role="alert">{interaction.error}</p>}
-      {!connected && <p class="interaction-note">再接続後に回答できます。この質問は保持されています。</p>}
+      {interaction.error && <p class="interaction-error" role="alert">{localizeRuntimeMessage(interaction.error)}</p>}
+      {!connected && <p class="interaction-note">{t("chat.clarifyOffline")}</p>}
       {interaction.choices.length > 0 && (
         <div class="interaction-actions">
           {interaction.choices.map((choice) => (
@@ -155,19 +156,19 @@ function ChatInteraction({ sessionId, interaction, connected }: {
           value={answer}
           disabled={disabled}
           onInput={(event) => setAnswer(event.currentTarget.value)}
-          placeholder="自由入力で回答"
-          aria-label="確認質問への回答"
+          placeholder={t("chat.freeAnswer")}
+          aria-label={t("chat.answerAria")}
         />
-        <button type="submit" disabled={disabled || !answer.trim()}>回答</button>
+        <button type="submit" disabled={disabled || !answer.trim()}>{t("chat.answer")}</button>
       </form>
-      {interaction.submitting && <span class="interaction-progress">送信中…</span>}
+      {interaction.submitting && <span class="interaction-progress">{t("chat.submitting")}</span>}
     </section>
   );
 }
 
 function approvalLabel(choice: ApprovalChoice): string {
-  if (choice === "once") return "今回だけ許可";
-  if (choice === "session") return "このSession中は許可";
-  if (choice === "always") return "常に許可";
-  return "拒否";
+  if (choice === "once") return t("approval.once");
+  if (choice === "session") return t("approval.session");
+  if (choice === "always") return t("approval.always");
+  return t("approval.deny");
 }

@@ -1,4 +1,5 @@
 import type { TaskStatus, TaskWritableStatus, WorkTask } from "../domain";
+import { localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import {
   addTaskComment,
   assignTask,
@@ -12,15 +13,15 @@ import {
   tasks
 } from "../store";
 
-const columns: Array<{ id: TaskStatus; label: string; caption: string; writable?: TaskWritableStatus }> = [
-  { id: "triage", label: "Triage", caption: "整理前", writable: "triage" },
-  { id: "todo", label: "Todo", caption: "計画済み", writable: "todo" },
-  { id: "scheduled", label: "Scheduled", caption: "予約済み", writable: "scheduled" },
-  { id: "ready", label: "Ready", caption: "着手可能", writable: "ready" },
-  { id: "running", label: "Running", caption: "Hermes実行中" },
-  { id: "blocked", label: "Blocked", caption: "要確認", writable: "blocked" },
-  { id: "review", label: "Review", caption: "レビュー中" },
-  { id: "done", label: "Done", caption: "完了", writable: "done" }
+const columns: Array<{ id: TaskStatus; label: TranslationKey; caption: TranslationKey; writable?: TaskWritableStatus }> = [
+  { id: "triage", label: "kanban.column.triage", caption: "kanban.caption.triage", writable: "triage" },
+  { id: "todo", label: "kanban.column.todo", caption: "kanban.caption.todo", writable: "todo" },
+  { id: "scheduled", label: "kanban.column.scheduled", caption: "kanban.caption.scheduled", writable: "scheduled" },
+  { id: "ready", label: "kanban.column.ready", caption: "kanban.caption.ready", writable: "ready" },
+  { id: "running", label: "kanban.column.running", caption: "kanban.caption.running" },
+  { id: "blocked", label: "kanban.column.blocked", caption: "kanban.caption.blocked", writable: "blocked" },
+  { id: "review", label: "kanban.column.review", caption: "kanban.caption.review" },
+  { id: "done", label: "kanban.column.done", caption: "kanban.caption.done", writable: "done" }
 ];
 
 function TaskCard({ task }: { task: WorkTask }) {
@@ -45,19 +46,19 @@ function TaskCard({ task }: { task: WorkTask }) {
     >
       <div class="task-card-topline">
         <span class="task-id">{task.id}</span>
-        {task.pending && <span class="task-saving">SAVING</span>}
+        {task.pending && <span class="task-saving">{t("kanban.saving")}</span>}
       </div>
       <h3>{task.title}</h3>
       {(task.latestSummary || task.body) && <p class="task-summary">{task.latestSummary ?? task.body}</p>}
 
       <label class="task-assignee-select">
-        <span>担当</span>
+        <span>{t("kanban.assignee")}</span>
         <select
           value={task.assigneeId ?? ""}
           disabled={task.pending}
           onChange={(event) => void assignTask(task.id, event.currentTarget.value || null)}
         >
-          <option value="">未割当</option>
+          <option value="">{t("kanban.unassigned")}</option>
           {selectableProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
         </select>
       </label>
@@ -65,17 +66,17 @@ function TaskCard({ task }: { task: WorkTask }) {
       <footer>
         <span class="task-assignee">
           {assignee ? <i style={{ background: assignee.color }} /> : <i class="unassigned" />}
-          {assignee?.name ?? "未割当"}
+          {assignee?.name ?? t("kanban.unassigned")}
         </span>
         <button type="button" onClick={() => { expandedTaskId.value = expanded ? "" : task.id; }}>
-          {task.comments} notes
+          {t("kanban.notes", { count: task.comments })}
         </button>
       </footer>
 
       {expanded && (
         <form class="task-comment-form" onSubmit={submitComment}>
-          <input name="comment" aria-label={`${task.title}へのコメント`} placeholder="コメントを追加…" maxLength={16000} required />
-          <button type="submit" disabled={task.pending}>送信</button>
+          <input name="comment" aria-label={t("kanban.commentAria", { title: task.title })} placeholder={t("kanban.commentPlaceholder")} maxLength={16000} required />
+          <button type="submit" disabled={task.pending}>{t("chat.send")}</button>
         </form>
       )}
     </article>
@@ -95,16 +96,16 @@ export function KanbanBoard() {
     <section class="kanban-page">
       <header class="page-title-row">
         <div>
-          <p class="eyebrow">Live shared Hermes board</p>
-          <h1>仕事ボード</h1>
+          <p class="eyebrow">{t("kanban.eyebrow")}</p>
+          <h1>{t("kanban.title")}</h1>
         </div>
         <div class={`kanban-sync state-${boardState.state}`} role={boardState.state === "error" ? "alert" : "status"}>
-          <span>{boardState.message}</span>
-          <button type="button" onClick={() => void refreshKanbanBoard()} disabled={boardState.state === "loading"}>再読込</button>
+          <span>{localizeRuntimeMessage(boardState.message)}</span>
+          <button type="button" onClick={() => void refreshKanbanBoard()} disabled={boardState.state === "loading"}>{t("kanban.reload")}</button>
         </div>
         <form class="task-create" onSubmit={submitTask}>
-          <input name="task-title" aria-label="新しい仕事" placeholder="新しい仕事…" maxLength={240} required />
-          <button class="primary-button" type="submit" disabled={boardState.state === "loading"}>＋ 追加</button>
+          <input name="task-title" aria-label={t("kanban.newTask")} placeholder={t("kanban.newTaskPlaceholder")} maxLength={240} required />
+          <button class="primary-button" type="submit" disabled={boardState.state === "loading"}>{t("kanban.add")}</button>
         </form>
       </header>
 
@@ -123,14 +124,14 @@ export function KanbanBoard() {
             >
               <header>
                 <div>
-                  <b>{column.label}</b>
-                  <span>{column.caption}{!column.writable && " · 自動"}</span>
+                  <b>{t(column.label)}</b>
+                  <span>{t(column.caption)}{!column.writable && ` · ${t("kanban.automatic")}`}</span>
                 </div>
                 <strong>{items.length}</strong>
               </header>
               <div class="task-stack">
                 {items.map((task) => <TaskCard key={task.id} task={task} />)}
-                {items.length === 0 && <p class="column-empty">カードはありません</p>}
+                {items.length === 0 && <p class="column-empty">{t("kanban.empty")}</p>}
               </div>
             </section>
           );

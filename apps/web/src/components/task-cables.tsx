@@ -1,4 +1,5 @@
 import { useId } from "preact/hooks";
+import { t } from "../i18n";
 import "./task-cables.css";
 
 export type TaskCableState = "queued" | "active" | "blocked";
@@ -93,12 +94,12 @@ function CableTerminal({ cable }: { cable: TaskCable }) {
 
 function accessibleCableLabel(cable: TaskCable) {
   const stateLabel = {
-    queued: "待機中",
-    active: "実行中",
-    blocked: "ブロック中",
+    queued: t("cable.queued"),
+    active: t("cable.active"),
+    blocked: t("cable.blocked"),
   }[cable.state];
 
-  return `${cable.taskLabel}、担当 ${cable.profileName}、${stateLabel}`;
+  return t("cable.label", { task: cable.taskLabel, profile: cable.profileName, state: stateLabel });
 }
 
 export function TaskCables({
@@ -107,7 +108,7 @@ export function TaskCables({
   height,
   selectedCableId,
   onSelect,
-  ariaLabel = "仕事と担当Profileの接続",
+  ariaLabel,
   class: className,
   maxCables = HARD_CABLE_LIMIT,
 }: TaskCablesProps) {
@@ -119,6 +120,8 @@ export function TaskCables({
   const overflowCount = Math.max(0, cables.length - visibleCables.length);
   const classes = ["task-cables", className].filter(Boolean).join(" ");
   const instanceId = useId().replaceAll(":", "");
+  const groupLabel = ariaLabel ?? t("cable.group");
+  const overflowLabel = overflowCount > 0 ? t("cable.overflow", { count: overflowCount }) : "";
 
   return (
     <div class={classes} data-cable-count={visibleCables.length} data-overflow-count={overflowCount}>
@@ -127,7 +130,7 @@ export function TaskCables({
         viewBox={`0 0 ${safeWidth} ${safeHeight}`}
         preserveAspectRatio="none"
         role="group"
-        aria-label={`${ariaLabel}、${visibleCables.length}件${overflowCount > 0 ? `、ほか${overflowCount}件は省略` : ""}`}
+        aria-label={t("cable.summary", { label: groupLabel, count: visibleCables.length, overflow: overflowLabel })}
       >
         {visibleCables.map((cable, index) => {
           const selected = selectedCableId === cable.id || cable.selected === true;

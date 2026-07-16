@@ -1,10 +1,12 @@
 import { render } from "preact";
 import { App } from "./app";
+import { initializeAppearance } from "./appearance";
 import { connectChatApi } from "./chat-api";
 import { createKanbanApi } from "./kanban-api";
 import { connectOfficeApi } from "./office-api";
 import { isLocalOfficeClient } from "./auth-state";
 import { notifyAccessAuditChanged, shouldRefreshAccessAudit } from "./audit-api";
+import { initializeI18n } from "./i18n";
 import {
   applyChatGatewayEvent,
   applyChatHistory,
@@ -28,7 +30,11 @@ import {
   setOfficeEventStream
 } from "./store";
 import "./styles.css";
+import "./components/avatar-picker.css";
+import "./appearance.css";
 
+initializeAppearance();
+initializeI18n();
 render(<App />, document.getElementById("app")!);
 
 let chatApi: ReturnType<typeof connectChatApi> | undefined;

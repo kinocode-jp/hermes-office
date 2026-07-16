@@ -11,8 +11,8 @@ export default defineConfig({
         name: "Hermes Office",
         short_name: "Hermes Office",
         description: "A visual control plane for Hermes Agent profiles.",
-        theme_color: "#111821",
-        background_color: "#111821",
+        theme_color: "#ffffff",
+        background_color: "#ffffff",
         display: "standalone",
         start_url: "/",
         icons: [
