@@ -117,6 +117,16 @@ export class ChatSessionCoordinator {
     return this.#live.get(sessionId)?.owner;
   }
 
+  liveLeaseToken(owner: ChatSessionOwner, liveSessionId: string): symbol | undefined {
+    const lease = this.#live.get(liveSessionId);
+    return lease?.owner === owner ? lease.token : undefined;
+  }
+
+  ownsLiveLease(owner: ChatSessionOwner, liveSessionId: string, token: symbol): boolean {
+    const lease = this.#live.get(liveSessionId);
+    return lease?.owner === owner && lease.token === token;
+  }
+
   isOwnedByAnother(owner: ChatSessionOwner, sessionId: string): boolean {
     const lease = this.#live.get(sessionId);
     return lease !== undefined && lease.owner !== owner;

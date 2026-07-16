@@ -221,7 +221,7 @@ test("two sockets independently own equal durable ids from different profiles", 
   assert.equal(beta.events("live-alpha").length, 0);
 });
 
-test("approval and clarification become stale immediately after explicit close", async () => {
+test("approval and clarification tokens do not cross same-owner live-id reuse", async () => {
   const { hermes, dependencies } = setup();
   const client = new FakeWebSocket();
   handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
@@ -234,6 +234,8 @@ test("approval and clarification become stale immediately after explicit close",
   const approvalId = client.approvalId("live-old");
   client.rpc(86, "session.close", { session_id: "live-old" });
   await settle(4);
+  client.rpc(89, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(4);
   client.rpc(87, "approval.respond", { session_id: "live-old", approval_id: approvalId, choice: "deny" });
   client.rpc(88, "clarify.respond", { request_id: "q-closed", answer: "no" });
   await settle(4);
@@ -241,6 +243,14 @@ test("approval and clarification become stale immediately after explicit close",
   assert.equal(client.errorCode(87), -32004);
   assert.equal(client.errorCode(88), -32004);
   assert.deepEqual(hermes.interactionRequests, []);
+
+  hermes.publish({ type: "approval.request", sessionId: "live-old", payload: { choices: ["once"], allowPermanent: false } });
+  hermes.publish({ type: "clarify.request", sessionId: "live-old", payload: { requestId: "q-new-lease", question: "New?" } });
+  await settle();
+  client.rpc(81, "approval.respond", { session_id: "live-old", approval_id: client.approvalId("live-old"), choice: "once" });
+  client.rpc(82, "clarify.respond", { request_id: "q-new-lease", answer: "yes" });
+  await settle(4);
+  assert.deepEqual(hermes.interactionRequests, ["approval.respond", "clarify.respond"]);
 });
 
 test("stale approval and clarification cannot cross close and live-id reuse", async () => {
@@ -283,6 +293,44 @@ test("stale approval and clarification cannot cross close and live-id reuse", as
   replacement.rpc(97, "approval.respond", { session_id: "live-old", approval_id: replacement.approvalId("live-old"), choice: "once" });
   replacement.rpc(98, "clarify.respond", { request_id: "q-reused", answer: "yes" });
   await settle(4);
+  assert.deepEqual(hermes.interactionRequests, [
+    "approval.respond", "clarify.respond", "approval.respond", "clarify.respond",
+  ]);
+});
+
+test("failed claimed interactions cannot restore across same-owner lease reuse", async () => {
+  const { hermes, dependencies } = setup();
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+  client.rpc(100, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle();
+  hermes.publish({ type: "approval.request", sessionId: "live-old", payload: { choices: ["once"], allowPermanent: false } });
+  hermes.publish({ type: "clarify.request", sessionId: "live-old", payload: { requestId: "q-generation", question: "Old?" } });
+  await settle();
+  hermes.holdInteractions();
+  client.rpc(101, "approval.respond", { session_id: "live-old", approval_id: client.approvalId("live-old"), choice: "once" });
+  client.rpc(102, "clarify.respond", { request_id: "q-generation", answer: "old" });
+  await settle();
+
+  client.rpc(103, "session.close", { session_id: "live-old" });
+  await settle(4);
+  client.rpc(104, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(4);
+  hermes.publish({ type: "approval.request", sessionId: "live-old", payload: { choices: ["deny"], allowPermanent: false } });
+  hermes.publish({ type: "clarify.request", sessionId: "live-old", payload: { requestId: "q-generation", question: "New?" } });
+  await settle();
+  const newApprovalId = client.approvalId("live-old");
+  hermes.rejectHeldInteractions();
+  await settle(4);
+  assert.equal(client.errorCode(101), -32000);
+  assert.equal(client.errorCode(102), -32000);
+
+  client.rpc(105, "approval.respond", { session_id: "live-old", approval_id: newApprovalId, choice: "deny" });
+  client.rpc(106, "clarify.respond", { request_id: "q-generation", answer: "new" });
+  await settle(4);
+  assert.equal(client.errorCode(105), undefined);
+  assert.equal(client.errorCode(106), undefined);
   assert.deepEqual(hermes.interactionRequests, [
     "approval.respond", "clarify.respond", "approval.respond", "clarify.respond",
   ]);
@@ -481,6 +529,8 @@ class RaceFakeHermes {
   #pendingOnly: ((result: HermesChatResult) => void) | undefined;
   #pendingParent: ((result: HermesChatResult) => void) | undefined;
   #holdParent = false;
+  #holdInteractionResponses = false;
+  readonly #heldInteractionRejects: Array<(error: Error) => void> = [];
 
   runtime(): HermesRuntimeSource {
     return {
@@ -511,6 +561,11 @@ class RaceFakeHermes {
   }
   publish(event: HermesChatEvent): void { this.#event?.(event); }
   holdNextParentResume(): void { this.#holdParent = true; }
+  holdInteractions(): void { this.#holdInteractionResponses = true; }
+  rejectHeldInteractions(): void {
+    this.#holdInteractionResponses = false;
+    for (const reject of this.#heldInteractionRejects.splice(0)) reject(new Error("held interaction failed"));
+  }
   resolvePendingOnly(): void {
     this.#live.add("live-pending");
     this.#pendingOnly?.({ method: "session.resume", value: sessionValue("live-pending", "pending-only") });
@@ -530,6 +585,9 @@ class RaceFakeHermes {
     }
     if (request.method === "approval.respond" || request.method === "clarify.respond") {
       this.interactionRequests.push(request.method);
+      if (this.#holdInteractionResponses) {
+        return await new Promise<HermesChatResult>((_resolve, reject) => { this.#heldInteractionRejects.push(reject); });
+      }
       return { method: request.method, value: { status: "ok" } };
     }
     if (request.method === "session.close") {

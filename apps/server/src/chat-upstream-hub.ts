@@ -81,12 +81,13 @@ export class ChatUpstreamHub {
     if (!this.#subscribers.has(owner)) throw new Error("Chat owner is detached.");
     if (OWNED_LIVE_METHODS.has(request.method)) {
       const sessionId = typeof request.params?.session_id === "string" ? request.params.session_id : undefined;
-      if (sessionId === undefined || this.#coordinator.ownerForLive(sessionId) !== owner) {
+      const leaseToken = sessionId === undefined ? undefined : this.#coordinator.liveLeaseToken(owner, sessionId);
+      if (sessionId === undefined || leaseToken === undefined) {
         throw new Error("Hermes live session is not owned by this Office connection.");
       }
       return await this.#requestUnchecked(
         request, internal,
-        () => this.#subscribers.has(owner) && this.#coordinator.ownerForLive(sessionId) === owner,
+        () => this.#subscribers.has(owner) && this.#coordinator.ownsLiveLease(owner, sessionId, leaseToken),
       );
     }
     return await this.#requestUnchecked(request, internal, () => this.#subscribers.has(owner));
@@ -95,6 +96,7 @@ export class ChatUpstreamHub {
   async requestOwnedSession(
     owner: ChatSessionOwner,
     liveSessionId: string,
+    expectedLeaseToken: symbol,
     request: HermesChatRequest,
   ): Promise<HermesChatResult> {
     if (this.#stopping) throw new Error("Chat hub is stopping.");
@@ -105,12 +107,13 @@ export class ChatUpstreamHub {
       throw new Error("Hermes request target does not match its owned live session.");
     }
     if (!this.#subscribers.has(owner)) throw new Error("Chat owner is detached.");
-    if (this.#coordinator.ownerForLive(liveSessionId) !== owner) {
+    if (!this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken)) {
       throw new Error("Hermes live session is not owned by this Office connection.");
     }
     return await this.#requestUnchecked(
       request, undefined,
-      () => this.#subscribers.has(owner) && this.#coordinator.ownerForLive(liveSessionId) === owner,
+      () => this.#subscribers.has(owner)
+        && this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken),
     );
   }
 
