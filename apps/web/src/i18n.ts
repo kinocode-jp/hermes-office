@@ -19,6 +19,7 @@ const ja = {
   "connection.live": "ライブ",
   "connection.connected": "接続済み",
   "connection.demo": "デモ表示",
+  "connection.degraded": "一部取得不可",
   "connection.error": "接続エラー",
   "connection.retry": "再接続",
   "login.remote": "Hermes Office · リモート端末",
@@ -271,7 +272,7 @@ const en: Record<TranslationKey, string> = {
   "language.label": "Display language", "language.ja": "日本語", "language.en": "English",
   "nav.office": "Office", "nav.kanban": "Kanban", "nav.library": "Library", "nav.settings": "Settings", "nav.main": "Main navigation",
   "app.home": "Hermes Office home", "app.localOwner": "Local owner", "app.logout": "Log out this remote device",
-  "connection.live": "live", "connection.connected": "connected", "connection.demo": "demo", "connection.error": "connection error", "connection.retry": "Reconnect",
+  "connection.live": "live", "connection.connected": "connected", "connection.demo": "demo", "connection.degraded": "degraded", "connection.error": "connection error", "connection.retry": "Reconnect",
   "login.remote": "Hermes Office · Remote device", "login.connecting": "Connecting to Office", "login.title": "Sign in on this device", "login.deviceName": "Device name", "login.token": "Access token", "login.authenticating": "Authenticating…", "login.retryAfter": "Retry in {seconds}s", "login.authenticate": "Authenticate device", "login.reconnect": "Reconnect to Office Server", "login.tokenNote": "The token is never stored and is used only for this authentication request.",
   "office.eyebrow": "Live floor · local runtime", "office.title": "Today's office", "office.summary": "Office activity", "office.workingCount": "working", "office.attentionCount": "needs attention", "office.profilesCount": "profiles", "office.board": "BOARD", "office.working": "working", "office.needsYou": "needs you", "office.dropHint": "Drop a card on a character to reassign it", "office.hint": "Green = working, amber = needs you, red = blocked. Working characters sit at their desks; idle ones wander. Drop a kanban card on a character to reassign it. Use the controls to switch scene/list view, layout (A/B), and floor size (S/M/L).", "office.viewLabel": "View", "office.viewScene": "Scene view", "office.viewList": "List view", "office.layoutLabel": "Layout", "office.layout.studio": "Layout A · Studio", "office.layout.lounge": "Layout B · Lounge", "office.sizeLabel": "Floor size", "office.profileLabel": "{name}, {state}, {activity}, {count} chats", "office.chats": "chats", "inventory.showMore": "Show more", "inventory.loading": "Loading…", "inventory.truncated": "Only part of the inventory is shown because a safety limit or temporary Hermes read failure was reached.",
   "profile.details": "Profile details", "profile.settings": "Profile settings", "profile.chat": "Chat", "profile.newChat": "+ New chat", "profile.running": "Running", "profile.open": "Open", "profile.identityDescription": "Edit this profile's identity and guidance in the live Hermes SOUL settings. Changes apply to new sessions.", "profile.skillsDescription": "Load the skills detected by Hermes and save per-profile enablement to the live settings.", "profile.skillsTitle": "Profile Skills", "profile.memoryDescription": "Load built-in memory usage and provider settings from Hermes. Memory content cannot be edited or reset here.", "profile.target": "Target", "profile.id": "Profile ID", "profile.openLive": "Open live settings →", "profile.liveNote": "This panel does not create a local copy. Every value shown and saved comes from the current Hermes settings.", "profile.changeAvatar": "Change {name}'s avatar", "profile.change": "Change", "profile.character": "{name}'s character",
@@ -349,6 +350,7 @@ const englishRuntimeMessages: Record<string, string> = {
   "入力内容を確認してください。": "Check the entered values.",
   "この設定を変更する権限がありません。": "You do not have permission to change this setting.",
   "Hermes設定へ接続できません。runtimeを確認してください。": "Unable to reach Hermes settings. Check the runtime.",
+  "Hermes Profile一覧を一時的に取得できません。再取得を待っています。": "The Hermes Profile inventory is temporarily unavailable. Waiting to retry.",
 };
 
 /** Translates status and error copy produced by the transport/store layer. */

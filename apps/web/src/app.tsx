@@ -25,6 +25,7 @@ export function App() {
   const connectionLabel = connection.state === "connected"
     ? (connection.eventStream === "open" ? t("connection.live") : t("connection.connected"))
     : connection.state === "demo" ? t("connection.demo")
+      : connection.state === "degraded" ? t("connection.degraded")
       : connection.state === "error" ? t("connection.error") : connection.state;
   return (
     <div class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}>

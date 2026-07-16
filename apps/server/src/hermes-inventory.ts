@@ -18,6 +18,7 @@ const MAX_INVENTORY_BYTES = 8 * 1024 * 1024;
 const INVENTORY_TIMEOUT_MS = 7_000;
 const INVENTORY_GENERATION_TTL_MS = 5 * 60_000;
 const MAX_INVENTORY_GENERATIONS = 8;
+const MAX_EPOCH_SECONDS = 8_640_000_000_000;
 
 export type HermesJsonResult = { value: unknown; bytes: number };
 export type HermesInventoryRequester = (path: string, timeoutMs: number) => Promise<HermesJsonResult>;
@@ -38,18 +39,24 @@ export type CollectedHermesInventory = {
 
 /** Collects a bounded, ordered inventory from Hermes' real offset API. */
 export async function collectHermesInventory(request: HermesInventoryRequester): Promise<CollectedHermesInventory> {
-  const deadline = Date.now() + INVENTORY_TIMEOUT_MS;
-  const budget = { bytes: 0 };
-  const profilesResult = await collectProfiles(request, deadline, budget);
-  const sessionsResult = await collectSessions(request, deadline, budget);
-  const sessions = mapSessions(sessionsResult.rows);
-  const profiles = mapProfiles(profilesResult.rows, sessions);
-  return {
-    profiles,
-    sessions,
-    profilesState: withoutRows(profilesResult, profiles.length),
-    sessionsState: withoutRows(sessionsResult, sessions.length),
-  };
+  try {
+    const deadline = Date.now() + INVENTORY_TIMEOUT_MS;
+    const budget = { bytes: 0 };
+    const profilesResult = await collectProfiles(request, deadline, budget);
+    const sessionsResult = await collectSessions(request, deadline, budget);
+    const mappedSessions = mapSessions(sessionsResult.rows);
+    const mappedProfiles = mapProfiles(profilesResult.rows, mappedSessions.items);
+    return {
+      profiles: mappedProfiles.items,
+      sessions: mappedSessions.items,
+      profilesState: mappedState(profilesResult, mappedProfiles.items.length, mappedProfiles.failures),
+      sessionsState: mappedState(sessionsResult, mappedSessions.items.length, mappedSessions.failures),
+    };
+  } catch {
+    // Unexpected mapper/collection failures must never become an authoritative
+    // empty inventory. Clients retain last-known-good state for this shape.
+    return unavailableInventory();
+  }
 }
 
 async function collectProfiles(
@@ -163,13 +170,18 @@ async function boundedRequest(
   return result.value;
 }
 
-function withoutRows(state: CollectionState, mappedLength: number): Omit<CollectionState, "rows"> {
+function mappedState(state: CollectionState, mappedLength: number, mappingFailures: number): Omit<CollectionState, "rows"> {
   const total = state.total === undefined ? undefined : Math.max(state.total, mappedLength);
   return {
     ...(total === undefined ? {} : { total }),
-    truncated: state.truncated,
-    partialFailures: state.partialFailures,
+    truncated: state.truncated || mappingFailures > 0,
+    partialFailures: state.partialFailures + mappingFailures,
   };
+}
+
+function unavailableInventory(): CollectedHermesInventory {
+  const state = { truncated: true, partialFailures: 1 };
+  return { profiles: [], sessions: [], profilesState: { ...state }, sessionsState: { ...state } };
 }
 
 type InventoryGeneration = CollectedHermesInventory & {
@@ -286,29 +298,60 @@ function dedupeRecords(rows: Record<string, unknown>[], keyOf: (row: Record<stri
   return rows.filter((row) => { const key = keyOf(row); if (key === undefined || seen.has(key)) return false; seen.add(key); return true; });
 }
 
-function mapProfiles(rows: Record<string, unknown>[], sessions: ChatSessionSummary[]): ProfileSummary[] {
+type MappingResult<T> = { items: T[]; failures: number };
+
+function mapProfiles(rows: Record<string, unknown>[], sessions: ChatSessionSummary[]): MappingResult<ProfileSummary> {
   const activeCounts = new Map<string, number>();
   for (const session of sessions) if (session.activity !== "idle") activeCounts.set(session.profileId, (activeCounts.get(session.profileId) ?? 0) + 1);
-  return rows.flatMap((row): ProfileSummary[] => {
-    const name = readString(row, "name");
-    if (name === undefined) return [];
-    const active = activeCounts.get(name) ?? 0;
-    return [{ id: name, name, avatarKey: name, activity: activity(row.gateway_running === true, active), activeSessionCount: active, inheritedSkillCount: 0, ownSkillCount: readNumber(row, "skill_count") ?? 0, revision: 1 }];
-  });
+  const items: ProfileSummary[] = [];
+  let failures = 0;
+  for (const row of rows) {
+    try {
+      const name = readString(row, "name");
+      if (name === undefined) throw new Error("Hermes profile name is invalid.");
+      const active = activeCounts.get(name) ?? 0;
+      const rawSkillCount = row.skill_count;
+      const parsedSkillCount = nonNegativeInteger(rawSkillCount);
+      const skillCount = parsedSkillCount ?? 0;
+      if (rawSkillCount !== undefined && parsedSkillCount === undefined) failures += 1;
+      items.push({ id: name, name, avatarKey: name, activity: activity(row.gateway_running === true, active), activeSessionCount: active, inheritedSkillCount: 0, ownSkillCount: skillCount, revision: 1 });
+    } catch { failures += 1; }
+  }
+  return { items, failures };
 }
 
-function mapSessions(rows: Record<string, unknown>[]): ChatSessionSummary[] {
-  return rows.flatMap((row): ChatSessionSummary[] => {
-    const id = readString(row, "id");
-    const profile = readString(row, "profile");
-    if (id === undefined || profile === undefined) return [];
-    const preview = readString(row, "preview");
-    return [{ id, profileId: profile, title: readString(row, "title") || "Untitled session", activity: row.is_active === true ? "thinking" : "idle", createdAt: epochToIso(readNumber(row, "started_at")), updatedAt: epochToIso(readNumber(row, "last_active") ?? readNumber(row, "ended_at")), ...(preview === undefined ? {} : { lastMessagePreview: preview.slice(0, 240) }) }];
-  });
+function mapSessions(rows: Record<string, unknown>[]): MappingResult<ChatSessionSummary> {
+  const items: ChatSessionSummary[] = [];
+  let failures = 0;
+  for (const row of rows) {
+    try {
+      const id = readString(row, "id");
+      const profile = readString(row, "profile");
+      if (id === undefined || profile === undefined) throw new Error("Hermes session identity is invalid.");
+      const preview = readString(row, "preview");
+      const fallback = new Date().toISOString();
+      const startedAt = optionalEpochToIso(row, "started_at");
+      const lastActive = optionalEpochToIso(row, "last_active");
+      const endedAt = optionalEpochToIso(row, "ended_at");
+      const createdAt = startedAt ?? fallback;
+      const updatedAt = lastActive ?? endedAt ?? fallback;
+      items.push({ id, profileId: profile, title: readString(row, "title") || "Untitled session", activity: row.is_active === true ? "thinking" : "idle", createdAt, updatedAt, ...(preview === undefined ? {} : { lastMessagePreview: preview.slice(0, 240) }) });
+    } catch { failures += 1; }
+  }
+  return { items, failures };
 }
 
 function activity(gateway: boolean, active: number): AgentActivity { return active > 0 ? "thinking" : gateway ? "idle" : "offline"; }
-function epochToIso(value: number | undefined): string { return new Date((value ?? Date.now() / 1_000) * 1_000).toISOString(); }
+function optionalEpochToIso(row: Record<string, unknown>, key: string): string | undefined {
+  const value = row[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_EPOCH_SECONDS) {
+    throw new Error(`Hermes inventory ${key} timestamp is invalid.`);
+  }
+  const date = new Date(value * 1_000);
+  if (!Number.isFinite(date.valueOf())) throw new Error(`Hermes inventory ${key} timestamp is out of range.`);
+  return date.toISOString();
+}
 function requiredRecordArray(value: unknown, key: string): { records: Record<string, unknown>[]; wireLength: number; invalid: boolean } {
   const rows = isRecord(value) ? value[key] : undefined;
   if (!Array.isArray(rows)) throw new Error(`Hermes inventory ${key} contract is invalid.`);
@@ -324,4 +367,5 @@ function optionalRecordArray(value: unknown, key: string): Record<string, unknow
 function readString(value: unknown, key: string): string | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "string" ? item : undefined; }
 function readNumber(value: unknown, key: string): number | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "number" && Number.isFinite(item) ? item : undefined; }
 function readNonNegativeInteger(value: unknown, key: string): number | undefined { const item = readNumber(value, key); return item !== undefined && Number.isSafeInteger(item) && item >= 0 ? item : undefined; }
+function nonNegativeInteger(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

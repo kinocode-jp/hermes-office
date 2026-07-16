@@ -87,8 +87,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .runtime-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 600 11px/1 ui-monospace, monospace; text-transform: uppercase; }
 .runtime-status i { width: 7px; height: 7px; background: var(--aqua); box-shadow: 0 0 0 3px rgba(85, 214, 190, 0.12); }
 .runtime-status .rt-state { color: var(--aqua); }
-.runtime-status.runtime-connecting i { background: var(--amber); box-shadow: 0 0 0 3px rgba(242,184,75,.12); }
-.runtime-status.runtime-connecting .rt-state { color: var(--amber); }
+.runtime-status.runtime-connecting i, .runtime-status.runtime-degraded i { background: var(--amber); box-shadow: 0 0 0 3px rgba(242,184,75,.12); }
+.runtime-status.runtime-connecting .rt-state, .runtime-status.runtime-degraded .rt-state { color: var(--amber); }
 .runtime-status.runtime-error i, .runtime-status.runtime-demo i { background: var(--coral); box-shadow: 0 0 0 3px rgba(240,106,87,.12); }
 .runtime-status.runtime-error .rt-state, .runtime-status.runtime-demo .rt-state { color: var(--coral); }
 

@@ -213,6 +213,44 @@ test("session failures preserve a partial contract independently from healthy pr
   }
 });
 
+test("out-of-range session timestamps degrade only session inventory and recover without becoming authoritative empty", async () => {
+  let mode: "healthy" | "malformed" | "empty" = "healthy";
+  const fixture = await startHermesFixture((request, response, url) => {
+    if (url.pathname === "/api/profiles") return writeJson(response, { profiles: mode === "empty" ? [] : [profileRow(0)] });
+    if (url.pathname === "/api/profiles/sessions") {
+      const rows = mode === "empty" ? [] : mode === "malformed" ? [{ ...sessionRow(0), started_at: 1e20, last_active: -1 }] : [sessionRow(0)];
+      return writeJson(response, { sessions: rows, total: rows.length, errors: [] });
+    }
+    return defaultFixtureRoute(request, response, url);
+  });
+  try {
+    assert.equal((await fixture.backend.start()).state, "ready");
+    assert.deepEqual((await fixture.backend.snapshot()).sessions.map((session) => session.id), ["session-0"]);
+    mode = "malformed";
+    const degraded = await fixture.backend.snapshot();
+    assert.deepEqual(degraded.profiles.map((profile) => profile.id), ["profile-0"]);
+    assert.deepEqual(degraded.sessions, []);
+    assert.equal(degraded.inventory.profiles.partialFailures, 0);
+    assert.equal(degraded.inventory.sessions.total, 1);
+    assert.equal(degraded.inventory.sessions.truncated, true);
+    assert.equal(degraded.inventory.sessions.partialFailures, 1);
+    assert.equal(degraded.capabilities.runtime.state, "ready");
+    mode = "healthy";
+    assert.deepEqual((await fixture.backend.snapshot()).sessions.map((session) => session.id), ["session-0"]);
+    mode = "empty";
+    const empty = await fixture.backend.snapshot();
+    assert.deepEqual(empty.profiles, []);
+    assert.deepEqual(empty.sessions, []);
+    assert.equal(empty.inventory.profiles.truncated, false);
+    assert.equal(empty.inventory.sessions.truncated, false);
+    assert.equal(empty.inventory.profiles.total, 0);
+    assert.equal(empty.inventory.sessions.total, 0);
+  } finally {
+    await fixture.backend.close();
+    await fixture.close();
+  }
+});
+
 for (const scenario of ["404", "500", "timeout", "mapping"] as const) {
   test(`a Kanban ${scenario} failure preserves healthy profile and session inventory`, async () => {
     let boardRequests = 0;

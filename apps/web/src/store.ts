@@ -6,6 +6,7 @@ import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInter
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
+import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
 export const tasks = signal<WorkTask[]>([]);
@@ -61,6 +62,7 @@ let kanbanApi: KanbanApi | undefined;
 let kanbanMutations = 0;
 let kanbanRefresh: Promise<void> | undefined;
 let kanbanRefreshQueued = false;
+let runtimeDataSource: "none" | "demo" | "live" = "none";
 
 export function registerKanbanRuntime(api: KanbanApi): void {
   kanbanApi = api;
@@ -176,18 +178,22 @@ export function setOfficeConnecting(serverUrl: string): void {
 
 export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string): void {
   const explicitDemo = snapshot.capabilities.features.includes("demo");
+  const profileInventoryUnavailable = !explicitDemo
+    && snapshot.capabilities.runtime.state === "ready"
+    && snapshot.profiles.length === 0
+    && officeInventoryReliability(snapshot.inventory.profiles) !== "complete";
   officeSnapshot.value = snapshot;
   officeConnection.value = {
-    state: explicitDemo ? "demo" : "connected",
+    state: explicitDemo ? "demo" : profileInventoryUnavailable ? "degraded" : "connected",
     source: explicitDemo ? "demo" : "server",
     serverUrl,
     runtime: snapshot.capabilities.runtime.state,
     protocolVersion: snapshot.capabilities.protocolVersion,
     generatedAt: snapshot.generatedAt,
     eventStream: officeConnection.value.eventStream,
-    message: explicitDemo
-      ? "明示的なデモモードで表示中"
-      : snapshot.capabilities.runtime.state === "ready" ? "Hermes runtime ready" : `Hermes runtime ${snapshot.capabilities.runtime.state}`
+    message: explicitDemo ? "明示的なデモモードで表示中"
+      : profileInventoryUnavailable ? "Hermes Profile一覧を一時的に取得できません。再取得を待っています。"
+        : snapshot.capabilities.runtime.state === "ready" ? "Hermes runtime ready" : `Hermes runtime ${snapshot.capabilities.runtime.state}`
   };
 
   if (explicitDemo) {
@@ -198,10 +204,15 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
     clearRuntimeState();
     return;
   }
-  if (snapshot.profiles.length === 0 && officeInventoryReliability(snapshot.inventory.profiles) !== "complete") return;
+  if (profileInventoryUnavailable) {
+    if (runtimeDataSource !== "live") clearRuntimeState();
+    return;
+  }
   if (snapshot.profiles.length === 0) { clearRuntimeState(); return; }
+  if (runtimeDataSource === "demo") clearRuntimeState();
 
   const previousProfiles = new Map(profileList.value.map((profile) => [profile.id, profile]));
+  const previousTargetIds = new Set(getOpenChatTargets().map((target) => target.clientSessionId));
   const sessionCounts = new Map<string, number>();
   for (const session of snapshot.sessions) {
     sessionCounts.set(session.profileId, (sessionCounts.get(session.profileId) ?? 0) + 1);
@@ -255,7 +266,8 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
   if (!profileList.value.some((profile) => profile.id === selectedProfileId.value)) {
     selectedProfileId.value = profileList.value[0]?.id ?? "";
   }
-  for (const target of getOpenChatTargets()) ensureChatSession(target);
+  runtimeDataSource = "live";
+  for (const target of getOpenChatTargets()) if (!previousTargetIds.has(target.clientSessionId)) ensureChatSession(target);
 }
 
 export function setOfficeEventStream(eventStream: OfficeConnection["eventStream"]): void {
@@ -345,7 +357,7 @@ export function createSession(profileId: string): void {
 }
 
 function loadExplicitDemoState(): void {
-  for (const sessionId of openSessionIds.value) releaseChatSession(sessionId);
+  clearRuntimeState();
   profileList.value = profiles.map((profile) => ({ ...profile, skills: [...profile.skills], inheritedSkills: [...profile.inheritedSkills] }));
   sessions.value = initialSessions.map((session) => ({
     ...session,
@@ -358,12 +370,11 @@ function loadExplicitDemoState(): void {
   selectedProfileId.value = profileList.value[0]?.id ?? "";
   openSessionIds.value = sessions.value.slice(0, MAX_OPEN_CHAT_SESSIONS).map((session) => session.id);
   activeSessionId.value = openSessionIds.value[0] ?? "";
-  tasks.value = [];
-  kanbanAssignees.value = [];
+  runtimeDataSource = "demo";
 }
 
 function clearRuntimeState(): void {
-  for (const sessionId of openSessionIds.value) releaseChatSession(sessionId);
+  for (const target of getOpenChatTargets()) releaseChatSession(target.clientSessionId);
   profileList.value = [];
   sessions.value = [];
   tasks.value = [];
@@ -376,6 +387,7 @@ function clearRuntimeState(): void {
   mobileInspectorOpen.value = false;
   chatSocketState.value = { state: "disconnected", message: "Chat接続を待っています" };
   kanbanState.value = { state: "idle", message: "Hermes runtimeの準備を待っています", latestEventId: 0 };
+  runtimeDataSource = "none";
 }
 
 export function sendMessage(sessionId: string, body: string): void {
@@ -657,27 +669,6 @@ function chatTarget(session: ChatSession): ChatTarget | undefined {
 
 function updateChatSession(sessionId: string, update: (session: ChatSession) => ChatSession): void {
   sessions.value = sessions.value.map((session) => session.id === sessionId ? update(session) : session);
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function approvalChoices(value: unknown, allowPermanent: boolean): ApprovalChoice[] {
-  const allowed = new Set<ApprovalChoice>(["once", "session", "deny", ...(allowPermanent ? ["always" as const] : [])]);
-  return stringArray(value).filter((choice): choice is ApprovalChoice => allowed.has(choice as ApprovalChoice));
-}
-
-function gatewayMessageId(payload: Record<string, unknown>): string | undefined {
-  return stringValue(payload.messageId) ?? stringValue(payload.message_id);
-}
-
-function nowTime(): string {
-  return new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 }
 
 export async function assignTask(taskId: string, profileId: string | null): Promise<void> {

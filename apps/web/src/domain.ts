@@ -95,7 +95,7 @@ export type Surface = "office" | "kanban" | "library" | "settings";
 export type InspectorTab = "chat" | "profile" | "skills" | "memory";
 export type SettingsTab = "global" | "skills" | "soul" | "memory";
 
-export type OfficeConnectionState = "demo" | "connecting" | "connected" | "error";
+export type OfficeConnectionState = "demo" | "connecting" | "connected" | "degraded" | "error";
 export type OfficeAccessState = "checking" | "login-required" | "submitting" | "authenticated" | "unavailable";
 
 export type OfficeAccess = {

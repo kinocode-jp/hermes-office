@@ -197,7 +197,7 @@ export class HermesBackend implements HermesRuntimeSource {
       // rest of the process lifetime. Keep the established transport usable;
       // the next snapshot refresh can recover the visible state.
       const degraded = { ...this.#state, compatibilityMessage: "Hermesの状態を再取得しています。" };
-      return emptySnapshot(degraded, ++this.#sequence);
+      return unavailableSnapshot(degraded, ++this.#sequence);
     }
   }
 
@@ -412,6 +412,11 @@ function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: Office
 function emptySnapshot(runtime: RuntimeStatus, sequence: number): OfficeSnapshot {
   const empty = { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 };
   return makeSnapshot(runtime, sequence, [], [], { profiles: empty, sessions: empty }, emptyBoards());
+}
+
+function unavailableSnapshot(runtime: RuntimeStatus, sequence: number): OfficeSnapshot {
+  const unavailable = { returned: 0, available: 0, hasMore: false, truncated: true, partialFailures: 1 };
+  return makeSnapshot(runtime, sequence, [], [], { profiles: unavailable, sessions: unavailable }, emptyBoards());
 }
 
 function recordArray(value: unknown, key: string): Record<string, unknown>[] { const rows = isRecord(value) ? value[key] : undefined; return Array.isArray(rows) ? rows.filter(isRecord) : []; }
