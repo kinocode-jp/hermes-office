@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm --prefix ../.. run dev",
     "devUrl": "http://localhost:4173",
-    "beforeBuildCommand": "npm run build --workspace @hermes-office/web",
+    "beforeBuildCommand": "npm --prefix ../.. run build:desktop-assets",
     "frontendDist": "../../web/dist"
   },
   "app": {
@@ -26,7 +26,8 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["app", "dmg"],
+    "resources": ["resources/server/hermes-office-server.mjs"]
   }
 }

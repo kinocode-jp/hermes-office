@@ -19,38 +19,87 @@ export type ChatMessage = {
   from: "user" | "agent" | "tool";
   body: string;
   at: string;
+  status?: "streaming" | "complete" | "failed" | "cancelled";
 };
 
+export type ChatConnectionState = "disconnected" | "connecting" | "ready" | "error";
+export type ChatHistoryState = "unloaded" | "loading" | "loaded" | "error";
+
+export type ApprovalChoice = "once" | "session" | "always" | "deny";
+
+export type ChatPendingInteraction =
+  | {
+      id: string;
+      kind: "clarify";
+      requestId: string;
+      question: string;
+      choices: string[];
+      submitting: boolean;
+      error?: string | undefined;
+    }
+  | {
+      id: string;
+      kind: "approval";
+      command?: string | undefined;
+      description?: string | undefined;
+      choices: ApprovalChoice[];
+      allowPermanent: boolean;
+      submitting: boolean;
+      error?: string | undefined;
+    };
+
 export type ChatSession = {
+  /** Stable UI identity. It can exist before Hermes persists a session. */
   id: string;
+  /** Durable Hermes state.db identity used by REST history and resume. */
+  storedSessionId?: string | undefined;
+  /** Process-local gateway identity, valid only for the current WebSocket. */
+  liveSessionId?: string | undefined;
   profileId: string;
   title: string;
   status: "streaming" | "ready" | "waiting";
   messages: ChatMessage[];
+  connectionState?: ChatConnectionState;
+  historyState?: ChatHistoryState;
+  errorMessage?: string | undefined;
+  remoteKind?: "demo" | "stored" | "draft" | undefined;
+  streamingMessageId?: string | undefined;
+  pendingInteraction?: ChatPendingInteraction | undefined;
   readOnly?: boolean;
 };
 
-export type TaskStatus = "triage" | "ready" | "running" | "blocked" | "done";
+export type TaskStatus = "triage" | "todo" | "scheduled" | "ready" | "running" | "blocked" | "review" | "done" | "archived";
+export type TaskWritableStatus = "triage" | "todo" | "scheduled" | "ready" | "blocked" | "done" | "archived";
 
 export type WorkTask = {
   id: string;
   title: string;
+  body?: string | undefined;
   status: TaskStatus;
-  assigneeId?: string;
+  assigneeId?: string | undefined;
   priority: "normal" | "high";
+  priorityValue?: number;
   comments: number;
+  latestSummary?: string | undefined;
+  pending?: boolean;
 };
+
+export type KanbanConnectionState = "idle" | "loading" | "ready" | "saving" | "error";
 
 export type Surface = "office" | "kanban" | "library" | "settings";
 export type InspectorTab = "chat" | "profile" | "skills" | "memory";
-
-export type GlobalSettings = {
-  skills: string[];
-  context: string;
-  remoteAccess: "off" | "tailscale" | "public";
-};
+export type SettingsTab = "global" | "skills" | "soul" | "memory";
 
 export type OfficeConnectionState = "demo" | "connecting" | "connected" | "error";
+export type OfficeAccessState = "checking" | "login-required" | "submitting" | "authenticated" | "unavailable";
+
+export type OfficeAccess = {
+  state: OfficeAccessState;
+  serverUrl: string;
+  message: string;
+  failureCode?: "invalid" | "rate-limited" | "disabled" | "unavailable" | undefined;
+  retryAfterSeconds?: number | undefined;
+};
 
 export type OfficeRuntimeState =
   | "unconfigured"

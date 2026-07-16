@@ -12,13 +12,18 @@
     "dev:web": "npm run dev --workspace @hermes-office/web",
     "dev:server": "npm run dev --workspace @hermes-office/server",
     "dev:desktop": "npm run tauri:dev --workspace @hermes-office/desktop",
+    "start": "node scripts/start-office.mjs",
+    "build:production": "npm run build:web && npm run build --workspace @hermes-office/server",
+    "build:desktop-assets": "npm run build:web && npm run bundle:server",
+    "bundle:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --target=node22 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=apps/desktop/src-tauri/resources/server/hermes-office-server.mjs",
     "build": "npm run build --workspaces --if-present",
     "build:web": "npm run build --workspace @hermes-office/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test:server": "npm test --workspace @hermes-office/server"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "esbuild": "^0.25.10"
   },
   "engines": {
     "node": ">=22"

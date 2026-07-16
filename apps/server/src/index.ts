@@ -25,6 +25,8 @@ const server = createOfficeServer({
   port,
   ...(configuredOrigins === undefined ? {} : { allowedOrigins: configuredOrigins }),
   allowNonLoopback: process.env.HERMES_OFFICE_ALLOW_NON_LOOPBACK === "true",
+  ...(process.env.HERMES_OFFICE_REMOTE_TOKEN === undefined ? {} : { remoteToken: process.env.HERMES_OFFICE_REMOTE_TOKEN }),
+  ...(process.env.HERMES_OFFICE_WEB_ROOT === undefined ? {} : { staticWebRoot: process.env.HERMES_OFFICE_WEB_ROOT }),
   ...(runtimeSource === undefined ? {} : { runtimeSource }),
 });
 

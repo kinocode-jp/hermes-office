@@ -1,4 +1,5 @@
 import type { OfficeRuntimeState, OfficeSnapshot } from "./domain";
+import { classifyDeviceLoginFailure, isLocalOfficeClient, normalizeDeviceName, type DeviceLoginFailure } from "./auth-state";
 
 type HealthResponse = {
   ok: true;
@@ -6,7 +7,7 @@ type HealthResponse = {
   runtime: OfficeRuntimeState;
 };
 
-type OfficeEvent = {
+export type OfficeEvent = {
   topic: string;
   sequence: number;
   payload?: unknown;
@@ -17,24 +18,51 @@ export type OfficeApiCallbacks = {
   onSnapshot(snapshot: OfficeSnapshot, serverUrl: string): void;
   onEventStream(state: "closed" | "connecting" | "open"): void;
   onError(message: string, serverUrl: string): void;
+  onAuthRequired?(serverUrl: string): void;
+  onEvent?(event: OfficeEvent): void;
 };
 
 export type OfficeApiConnection = { stop(): void; retry(): void };
 
-const FETCH_TIMEOUT_MS = 2_500;
+export type OfficeApiRequestOptions = {
+  method?: "GET" | "POST" | "PUT" | "PATCH";
+  body?: unknown;
+  timeoutMs?: number;
+};
+
+export type DeviceLoginResult = { ok: true } | ({ ok: false } & DeviceLoginFailure);
+
+export class OfficeDeviceAuthRequiredError extends Error {
+  constructor() {
+    super("Remote device authentication is required.");
+    this.name = "OfficeDeviceAuthRequiredError";
+  }
+}
+
+// A cold Hermes snapshot can legitimately take several seconds while its
+// profile/session indexes initialize. Keep the UI responsive, but do not
+// drop into demo fallback during a normal first launch.
+const FETCH_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
+const officeSessions = new Map<string, Promise<{ csrfToken: string }>>();
+const officeSessionRefreshes = new Map<string, Promise<{ csrfToken: string }>>();
+let authRequiredObserver: ((serverUrl: string) => void) | undefined;
 
 export function officeServerUrl(): string {
   const configured = import.meta.env.VITE_OFFICE_SERVER_URL?.trim();
   if (configured) return configured.replace(/\/$/, "");
-  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+  if (location.protocol === "tauri:" || location.hostname === "tauri.localhost") {
     return "http://127.0.0.1:4317";
+  }
+  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+    return `${location.protocol}//${location.hostname}:4317`;
   }
   return location.origin;
 }
 
 export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnection {
   const serverUrl = officeServerUrl();
+  authRequiredObserver = callbacks.onAuthRequired;
   let stopped = false;
   let socket: WebSocket | undefined;
   let reconnectTimer: number | undefined;
@@ -53,9 +81,9 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
   const loadSnapshot = async (showConnecting: boolean) => {
     if (showConnecting) callbacks.onConnecting(serverUrl);
     try {
-      const health = await fetchJson<HealthResponse>(`${serverUrl}/api/v1/health`);
+      const health = await officeFetchJson<HealthResponse>("/api/v1/health", {}, serverUrl);
       if (!isHealthResponse(health)) throw new Error("Office Server health response is incompatible.");
-      const snapshot = await fetchJson<OfficeSnapshot>(`${serverUrl}/api/v1/snapshot`);
+      const snapshot = await officeFetchJson<OfficeSnapshot>("/api/v1/snapshot", {}, serverUrl);
       if (!isOfficeSnapshot(snapshot)) throw new Error("Office Server snapshot is incompatible.");
       if (snapshot.capabilities.protocolVersion !== health.protocolVersion) {
         throw new Error("Office Server protocol versions do not match.");
@@ -63,6 +91,10 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
       callbacks.onSnapshot(snapshot, serverUrl);
       return true;
     } catch (error) {
+      if (error instanceof OfficeDeviceAuthRequiredError) {
+        if (!stopped) callbacks.onAuthRequired?.(serverUrl);
+        return false;
+      }
       if (!stopped) callbacks.onError(errorMessage(error), serverUrl);
       return false;
     }
@@ -81,6 +113,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
     socket.addEventListener("message", (event) => {
       const message = parseEvent(event.data);
       if (!message) return;
+      callbacks.onEvent?.(message);
       if (message.topic === "resync.required" || message.topic.endsWith(".changed") || message.topic === "runtime.status") {
         scheduleSnapshotRefresh();
       }
@@ -112,16 +145,129 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks): OfficeApiConnec
   };
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+export async function officeFetchJson<T>(path: string, options: OfficeApiRequestOptions = {}, serverUrl = officeServerUrl()): Promise<T> {
+  const baseUrl = new URL(serverUrl);
+  const url = new URL(path, baseUrl);
+  if (url.origin !== baseUrl.origin || !url.pathname.startsWith("/api/v1/")) {
+    throw new Error("Office API path is invalid.");
+  }
   try {
-    const response = await fetch(url, { signal: controller.signal, headers: { Accept: "application/json" } });
+    const session = await ensureOfficeSession(serverUrl);
+    return await requestOfficeJson<T>(url, options, session.csrfToken, serverUrl, true);
+  } catch (error) {
+    if (error instanceof OfficeDeviceAuthRequiredError) authRequiredObserver?.(serverUrl);
+    throw error;
+  }
+}
+
+/**
+ * Starts a one-shot device login. The credential is serialized directly into
+ * the request body and is never placed in module state, signals, URLs, or logs.
+ */
+export function authenticateRemoteDevice(deviceNameInput: string, credential: string, serverUrl = officeServerUrl()): Promise<DeviceLoginResult> {
+  const deviceName = normalizeDeviceName(deviceNameInput);
+  if (!deviceName) return Promise.resolve({ ok: false, ...classifyDeviceLoginFailure(400, null) });
+  const request = fetch(`${serverUrl}/api/v1/auth/device`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ token: credential, deviceName })
+  });
+  return request.then(async (response): Promise<DeviceLoginResult> => {
+    if (!response.ok) return { ok: false, ...classifyDeviceLoginFailure(response.status, response.headers.get("Retry-After")) };
+    const session = parseOfficeSession(await response.json() as unknown);
+    if (!session) return { ok: false, ...classifyDeviceLoginFailure(500, null) };
+    officeSessions.set(serverUrl, Promise.resolve(session));
+    return { ok: true };
+  }, (): DeviceLoginResult => ({ ok: false, ...classifyDeviceLoginFailure(0, null) }));
+}
+
+export async function logoutRemoteDevice(serverUrl = officeServerUrl()): Promise<void> {
+  await officeFetchJson<{ ok: true }>("/api/v1/auth/logout", { method: "POST" }, serverUrl);
+  officeSessions.delete(serverUrl);
+  officeSessionRefreshes.delete(serverUrl);
+}
+
+async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, csrfToken: string, serverUrl: string, retryAuth: boolean): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS);
+  const method = options.method ?? "GET";
+  try {
+    const response = await fetch(url, {
+      method,
+      credentials: "include",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+        ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(method === "GET" ? {} : { "X-CSRF-Token": csrfToken })
+      },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
+    });
+    if (response.status === 401 && retryAuth) {
+      const replacement = await recoverOfficeSession(serverUrl, csrfToken);
+      return await requestOfficeJson<T>(url, options, replacement.csrfToken, serverUrl, false);
+    }
     if (!response.ok) throw new Error(`Office Server returned HTTP ${response.status}.`);
     return await response.json() as T;
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+function ensureOfficeSession(serverUrl: string): Promise<{ csrfToken: string }> {
+  const current = officeSessions.get(serverUrl);
+  if (current) return current;
+  const pending = bootstrapLocalSession(serverUrl).catch((error) => {
+    if (officeSessions.get(serverUrl) === pending) officeSessions.delete(serverUrl);
+    throw error;
+  });
+  officeSessions.set(serverUrl, pending);
+  return pending;
+}
+
+function refreshOfficeSession(serverUrl: string): Promise<{ csrfToken: string }> {
+  const current = officeSessionRefreshes.get(serverUrl);
+  if (current) return current;
+  officeSessions.delete(serverUrl);
+  const pending = ensureOfficeSession(serverUrl);
+  officeSessionRefreshes.set(serverUrl, pending);
+  void pending.then(
+    () => { if (officeSessionRefreshes.get(serverUrl) === pending) officeSessionRefreshes.delete(serverUrl); },
+    () => { if (officeSessionRefreshes.get(serverUrl) === pending) officeSessionRefreshes.delete(serverUrl); }
+  );
+  return pending;
+}
+
+async function recoverOfficeSession(serverUrl: string, rejectedCsrfToken: string): Promise<{ csrfToken: string }> {
+  const current = officeSessions.get(serverUrl);
+  if (current) {
+    const session = await current;
+    if (session.csrfToken !== rejectedCsrfToken) return session;
+  }
+  return await refreshOfficeSession(serverUrl);
+}
+
+async function bootstrapLocalSession(serverUrl: string): Promise<{ csrfToken: string }> {
+  const response = await fetch(`${serverUrl}/api/v1/auth/local`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json" }
+  });
+  if (response.status === 403 && !isLocalOfficeClient(location)) throw new OfficeDeviceAuthRequiredError();
+  if (!response.ok) throw new Error(`Office local authentication failed with HTTP ${response.status}.`);
+  const body = await response.json() as unknown;
+  const session = parseOfficeSession(body);
+  if (!session) throw new Error("Office local authentication response is incompatible.");
+  return session;
+}
+
+function parseOfficeSession(value: unknown): { csrfToken: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const csrfToken = (value as { csrfToken?: unknown }).csrfToken;
+  return typeof csrfToken === "string" && csrfToken.length >= 16 && csrfToken.length <= 512
+    ? { csrfToken }
+    : undefined;
 }
 
 function toWebSocketUrl(serverUrl: string): string {

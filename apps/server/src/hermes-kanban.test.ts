@@ -1,0 +1,115 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  HermesKanbanAdapter,
+  KanbanValidationError,
+  createHermesKanbanHttpRequester,
+  type HermesKanbanRequest,
+} from "./hermes-kanban.js";
+
+const CARD = {
+  id: "t_deadbeef",
+  title: "Ship the office",
+  body: "Finish the safe adapter",
+  assignee: "mina",
+  status: "todo",
+  priority: 4,
+  created_at: 100,
+  started_at: null,
+  completed_at: null,
+  latest_summary: null,
+  comment_count: 2,
+  workspace_path: "/Users/private/project",
+  api_key: "must-not-leak",
+};
+
+function mockAdapter(handler: (request: HermesKanbanRequest) => unknown | Promise<unknown>) {
+  return new HermesKanbanAdapter({
+    request: async (request) => await handler(request),
+    listAllowedProfiles: () => ["mina", "atlas"],
+  });
+}
+
+test("board reads are allowlisted and strip paths, secrets, and unknown fields", async () => {
+  const adapter = mockAdapter(() => ({
+    columns: [{ name: "todo", tasks: [CARD] }],
+    assignees: ["mina"],
+    latest_event_id: 9,
+    now: 200,
+    access_token: "must-not-leak",
+  }));
+  const board = await adapter.getBoard({ board: "Project_One", includeArchived: true });
+
+  assert.equal(board.board, "project_one");
+  assert.equal(board.columns[0]?.cards[0]?.title, "Ship the office");
+  const serialized = JSON.stringify(board);
+  assert.equal(serialized.includes("/Users/private"), false);
+  assert.equal(serialized.includes("must-not-leak"), false);
+  assert.equal(serialized.includes("workspace_path"), false);
+});
+
+test("create, assignment, status, and comments send only bounded allowlisted JSON", async () => {
+  const requests: HermesKanbanRequest[] = [];
+  const adapter = mockAdapter((request) => {
+    requests.push(request);
+    if (request.path.endsWith("/comments")) return { ok: true, debug_path: "/private" };
+    const patch = request.body ?? {};
+    return { task: { ...CARD, ...patch, assignee: patch.assignee === "" ? null : (patch.assignee ?? CARD.assignee) } };
+  });
+
+  await adapter.createCard({ title: " New card ", body: "Body", assignee: "mina", priority: 3 });
+  await adapter.setAssignee("t_deadbeef", null);
+  await adapter.setStatus("t_deadbeef", "blocked");
+  await adapter.addComment("t_deadbeef", " Need input ");
+
+  assert.deepEqual(requests[0]?.body, {
+    title: "New card",
+    workspace_kind: "scratch",
+    body: "Body",
+    assignee: "mina",
+    priority: 3,
+  });
+  assert.deepEqual(requests[1]?.body, { assignee: "" });
+  assert.deepEqual(requests[2]?.body, { status: "blocked" });
+  assert.deepEqual(requests[3]?.body, { body: "Need input", author: "hermes-office" });
+});
+
+test("unsafe identifiers, profiles, and dispatcher-owned statuses fail before transport", async () => {
+  let calls = 0;
+  const adapter = mockAdapter(() => { calls += 1; return { task: CARD }; });
+
+  await assert.rejects(adapter.setAssignee("../../kanban.db", "mina"), KanbanValidationError);
+  await assert.rejects(adapter.setAssignee("t_deadbeef", "unknown"), /not available/);
+  await assert.rejects(
+    adapter.updateCard("t_deadbeef", { status: "running" as never }),
+    /cannot be set directly/,
+  );
+  await assert.rejects(
+    adapter.updateCard("t_deadbeef", { status: "review" as never }),
+    /cannot be set directly/,
+  );
+  await assert.rejects(adapter.addComment("t_deadbeef", "x".repeat(16_001)), /invalid length/);
+  assert.equal(calls, 0);
+});
+
+test("HTTP requester is loopback-only, route-limited, and never returns upstream details", async () => {
+  assert.throws(
+    () => createHermesKanbanHttpRequester({ baseUrl: "https://example.com", sessionToken: "x".repeat(32) }),
+    /loopback/,
+  );
+  const requester = createHermesKanbanHttpRequester({
+    baseUrl: "http://127.0.0.1:9119",
+    sessionToken: "x".repeat(32),
+    fetch: async () => new Response(JSON.stringify({ detail: "/Users/private/.env SECRET=abc" }), { status: 500 }),
+  });
+  await assert.rejects(
+    requester({ method: "GET", path: "/api/plugins/kanban/board" }),
+    (error: unknown) => error instanceof Error
+      && error.message === "Hermes Kanban request failed (500)."
+      && !error.message.includes("private"),
+  );
+  await assert.rejects(
+    requester({ method: "GET", path: "/api/profiles" }),
+    /Only Hermes Kanban routes/,
+  );
+});

@@ -1,0 +1,496 @@
+import { WebSocket } from "ws";
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_FRAME_BYTES = 256 * 1024;
+const DEFAULT_MAX_HISTORY_BYTES = 2 * 1024 * 1024;
+const DEFAULT_MAX_TEXT_BYTES = 128 * 1024;
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export const HERMES_CHAT_METHODS = [
+  "session.create",
+  "session.resume",
+  "session.close",
+  "prompt.submit",
+  "session.interrupt",
+  "session.steer",
+  "clarify.respond",
+  "approval.respond",
+] as const;
+
+export type HermesChatMethod = (typeof HERMES_CHAT_METHODS)[number];
+
+export interface HermesChatTransportOptions {
+  /** Credential-free loopback origin of the internally managed Hermes server. */
+  baseUrl: string | URL;
+  /** Process-private Hermes dashboard token. It is only used by this module. */
+  sessionToken: string;
+  timeoutMs?: number;
+  maxFrameBytes?: number;
+  maxHistoryBytes?: number;
+  maxTextBytes?: number;
+}
+
+export interface HermesChatRequest {
+  method: HermesChatMethod;
+  params?: Record<string, unknown>;
+}
+
+export interface HermesChatResult {
+  method: HermesChatMethod;
+  value: Record<string, boolean | number | string | null>;
+}
+
+export interface HermesChatInternalRequestOptions {
+  /** Trusted Office-owned system context for a brand-new session only. */
+  sessionCreateSystemSeed?: string;
+}
+
+export interface HermesChatEvent {
+  type: string;
+  sessionId?: string;
+  profile?: string;
+  payload: Record<string, boolean | number | string | string[] | null>;
+}
+
+export interface HermesChatConnection {
+  request(request: HermesChatRequest, internal?: HermesChatInternalRequestOptions): Promise<HermesChatResult>;
+  close(): Promise<void>;
+  readonly closed: boolean;
+}
+
+export interface HermesHistoryRequest {
+  sessionId: string;
+  profile: string;
+  limit?: number;
+  offset?: number;
+}
+
+export type HermesHistoryRole = "assistant" | "system" | "tool" | "user";
+
+export interface HermesHistoryMessageDto {
+  index: number;
+  role: HermesHistoryRole;
+  text: string;
+  timestamp?: string;
+  toolName?: string;
+  redacted?: boolean;
+}
+
+export interface HermesHistoryDto {
+  sessionId: string;
+  profile: string;
+  messages: HermesHistoryMessageDto[];
+  pagination: {
+    limit: number;
+    offset: number;
+    returned: number;
+  };
+}
+
+export interface HermesChatTransport {
+  connect(onEvent: (event: HermesChatEvent) => void): Promise<HermesChatConnection>;
+  fetchHistory(request: HermesHistoryRequest): Promise<HermesHistoryDto>;
+}
+
+export class HermesChatTransportError extends Error {
+  readonly code:
+    | "backend_closed"
+    | "backend_rejected"
+    | "connection_failed"
+    | "invalid_request"
+    | "response_too_large"
+    | "timed_out";
+  readonly rpcCode?: number;
+
+  constructor(
+    code: HermesChatTransportError["code"],
+    message: string,
+    rpcCode?: number,
+  ) {
+    super(message);
+    this.name = "HermesChatTransportError";
+    this.code = code;
+    if (rpcCode !== undefined) this.rpcCode = rpcCode;
+  }
+}
+
+export function createHermesChatTransport(
+  options: HermesChatTransportOptions,
+): HermesChatTransport {
+  const config = normalizeOptions(options);
+  return {
+    connect: async (onEvent) => await openConnection(config, onEvent),
+    fetchHistory: async (request) => await fetchHistory(config, request),
+  };
+}
+
+interface NormalizedOptions {
+  baseUrl: URL;
+  sessionToken: string;
+  timeoutMs: number;
+  maxFrameBytes: number;
+  maxHistoryBytes: number;
+  maxTextBytes: number;
+}
+
+interface PendingRequest {
+  method: HermesChatMethod;
+  resolve: (value: HermesChatResult) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+async function openConnection(
+  config: NormalizedOptions,
+  onEvent: (event: HermesChatEvent) => void,
+): Promise<HermesChatConnection> {
+  const target = new URL("/api/ws", config.baseUrl);
+  target.protocol = "ws:";
+  target.searchParams.set("token", config.sessionToken);
+
+  const websocket = new WebSocket(target, {
+    maxPayload: config.maxFrameBytes,
+    perMessageDeflate: false,
+    handshakeTimeout: config.timeoutMs,
+  });
+  let closed = false;
+  let sequence = 0;
+  const pending = new Map<number, PendingRequest>();
+
+  const failPending = (error: Error): void => {
+    if (closed) return;
+    closed = true;
+    for (const item of pending.values()) {
+      clearTimeout(item.timer);
+      item.reject(error);
+    }
+    pending.clear();
+  };
+
+  websocket.on("message", (data, isBinary) => {
+    if (isBinary || byteLength(data) > config.maxFrameBytes) {
+      websocket.close(1009, "Frame too large");
+      failPending(publicError("response_too_large", "Hermes chat response was too large."));
+      return;
+    }
+    let frame: unknown;
+    try {
+      frame = JSON.parse(data.toString());
+    } catch {
+      websocket.close(1007, "Invalid JSON");
+      failPending(publicError("backend_rejected", "Hermes returned an invalid chat response."));
+      return;
+    }
+    if (!isRecord(frame) || frame.jsonrpc !== "2.0") return;
+    if (frame.method === "event") {
+      const event = normalizeEvent(frame.params, config.maxTextBytes);
+      if (event !== undefined) {
+        try { onEvent(event); } catch { /* A UI listener cannot break transport state. */ }
+      }
+      return;
+    }
+    if (typeof frame.id !== "number") return;
+    const item = pending.get(frame.id);
+    if (item === undefined) return;
+    pending.delete(frame.id);
+    clearTimeout(item.timer);
+    if (isRecord(frame.error)) {
+      const rpcCode = finiteNumber(frame.error.code);
+      item.reject(publicRpcError(rpcCode));
+      return;
+    }
+    item.resolve({ method: item.method, value: normalizeRpcResult(item.method, frame.result) });
+  });
+  websocket.on("close", () => failPending(publicError("backend_closed", "Hermes chat connection closed.")));
+  websocket.on("error", () => failPending(publicError("backend_closed", "Hermes chat connection failed.")));
+
+  // Install frame handlers before awaiting `open`: Hermes emits gateway.ready
+  // immediately after accepting the socket, and a fast loopback backend can
+  // otherwise deliver that first event in the gap between open and listener setup.
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      websocket.terminate();
+      reject(publicError("timed_out", "Hermes chat connection timed out."));
+    }, config.timeoutMs);
+    timer.unref();
+    websocket.once("open", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    websocket.once("error", () => {
+      clearTimeout(timer);
+      reject(publicError("connection_failed", "Unable to connect to Hermes chat."));
+    });
+  });
+
+  return {
+    get closed() { return closed || websocket.readyState >= WebSocket.CLOSING; },
+    request: async (request, internal) => {
+      if (closed || websocket.readyState !== WebSocket.OPEN) {
+        throw publicError("backend_closed", "Hermes chat connection is not open.");
+      }
+      const method = assertAllowedMethod(request.method);
+      const params = validateParams(method, request.params ?? {}, config.maxTextBytes);
+      if (internal?.sessionCreateSystemSeed !== undefined) {
+        if (method !== "session.create") throw publicError("invalid_request", "Session context can only seed a new chat.");
+        const content = requiredText(internal.sessionCreateSystemSeed, "session context", config.maxTextBytes);
+        params.messages = [{ role: "system", content }];
+      }
+      const id = ++sequence;
+      const serialized = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+      if (Buffer.byteLength(serialized) > config.maxFrameBytes) {
+        throw publicError("invalid_request", "Chat request is too large.");
+      }
+      return await new Promise<HermesChatResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(publicError("timed_out", "Hermes chat request timed out."));
+        }, config.timeoutMs);
+        timer.unref();
+        pending.set(id, { method, resolve, reject, timer });
+        websocket.send(serialized, (error) => {
+          if (error == null) return;
+          const item = pending.get(id);
+          if (item === undefined) return;
+          pending.delete(id);
+          clearTimeout(item.timer);
+          item.reject(publicError("backend_closed", "Hermes chat request could not be sent."));
+        });
+      });
+    },
+    close: async () => {
+      if (websocket.readyState === WebSocket.CLOSED) { failPending(publicError("backend_closed", "Hermes chat connection closed.")); return; }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { websocket.terminate(); resolve(); }, 1_000);
+        timer.unref();
+        websocket.once("close", () => { clearTimeout(timer); resolve(); });
+        websocket.close(1000, "Office chat closed");
+      });
+    },
+  };
+}
+
+async function fetchHistory(
+  config: NormalizedOptions,
+  request: HermesHistoryRequest,
+): Promise<HermesHistoryDto> {
+  const sessionId = requiredId(request.sessionId, "sessionId");
+  const profile = requiredProfile(request.profile);
+  const limit = boundedInteger(request.limit, 200, 1, 500);
+  const offset = boundedInteger(request.offset, 0, 0, 1_000_000);
+  const target = new URL(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, config.baseUrl);
+  target.searchParams.set("profile", profile);
+  target.searchParams.set("limit", String(limit));
+  target.searchParams.set("offset", String(offset));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  timer.unref();
+  try {
+    const response = await fetch(target, {
+      headers: { Accept: "application/json", "X-Hermes-Session-Token": config.sessionToken },
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw publicError("backend_rejected", response.status === 404 ? "Chat history was not found." : "Hermes rejected the history request.");
+    const raw = JSON.parse(await readBoundedText(response, config.maxHistoryBytes)) as unknown;
+    return normalizeHistory(raw, sessionId, profile, limit, offset, config.maxTextBytes);
+  } catch (error) {
+    if (error instanceof HermesChatTransportError) throw error;
+    if (isAbortError(error)) throw publicError("timed_out", "Chat history request timed out.");
+    throw publicError("backend_rejected", "Unable to load chat history.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function validateParams(
+  method: HermesChatMethod,
+  raw: Record<string, unknown>,
+  maxTextBytes: number,
+): Record<string, boolean | number | string | Array<{ role: "system"; content: string }>> {
+  if (!isRecord(raw)) throw publicError("invalid_request", "Chat parameters must be an object.");
+  switch (method) {
+    case "session.create": {
+      assertOnlyKeys(raw, ["profile", "title", "model", "provider", "reasoning_effort", "fast", "close_on_disconnect", "cols"]);
+      return compact({
+        profile: optionalProfile(raw.profile),
+        title: optionalText(raw.title, "title", 200),
+        model: optionalText(raw.model, "model", 200),
+        provider: optionalText(raw.provider, "provider", 100),
+        reasoning_effort: optionalText(raw.reasoning_effort, "reasoning_effort", 32),
+        fast: optionalBoolean(raw.fast, "fast"),
+        close_on_disconnect: optionalBoolean(raw.close_on_disconnect, "close_on_disconnect") ?? true,
+        cols: optionalInteger(raw.cols, "cols", 20, 400),
+        source: "desktop",
+      });
+    }
+    case "session.resume": {
+      assertOnlyKeys(raw, ["session_id", "profile", "lazy", "close_on_disconnect", "cols"]);
+      return compact({ session_id: requiredId(raw.session_id, "session_id"), profile: optionalProfile(raw.profile), lazy: optionalBoolean(raw.lazy, "lazy"), close_on_disconnect: optionalBoolean(raw.close_on_disconnect, "close_on_disconnect") ?? true, cols: optionalInteger(raw.cols, "cols", 20, 400), source: "desktop" });
+    }
+    case "session.close":
+    case "session.interrupt": {
+      assertOnlyKeys(raw, ["session_id"]);
+      return { session_id: requiredId(raw.session_id, "session_id") };
+    }
+    case "prompt.submit":
+    case "session.steer": {
+      assertOnlyKeys(raw, ["session_id", "text"]);
+      return { session_id: requiredId(raw.session_id, "session_id"), text: requiredText(raw.text, "text", maxTextBytes) };
+    }
+    case "clarify.respond": {
+      assertOnlyKeys(raw, ["request_id", "answer"]);
+      return { request_id: requiredId(raw.request_id, "request_id"), answer: requiredText(raw.answer, "answer", Math.min(maxTextBytes, 32 * 1024)) };
+    }
+    case "approval.respond": {
+      assertOnlyKeys(raw, ["session_id", "choice"]);
+      const choice = requiredText(raw.choice, "choice", 16);
+      if (!["always", "deny", "once", "session"].includes(choice)) throw publicError("invalid_request", "Approval choice is invalid.");
+      return { session_id: requiredId(raw.session_id, "session_id"), choice };
+    }
+  }
+}
+
+function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<string, boolean | number | string | null> {
+  const value = isRecord(raw) ? raw : {};
+  if (method === "session.create" || method === "session.resume") {
+    return compact({
+      liveSessionId: safeId(value.session_id),
+      storedSessionId: safeId(value.stored_session_id),
+      resumedSessionId: safeId(value.resumed),
+      messageCount: finiteNumber(value.message_count),
+    });
+  }
+  if (method === "session.close") return { closed: value.closed === true };
+  if (method === "approval.respond") return { resolved: value.resolved === true };
+  return compact({ status: safeShortText(value.status, 80), taskId: safeId(value.task_id) });
+}
+
+function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | undefined {
+  if (!isRecord(raw) || typeof raw.type !== "string") return undefined;
+  if (raw.type === "secret.request" || raw.type === "secret.expire" || raw.type === "sudo.request" || raw.type === "sudo.expire") return undefined;
+  const payload = isRecord(raw.payload) ? raw.payload : {};
+  const base = {
+    type: raw.type.slice(0, 80),
+    ...(safeId(raw.session_id) === undefined ? {} : { sessionId: safeId(raw.session_id)! }),
+    ...(safeProfile(raw.profile) === undefined ? {} : { profile: safeProfile(raw.profile)! }),
+  };
+  if (["message.start", "message.delta", "message.complete", "reasoning.available", "reasoning.delta", "thinking.delta", "background.complete"].includes(raw.type)) {
+    return { ...base, payload: compact({ text: sanitizeText(firstString(payload, ["text", "content"]), maxTextBytes), messageId: safeId(payload.message_id), role: safeEnum(payload.role, ["assistant", "system", "tool", "user"]) }) };
+  }
+  if (raw.type === "clarify.request") {
+    const requestId = safeId(payload.request_id);
+    const question = sanitizeText(firstString(payload, ["question"]), Math.min(maxTextBytes, 16 * 1024));
+    if (requestId === undefined || question === undefined) return undefined;
+    return { ...base, payload: compact({ requestId, question, choices: safeStringArray(payload.choices, 16, 200) }) };
+  }
+  if (raw.type === "approval.request") {
+    return { ...base, payload: compact({ command: sanitizeText(firstString(payload, ["command"]), 8 * 1024), description: sanitizeText(firstString(payload, ["description"]), 2 * 1024), choices: safeStringArray(payload.choices, 8, 32), allowPermanent: typeof payload.allow_permanent === "boolean" ? payload.allow_permanent : undefined, smartDenied: payload.smart_denied === true }) };
+  }
+  if (["tool.start", "tool.generating", "tool.progress", "tool.complete"].includes(raw.type)) {
+    return { ...base, payload: compact({ toolId: safeId(firstValue(payload, ["tool_id", "id"])), name: safeShortText(firstValue(payload, ["name", "tool_name"]), 120), status: safeShortText(payload.status, 80), summary: sanitizeText(firstString(payload, ["summary"]), 2 * 1024), error: typeof payload.error === "boolean" ? payload.error : undefined, durationSeconds: finiteNumber(payload.duration_s) }) };
+  }
+  if (["gateway.ready", "session.info", "status.update", "error"].includes(raw.type)) {
+    return { ...base, payload: compact({ status: safeShortText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024), model: safeShortText(payload.model, 200), provider: safeShortText(payload.provider, 100), running: typeof payload.running === "boolean" ? payload.running : undefined, storedSessionId: safeId(payload.stored_session_id), version: safeShortText(payload.version, 80) }) };
+  }
+  return undefined;
+}
+
+function normalizeHistory(raw: unknown, requestedId: string, profile: string, limit: number, offset: number, maxTextBytes: number): HermesHistoryDto {
+  if (!isRecord(raw) || !Array.isArray(raw.messages)) throw publicError("backend_rejected", "Hermes returned invalid chat history.");
+  const resolvedId = safeId(raw.session_id) ?? requestedId;
+  const messages = raw.messages.slice(0, limit).flatMap((item, index): HermesHistoryMessageDto[] => {
+    if (!isRecord(item) || !isRole(item.role)) return [];
+    const timestamp = normalizeTimestamp(item.timestamp);
+    const toolName = safeShortText(item.tool_name, 120);
+    if (item.role === "system") return [{ index: offset + index, role: "system", text: "[System message hidden]", redacted: true, ...(timestamp === undefined ? {} : { timestamp }) }];
+    if (item.role === "tool") return [{ index: offset + index, role: "tool", text: "[Tool output hidden]", redacted: true, ...(toolName === undefined ? {} : { toolName }), ...(timestamp === undefined ? {} : { timestamp }) }];
+    const original = contentText(item.content);
+    const text = sanitizeText(original, maxTextBytes) ?? "";
+    const redacted = text !== original;
+    return [{ index: offset + index, role: item.role, text, ...(redacted ? { redacted: true } : {}), ...(timestamp === undefined ? {} : { timestamp }) }];
+  });
+  return { sessionId: resolvedId, profile, messages, pagination: { limit, offset, returned: messages.length } };
+}
+
+function normalizeOptions(options: HermesChatTransportOptions): NormalizedOptions {
+  const baseUrl = options.baseUrl instanceof URL ? new URL(options.baseUrl) : new URL(options.baseUrl);
+  if (baseUrl.protocol !== "http:" || baseUrl.username !== "" || baseUrl.password !== "" || baseUrl.pathname !== "/" || baseUrl.search !== "" || baseUrl.hash !== "" || !isLoopback(baseUrl.hostname)) throw new Error("Hermes chat requires a credential-free loopback HTTP origin.");
+  if (options.sessionToken.length < 16 || options.sessionToken.length > 512 || options.sessionToken.includes("\0")) throw new Error("Hermes chat token is invalid.");
+  return { baseUrl, sessionToken: options.sessionToken, timeoutMs: boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, 250, 60_000), maxFrameBytes: boundedInteger(options.maxFrameBytes, DEFAULT_MAX_FRAME_BYTES, 4_096, 1024 * 1024), maxHistoryBytes: boundedInteger(options.maxHistoryBytes, DEFAULT_MAX_HISTORY_BYTES, 4_096, 8 * 1024 * 1024), maxTextBytes: boundedInteger(options.maxTextBytes, DEFAULT_MAX_TEXT_BYTES, 1_024, 512 * 1024) };
+}
+
+async function readBoundedText(response: Response, limit: number): Promise<string> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) { await response.body?.cancel(); throw publicError("response_too_large", "Hermes history response was too large."); }
+  const reader = response.body?.getReader();
+  if (reader === undefined) return "";
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    size += value.byteLength;
+    if (size > limit) { await reader.cancel(); throw publicError("response_too_large", "Hermes history response was too large."); }
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
+function sanitizeText(value: string | undefined, maxBytes: number): string | undefined {
+  if (value === undefined) return undefined;
+  // Redact before truncation so a size boundary cannot cut off the closing
+  // delimiter of a credential (notably a PEM block) and defeat the matcher.
+  let output = value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+  output = output
+    .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?(?:-----END [^-]+PRIVATE KEY-----|$)/gi, "[REDACTED PRIVATE KEY]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]")
+    .replace(/([?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+/gi, "$1[REDACTED]")
+    .replace(/\b((?:api_?key|password|secret|token)\s*[:=]\s*)[\"']?[^\s,;\"']{8,}/gi, "$1[REDACTED]");
+  return truncateUtf8(output, maxBytes);
+}
+
+function contentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value.flatMap((part): string[] => {
+    if (!isRecord(part)) return [];
+    if (!["text", "input_text", "output_text"].includes(String(part.type ?? "text"))) return [];
+    return typeof part.text === "string" ? [part.text] : [];
+  }).join("\n");
+}
+
+function publicRpcError(code: number | undefined): HermesChatTransportError {
+  if (code === -32601) return new HermesChatTransportError("backend_rejected", "This Hermes chat capability is unavailable.", code);
+  if (code === 4007) return new HermesChatTransportError("backend_rejected", "The Hermes session was not found.", code);
+  if (code === 4090) return new HermesChatTransportError("backend_rejected", "Hermes has reached its active session limit.", code);
+  return new HermesChatTransportError("backend_rejected", "Hermes rejected the chat request.", code);
+}
+function publicError(code: HermesChatTransportError["code"], message: string): HermesChatTransportError { return new HermesChatTransportError(code, message); }
+function assertAllowedMethod(value: string): HermesChatMethod { if (!(HERMES_CHAT_METHODS as readonly string[]).includes(value)) throw publicError("invalid_request", "Chat method is not allowed."); return value as HermesChatMethod; }
+function assertOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): void { const allowed = new Set(keys); if (Object.keys(value).some((key) => !allowed.has(key))) throw publicError("invalid_request", "Chat parameters contain unsupported fields."); }
+function requiredId(value: unknown, name: string): string { if (typeof value !== "string" || !ID_PATTERN.test(value)) throw publicError("invalid_request", `${name} is invalid.`); return value; }
+function safeId(value: unknown): string | undefined { return typeof value === "string" && ID_PATTERN.test(value) ? value : undefined; }
+function requiredProfile(value: unknown): string { if (typeof value !== "string" || !PROFILE_PATTERN.test(value)) throw publicError("invalid_request", "profile is invalid."); return value; }
+function optionalProfile(value: unknown): string | undefined { return value === undefined ? undefined : requiredProfile(value); }
+function safeProfile(value: unknown): string | undefined { return typeof value === "string" && PROFILE_PATTERN.test(value) ? value : undefined; }
+function requiredText(value: unknown, name: string, maxBytes: number): string { if (typeof value !== "string" || value.trim() === "" || Buffer.byteLength(value) > maxBytes || value.includes("\0")) throw publicError("invalid_request", `${name} is invalid.`); return value; }
+function optionalText(value: unknown, name: string, maxChars: number): string | undefined { if (value === undefined) return undefined; if (typeof value !== "string" || value.length > maxChars || value.includes("\0")) throw publicError("invalid_request", `${name} is invalid.`); return value; }
+function optionalBoolean(value: unknown, name: string): boolean | undefined { if (value === undefined) return undefined; if (typeof value !== "boolean") throw publicError("invalid_request", `${name} is invalid.`); return value; }
+function optionalInteger(value: unknown, name: string, min: number, max: number): number | undefined { if (value === undefined) return undefined; if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw publicError("invalid_request", `${name} is invalid.`); return value; }
+function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }
+function finiteNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
+function safeShortText(value: unknown, max: number): string | undefined { return typeof value === "string" ? value.slice(0, max).replace(/[\u0000-\u001f\u007f]/g, "") : undefined; }
+function safeEnum(value: unknown, allowed: readonly string[]): string | undefined { return typeof value === "string" && allowed.includes(value) ? value : undefined; }
+function safeStringArray(value: unknown, maxItems: number, maxChars: number): string[] | undefined { if (!Array.isArray(value)) return undefined; return value.filter((item): item is string => typeof item === "string").slice(0, maxItems).map((item) => item.slice(0, maxChars)); }
+function firstValue(value: Record<string, unknown>, keys: readonly string[]): unknown { for (const key of keys) if (value[key] !== undefined) return value[key]; return undefined; }
+function firstString(value: Record<string, unknown>, keys: readonly string[]): string | undefined { const item = firstValue(value, keys); return typeof item === "string" ? item : undefined; }
+function isRole(value: unknown): value is HermesHistoryRole { return value === "assistant" || value === "system" || value === "tool" || value === "user"; }
+function normalizeTimestamp(value: unknown): string | undefined { if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined; const millis = value < 10_000_000_000 ? value * 1_000 : value; const date = new Date(millis); return Number.isNaN(date.valueOf()) ? undefined : date.toISOString(); }
+function truncateUtf8(value: string, maxBytes: number): string { if (Buffer.byteLength(value) <= maxBytes) return value; let end = Math.min(value.length, maxBytes); while (end > 0 && Buffer.byteLength(value.slice(0, end)) > maxBytes) end = Math.floor(end * 0.9); while (end < value.length && Buffer.byteLength(value.slice(0, end + 1)) <= maxBytes) end += 1; return `${value.slice(0, end)}…`; }
+function compact<T extends Record<string, unknown>>(value: T): { [K in keyof T]?: Exclude<T[K], undefined> } { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as { [K in keyof T]?: Exclude<T[K], undefined> }; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isLoopback(host: string): boolean { return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]"; }
+function isAbortError(error: unknown): boolean { return error instanceof DOMException && error.name === "AbortError"; }
+function byteLength(value: WebSocket.RawData): number { return Array.isArray(value) ? value.reduce((sum, item) => sum + item.byteLength, 0) : value.byteLength; }

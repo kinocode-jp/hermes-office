@@ -3,22 +3,29 @@ import { assignTask, selectProfile, selectedProfileId, tasks } from "../store";
 import { StatusPill } from "./status-pill";
 import { TaskCables, type TaskCable } from "./task-cables";
 
-const deskPorts: Record<string, { x: number; y: number }> = {
-  researcher: { x: 180, y: 155 },
-  builder: { x: 720, y: 140 },
-  operator: { x: 270, y: 365 },
-  editor: { x: 740, y: 365 }
-};
+const standardDeskPorts = [
+  { x: 180, y: 155 },
+  { x: 720, y: 140 },
+  { x: 270, y: 365 },
+  { x: 740, y: 365 }
+];
 
-function ProfilePod({ profile, index, crowded }: { profile: Profile; index: number; crowded: boolean }) {
+function ProfilePod({ profile, index, crowded, columnCount, rowCount }: { profile: Profile; index: number; crowded: boolean; columnCount: number; rowCount: number }) {
   const selected = selectedProfileId.value === profile.id;
-  const column = index % 5;
-  const row = Math.floor(index / 5) % 2;
+  const column = index % columnCount;
+  const row = Math.floor(index / columnCount);
 
   return (
     <button
       class={`profile-pod pod-${index + 1} ${selected ? "is-selected" : ""}`}
-      style={{ "--agent-color": profile.color, ...(crowded ? { left: `${2 + column * 20}%`, top: `${row === 0 ? 14 : 62}%` } : {}) }}
+      style={{
+        "--agent-color": profile.color,
+        ...(crowded ? {
+          left: `${2 + column * (96 / columnCount)}%`,
+          top: `${14 + row * (48 / Math.max(1, rowCount - 1))}%`,
+          "--pod-scale": Math.min(0.82, 1.64 / rowCount)
+        } : {})
+      }}
       onClick={() => selectProfile(profile.id)}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
@@ -51,14 +58,19 @@ function ProfilePod({ profile, index, crowded }: { profile: Profile; index: numb
 }
 
 export function OfficeScene({ profiles }: { profiles: Profile[] }) {
+  // Keep a maximum of two desk rows for the usual profile counts. The former
+  // fixed five-column layout wrapped profile 11 onto profile 1, making only the
+  // last overlapping character clickable.
+  const columnCount = Math.max(1, Math.min(6, Math.ceil(profiles.length / 2)));
+  const rowCount = Math.max(1, Math.ceil(profiles.length / columnCount));
   const working = profiles.filter((profile) => profile.status === "working").length;
   const attention = profiles.filter((profile) => profile.status === "waiting" || profile.status === "blocked").length;
   const cables: TaskCable[] = tasks.value.flatMap((task, index) => {
     if (!task.assigneeId) return [];
-    const target = deskPorts[task.assigneeId];
-    if (!target) return [];
-    const profile = profiles.find((item) => item.id === task.assigneeId);
-    if (!profile) return [];
+    const profileIndex = profiles.findIndex((item) => item.id === task.assigneeId);
+    if (profileIndex < 0) return [];
+    const profile = profiles[profileIndex]!;
+    const target = deskPort(profileIndex, profiles.length, columnCount, rowCount);
     return [{
       id: `cable-${task.id}`,
       taskId: task.id,
@@ -104,7 +116,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
         <div class="library-shelf" aria-hidden="true">
           <i /><i /><i /><i /><i /><i />
         </div>
-        {profiles.map((profile, index) => <ProfilePod key={profile.id} profile={profile} index={index} crowded={profiles.length > 4} />)}
+        {profiles.map((profile, index) => <ProfilePod key={profile.id} profile={profile} index={index} crowded={profiles.length > 4} columnCount={columnCount} rowCount={rowCount} />)}
         <div class="office-legend">
           <span><i class="legend-light working" />working</span>
           <span><i class="legend-light waiting" />needs you</span>
@@ -113,4 +125,13 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
       </div>
     </section>
   );
+}
+
+function deskPort(index: number, profileCount: number, columnCount: number, rowCount: number): { x: number; y: number } {
+  if (profileCount <= standardDeskPorts.length) return standardDeskPorts[index] ?? { x: 500, y: 250 };
+  const column = index % columnCount;
+  const row = Math.floor(index / columnCount);
+  const leftPercent = 2 + column * (96 / columnCount);
+  const topPercent = 14 + row * (48 / Math.max(1, rowCount - 1));
+  return { x: leftPercent * 10 + 65, y: topPercent * 5 + 45 };
 }

@@ -1,5 +1,5 @@
 import { useMemo } from "preact/hooks";
-import { mobileInspectorOpen, mobileWorkspaceOpen, profileList, sessions, openSessionIds } from "../store";
+import { activeSessionId, mobileInspectorOpen, mobileWorkspaceOpen, openSession, profileList, sessions, openSessionIds } from "../store";
 import { ChatPane } from "./chat-pane";
 
 export function ChatWorkspace() {
@@ -21,9 +21,22 @@ export function ChatWorkspace() {
     <section class="chat-workspace-shell">
       <header class="mobile-workspace-bar">
         <button onClick={() => { mobileWorkspaceOpen.value = false; }}>← Profiles</button>
-        <b>Chats</b>
+        <b>Chats · {openSessions.length}</b>
         <button onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}>Profile設定</button>
       </header>
+      <nav class="mobile-chat-tabs" aria-label="開いている会話を切り替え">
+        {openSessions.map((session) => session && (
+          <button
+            key={session.id}
+            type="button"
+            class={activeSessionId.value === session.id ? "is-active" : ""}
+            aria-current={activeSessionId.value === session.id ? "page" : undefined}
+            onClick={() => openSession(session.id)}
+          >
+            {profileList.value.find((profile) => profile.id === session.profileId)?.name ?? session.profileId}
+          </button>
+        ))}
+      </nav>
       <div class={`chat-workspace panes-${Math.min(openSessions.length, 4)}`} aria-label="開いている会話">
         {openSessions.map((session) => {
           if (!session) return null;

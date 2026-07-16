@@ -1,0 +1,198 @@
+import assert from "node:assert/strict";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import {
+  createHermesSettingsAdapter,
+  HermesSettingsError,
+  OfficeGlobalSettingsStore,
+} from "./hermes-settings.js";
+
+const TOKEN = "0123456789abcdef0123456789abcdef";
+
+test("profile settings use a profile-pinned backend and expose secret-safe DTOs", async (t) => {
+  const requests: Array<{ method: string; token: string; url: string }> = [];
+  const server = createServer((request, response) => {
+    requests.push({ method: request.method ?? "", token: String(request.headers["x-hermes-session-token"] ?? ""), url: request.url ?? "" });
+    if (request.url === "/api/skills") {
+      writeJson(response, [
+        { name: "browser", category: "tools", description: "Browse safely", enabled: true, provenance: "bundled", usage: 3, path: "/Users/private/skills" },
+        { name: "local", category: "custom", description: "token=supersecretvalue", enabled: false, provenance: "agent", api_key: "hidden" },
+      ]);
+      return;
+    }
+    if (request.url === "/api/memory") {
+      writeJson(response, {
+        active: "builtin",
+        providers: [{ name: "builtin", description: "Built in", configured: true, config_path: "/private/config" }],
+        builtin_files: { memory: 40, user: 12, path: "/private/memories" },
+        credential: "hidden",
+      });
+      return;
+    }
+    if (request.url === "/api/profiles/coder/soul") {
+      writeJson(response, { content: "Helpful agent\napi_key=supersecretvalue", exists: true, path: "/private/SOUL.md" });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+  const resolved: string[] = [];
+  const adapter = createHermesSettingsAdapter({
+    resolveProfileBackend: async (profile) => { resolved.push(profile); return { baseUrl: origin, sessionToken: TOKEN }; },
+  });
+
+  const settings = await adapter.getProfileSettings("coder");
+
+  assert.deepEqual(resolved, ["coder"]);
+  assert.deepEqual(requests.map((item) => item.url).sort(), ["/api/memory", "/api/profiles/coder/soul", "/api/skills"]);
+  assert.equal(requests.every((item) => item.token === TOKEN), true);
+  assert.equal(settings.skills[0]?.name, "browser");
+  assert.equal(settings.skills[1]?.description, "token=[REDACTED]");
+  assert.deepEqual(settings.memory.builtin, { memoryBytes: 40, userBytes: 12, hasMemory: true, hasUser: true });
+  assert.equal(settings.soul.content, "Helpful agent\napi_key=[REDACTED]");
+  assert.equal(settings.soul.redacted, true);
+  const serialized = JSON.stringify(settings);
+  assert.equal(serialized.includes("/private"), false);
+  assert.equal(serialized.includes("supersecretvalue"), false);
+  assert.equal(serialized.includes("hidden"), false);
+});
+
+test("skill and memory mutations are validated and use official Hermes routes", async (t) => {
+  const mutations: Array<{ body: unknown; method: string; url: string }> = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/api/memory/providers/honcho/config?surface=declared") {
+      writeJson(response, {
+        name: "honcho",
+        label: "Honcho",
+        fields: [
+          { key: "mode", label: "Mode", kind: "select", description: "Storage mode", value: "local", is_set: true, options: [{ value: "local", label: "Local", description: "Local mode" }] },
+          { key: "api_key", label: "API key", kind: "secret", description: "Credential", value: "must-not-leak", is_set: true, options: [] },
+        ],
+      });
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/skills/content?name=local") {
+      writeJson(response, { name: "local", content: "# Skill\npassword=huntertwo", path: "/private/SKILL.md" });
+      return;
+    }
+    mutations.push({ method: request.method ?? "", url: request.url ?? "", body: await readJson(request) });
+    writeJson(response, { ok: true, path: "/private/result", secret: "hidden" });
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+  const adapter = createHermesSettingsAdapter({ resolveProfileBackend: async () => ({ baseUrl: origin, sessionToken: TOKEN }) });
+
+  const content = await adapter.getSkillContent("coder", "local");
+  assert.equal(content.name, "local");
+  assert.equal(content.content, "# Skill\npassword=[REDACTED]");
+  assert.equal(content.redacted, true);
+  assert.match(content.revision, /^[A-Za-z0-9_-]{43}$/);
+  const config = await adapter.getMemoryProviderConfig("coder", "honcho");
+  assert.equal(config.fields[0]?.value, "local");
+  assert.equal(config.fields[1]?.kind, "secret");
+  assert.equal("value" in (config.fields[1] ?? {}), false);
+
+  await adapter.setSkillEnabled("coder", "local", false);
+  await adapter.updateSkillContent("coder", "local", "---\nname: local\n---\nSafe instructions");
+  await adapter.setMemoryProvider("coder", "honcho");
+  await adapter.updateMemoryProviderConfig("coder", "honcho", { mode: "local" });
+  await adapter.resetBuiltinMemory("coder", "user");
+  await adapter.updateProfileSoul("coder", "You are a careful coding agent.");
+
+  assert.deepEqual(mutations, [
+    { method: "PUT", url: "/api/skills/toggle", body: { name: "local", enabled: false } },
+    { method: "PUT", url: "/api/skills/content", body: { name: "local", content: "---\nname: local\n---\nSafe instructions" } },
+    { method: "PUT", url: "/api/memory/provider", body: { provider: "honcho" } },
+    { method: "PUT", url: "/api/memory/providers/honcho/config?surface=declared", body: { values: { mode: "local" } } },
+    { method: "POST", url: "/api/memory/reset", body: { target: "user" } },
+    { method: "PUT", url: "/api/profiles/coder/soul", body: { content: "You are a careful coding agent." } },
+  ]);
+
+  await assert.rejects(
+    adapter.updateMemoryProviderConfig("coder", "honcho", { api_key: "supersecretvalue" }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateSkillContent("coder", "local", "token=supersecretvalue"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateProfileSoul("../escape", "safe"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+});
+
+test("global settings are Office-owned, atomic, revisioned, and reject secret material", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-settings-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "global.json");
+  const store = new OfficeGlobalSettingsStore(file);
+
+  const initial = await store.read();
+  assert.deepEqual(initial, {
+    revision: 0,
+    sharedSkillsEnabled: true,
+    sharedContextEnabled: true,
+    skills: [],
+    context: "",
+    updatedAt: "1970-01-01T00:00:00.000Z",
+    skillSync: { state: "ready", failures: [] },
+  });
+  const saved = await store.update({
+    expectedRevision: 0,
+    skills: ["browser", "coding"],
+    context: "Prefer concise status reports.",
+  });
+  assert.equal(saved.revision, 1);
+  assert.deepEqual((await store.read()).skills, ["browser", "coding"]);
+  assert.deepEqual(JSON.parse(await readFile(file, "utf8")), saved);
+
+  await assert.rejects(
+    store.update({ expectedRevision: 0, context: "stale" }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "conflict",
+  );
+  await assert.rejects(
+    store.update({ expectedRevision: 1, context: "api_key=supersecretvalue" }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  assert.equal((await store.read()).revision, 1);
+});
+
+test("global store serializes concurrent updates and admits only one matching revision", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-settings-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new OfficeGlobalSettingsStore(join(directory, "global.json"));
+  const results = await Promise.allSettled([
+    store.update({ expectedRevision: 0, context: "first" }),
+    store.update({ expectedRevision: 0, context: "second" }),
+  ]);
+  assert.equal(results.filter((item) => item.status === "fulfilled").length, 1);
+  assert.equal(results.filter((item) => item.status === "rejected").length, 1);
+  assert.equal((await store.read()).revision, 1);
+});
+
+async function listen(server: ReturnType<typeof createServer>): Promise<string> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function readJson(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return chunks.length === 0 ? undefined : JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function writeJson(response: ServerResponse<IncomingMessage>, value: unknown): void {
+  const body = JSON.stringify(value);
+  response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
+  response.end(body);
+}

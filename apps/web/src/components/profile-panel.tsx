@@ -1,25 +1,54 @@
-import type { InspectorTab } from "../domain";
-import { useState } from "preact/hooks";
+import type { InspectorTab, SettingsTab } from "../domain";
 import {
-  addProfileSkill,
+  activeSurface,
   createSession,
   inspectorTab,
   mobileInspectorOpen,
   mobileWorkspaceOpen,
   openSession,
-  removeProfileSkill,
   selectedProfile,
   selectedProfileSessions,
-  updateProfile
+  settingsTab
 } from "../store";
 import { StatusPill } from "./status-pill";
 
 const tabs: { id: InspectorTab; label: string }[] = [
   { id: "chat", label: "会話" },
-  { id: "profile", label: "Profile" },
+  { id: "profile", label: "Identity" },
   { id: "skills", label: "Skills" },
   { id: "memory", label: "Memory" }
 ];
+
+const settingsRoutes: Record<Exclude<InspectorTab, "chat">, SettingsTab> = {
+  profile: "soul",
+  skills: "skills",
+  memory: "memory"
+};
+
+const routeCopy: Record<Exclude<InspectorTab, "chat">, { code: string; title: string; description: string }> = {
+  profile: {
+    code: "SOUL / LIVE",
+    title: "Identity / SOUL.md",
+    description: "このProfileの人格・方針をHermesの実SOUL設定で編集します。変更は新しいSessionから反映されます。"
+  },
+  skills: {
+    code: "SKILLS / LIVE",
+    title: "Profile Skills",
+    description: "Hermesが検出したSkill一覧を読み込み、Profileごとの有効・無効を実設定へ保存します。"
+  },
+  memory: {
+    code: "MEMORY / LIVE",
+    title: "Memory provider",
+    description: "Built-in Memoryの使用量とProvider設定をHermesから読み込みます。内容の直接編集やresetは行いません。"
+  }
+};
+
+function openLiveSettings(tab: Exclude<InspectorTab, "chat">): void {
+  inspectorTab.value = tab;
+  settingsTab.value = settingsRoutes[tab];
+  activeSurface.value = "settings";
+  mobileInspectorOpen.value = false;
+}
 
 function ChatList() {
   const profile = selectedProfile.value;
@@ -39,54 +68,23 @@ function ChatList() {
   );
 }
 
-function ProfileSettings() {
+function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
   const profile = selectedProfile.value;
   if (!profile) return null;
-  return (
-    <div class="panel-section form-stack">
-      <label>表示名<input value={profile.name} onInput={(event) => updateProfile(profile.id, { name: event.currentTarget.value })} /></label>
-      <label>役割<input value={profile.role} onInput={(event) => updateProfile(profile.id, { role: event.currentTarget.value })} /></label>
-      <label>既定モデル<select><option>Profile default</option><option>Hermes 4</option></select></label>
-      <label class="toggle-row"><span>Kanban worker</span><input type="checkbox" checked /></label>
-      <p class="setting-note">実接続後はHermesのProfile設定へ安全に書き戻します。</p>
-    </div>
-  );
-}
-
-function SkillSettings() {
-  const profile = selectedProfile.value;
-  const [skill, setSkill] = useState("");
-  if (!profile) return null;
+  const copy = routeCopy[tab];
   return (
     <div class="panel-section">
-      <div class="inheritance-title"><b>Profile skills</b><span>{profile.skills.length}</span></div>
-      <div class="tag-list editable">{profile.skills.map((item) => <button key={item} onClick={() => removeProfileSkill(profile.id, item)} title="クリックして削除">{item}<i>×</i></button>)}</div>
-      <form class="inline-add compact" onSubmit={(event) => { event.preventDefault(); addProfileSkill(profile.id, skill); setSkill(""); }}>
-        <input value={skill} onInput={(event) => setSkill(event.currentTarget.value)} placeholder="skill-name" aria-label="Profile Skill名" />
-        <button type="submit">追加</button>
-      </form>
-      <div class="inheritance-title"><b>Company library</b><span>{profile.inheritedSkills.length}</span></div>
-      <div class="tag-list inherited">{profile.inheritedSkills.map((skill) => <span key={skill}>{skill}<i>global</i></span>)}</div>
-    </div>
-  );
-}
-
-function MemorySettings() {
-  const profile = selectedProfile.value;
-  if (!profile) return null;
-  const percentage = Math.round((profile.memoryBytes / 2200) * 100);
-  return (
-    <div class="panel-section">
-      <div class="memory-meter"><span style={{ width: `${percentage}%` }} /></div>
-      <div class="memory-readout"><b>{profile.memoryBytes.toLocaleString()} / 2,200</b><span>profile memory</span></div>
-      <div class="memory-card global-memory">
-        <span>GLOBAL CONTEXT</span>
-        <p>全Profileに読み取り専用で共有する会社方針と利用者情報。</p>
-      </div>
-      <div class="memory-card">
-        <span>PROFILE MEMORY</span>
-        <textarea value={profile.memoryNote} onInput={(event) => updateProfile(profile.id, { memoryNote: event.currentTarget.value })} rows={6} aria-label={`${profile.name}のMemory`} />
-      </div>
+      <article class="profile-live-route">
+        <span>{copy.code}</span>
+        <h3>{copy.title}</h3>
+        <p>{copy.description}</p>
+        <dl>
+          <div><dt>Target</dt><dd>{profile.name}</dd></div>
+          <div><dt>Profile ID</dt><dd>{profile.id}</dd></div>
+        </dl>
+        <button type="button" onClick={() => openLiveSettings(tab)}>Live設定を開く →</button>
+      </article>
+      <p class="setting-note">このパネルにはローカルコピーを作りません。表示・保存はすべてHermesの現在値を使用します。</p>
     </div>
   );
 }
@@ -104,15 +102,21 @@ export function ProfilePanel() {
       </header>
       <nav class="panel-tabs" aria-label="Profile設定">
         {tabs.map((tab) => (
-          <button class={inspectorTab.value === tab.id ? "is-active" : ""} onClick={() => { inspectorTab.value = tab.id; }} key={tab.id}>
+          <button
+            class={inspectorTab.value === tab.id ? "is-active" : ""}
+            onClick={() => {
+              if (tab.id === "chat") inspectorTab.value = "chat";
+              else openLiveSettings(tab.id);
+            }}
+            key={tab.id}
+          >
             {tab.label}
           </button>
         ))}
       </nav>
-      {inspectorTab.value === "chat" && <ChatList />}
-      {inspectorTab.value === "profile" && <ProfileSettings />}
-      {inspectorTab.value === "skills" && <SkillSettings />}
-      {inspectorTab.value === "memory" && <MemorySettings />}
+      {inspectorTab.value === "chat"
+        ? <ChatList />
+        : <LiveSettingsRoute tab={inspectorTab.value} />}
     </aside>
   );
 }

@@ -8,3 +8,4 @@ target/
 !.env.example
 .idea/
 .vscode/
+apps/desktop/src-tauri/resources/server/hermes-office-server.mjs

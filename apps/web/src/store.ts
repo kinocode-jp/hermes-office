@@ -1,18 +1,39 @@
 import { computed, signal } from "@preact/signals";
-import { initialSessions, initialTasks, profiles } from "./demo-data";
-import type { ChatSession, GlobalSettings, InspectorTab, OfficeConnection, OfficeSnapshot, Profile, Surface, TaskStatus, WorkTask } from "./domain";
+import { initialSessions, profiles } from "./demo-data";
+import type { ChatGatewayEvent, ChatTarget } from "./chat-api";
+import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
+import type { DeviceLoginFailure } from "./auth-state";
+import type { KanbanApi } from "./kanban-api";
 
 export const profileList = signal(profiles);
 export const sessions = signal<ChatSession[]>(initialSessions);
-export const tasks = signal<WorkTask[]>(initialTasks);
+export const tasks = signal<WorkTask[]>([]);
+export const kanbanAssignees = signal<string[]>([]);
+export const expandedTaskId = signal("");
+export const kanbanState = signal<{ state: KanbanConnectionState; message: string; latestEventId: number }>({
+  state: "idle",
+  message: "Hermes Kanbanへ接続しています",
+  latestEventId: 0
+});
 export const activeSurface = signal<Surface>("office");
 export const inspectorTab = signal<InspectorTab>("chat");
+export const settingsTab = signal<SettingsTab>("skills");
 export const selectedProfileId = signal(profiles[0]?.id ?? "");
 export const openSessionIds = signal<string[]>(["s-research-1", "s-build-1"]);
 export const activeSessionId = signal("s-research-1");
 export const mobileInspectorOpen = signal(false);
 export const mobileWorkspaceOpen = signal(false);
+export const MAX_OPEN_CHAT_SESSIONS = 4;
+export const chatSocketState = signal<{ state: ChatConnectionState; message: string }>({
+  state: "disconnected",
+  message: "Chat接続を待っています"
+});
 export const officeSnapshot = signal<OfficeSnapshot | undefined>(undefined);
+export const officeAccess = signal<OfficeAccess>({
+  state: "checking",
+  serverUrl: "",
+  message: "Office Serverを確認しています"
+});
 export const officeConnection = signal<OfficeConnection>({
   state: "demo",
   source: "demo",
@@ -20,12 +41,6 @@ export const officeConnection = signal<OfficeConnection>({
   eventStream: "closed",
   message: "ローカルデモデータを表示中"
 });
-export const globalSettings = signal<GlobalSettings>({
-  skills: ["web-search", "document-reader", "git", "kanban"],
-  context: "安全性を優先し、外部への送信や破壊的操作は利用者の確認後に実行する。",
-  remoteAccess: "off"
-});
-
 export const selectedProfile = computed(() =>
   profileList.value.find((profile) => profile.id === selectedProfileId.value)
 );
@@ -35,13 +50,117 @@ export const selectedProfileSessions = computed(() =>
 );
 
 let retryOfficeConnection = () => {};
+let ensureChatSession = (_target: ChatTarget) => {};
+let releaseChatSession = (_clientSessionId: string) => {};
+let submitChatPrompt = (_clientSessionId: string, _text: string) => {};
+let interruptChatSession = (_clientSessionId: string) => {};
+let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
+let respondApproval = async (_clientSessionId: string, _choice: ApprovalChoice) => {};
+let kanbanApi: KanbanApi | undefined;
+let kanbanMutations = 0;
+let kanbanRefresh: Promise<void> | undefined;
+let kanbanRefreshQueued = false;
+
+export function registerKanbanRuntime(api: KanbanApi): void {
+  kanbanApi = api;
+  void refreshKanbanBoard();
+}
+
+export async function refreshKanbanBoard(): Promise<void> {
+  if (!kanbanApi) return;
+  if (kanbanRefresh) {
+    kanbanRefreshQueued = true;
+    await kanbanRefresh;
+    return;
+  }
+  kanbanRefresh = loadKanbanBoard();
+  await kanbanRefresh;
+  kanbanRefresh = undefined;
+  if (kanbanRefreshQueued) {
+    kanbanRefreshQueued = false;
+    await refreshKanbanBoard();
+  }
+}
+
+async function loadKanbanBoard(): Promise<void> {
+  kanbanState.value = { ...kanbanState.value, state: "loading", message: "Hermes Kanbanを読み込み中" };
+  try {
+    const board = await kanbanApi!.fetchBoard();
+    tasks.value = board.tasks;
+    kanbanAssignees.value = board.assignees;
+    kanbanState.value = { state: "ready", message: `${board.tasks.length}件のカード`, latestEventId: board.latestEventId };
+    updateProfileTaskCounts();
+  } catch (error) {
+    setKanbanError(error);
+  }
+}
+
+export function registerChatRuntime(actions: {
+  ensureSession(target: ChatTarget): void;
+  releaseSession(clientSessionId: string): void;
+  submitPrompt(clientSessionId: string, text: string): void;
+  interrupt(clientSessionId: string): void;
+  respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
+  respondApproval(clientSessionId: string, choice: ApprovalChoice): Promise<void>;
+}): void {
+  ensureChatSession = actions.ensureSession;
+  releaseChatSession = actions.releaseSession;
+  submitChatPrompt = actions.submitPrompt;
+  interruptChatSession = actions.interrupt;
+  respondClarify = actions.respondClarify;
+  respondApproval = actions.respondApproval;
+  for (const target of getOpenChatTargets()) ensureChatSession(target);
+}
+
+export function getOpenChatTargets(): ChatTarget[] {
+  return openSessionIds.value.flatMap((clientSessionId) => {
+    const session = sessions.value.find((item) => item.id === clientSessionId);
+    if (!session || session.remoteKind === "demo" || !session.remoteKind) return [];
+    return [{
+      clientSessionId: session.id,
+      profileId: session.profileId,
+      ...(session.storedSessionId ? { storedSessionId: session.storedSessionId } : {})
+    }];
+  });
+}
 
 export function registerOfficeRetry(action: () => void): void {
   retryOfficeConnection = action;
 }
 
 export function retryOfficeServer(): void {
+  officeAccess.value = { ...officeAccess.value, state: "checking", message: "Office Serverへ再接続しています" };
   retryOfficeConnection();
+}
+
+export function requireDeviceLogin(serverUrl: string): void {
+  officeAccess.value = {
+    state: "login-required",
+    serverUrl,
+    message: "この端末からOffice Serverへログインしてください"
+  };
+}
+
+export function setDeviceLoginSubmitting(): void {
+  officeAccess.value = { ...officeAccess.value, state: "submitting", message: "端末を認証しています" };
+}
+
+export function setDeviceLoginFailure(failure: DeviceLoginFailure): void {
+  officeAccess.value = {
+    ...officeAccess.value,
+    state: failure.code === "unavailable" ? "unavailable" : "login-required",
+    message: failure.message,
+    failureCode: failure.code,
+    ...(failure.retryAfterSeconds ? { retryAfterSeconds: failure.retryAfterSeconds } : {})
+  };
+}
+
+export function setOfficeAuthenticated(serverUrl: string): void {
+  officeAccess.value = { state: "authenticated", serverUrl, message: "端末認証済み" };
+}
+
+export function setOfficeAccessUnavailable(serverUrl: string, message: string): void {
+  officeAccess.value = { state: "unavailable", serverUrl, message, failureCode: "unavailable" };
 }
 
 export function setOfficeConnecting(serverUrl: string): void {
@@ -92,22 +211,36 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
     };
   });
 
-  const previousSessions = new Map(sessions.value.map((session) => [session.id, session]));
-  sessions.value = snapshot.sessions.map((live) => previousSessions.get(live.id) ?? {
-    id: live.id,
-    profileId: live.profileId,
-    title: live.title,
-    status: live.activity === "thinking" || live.activity === "using-tool" ? "streaming" : live.activity === "waiting-for-user" ? "waiting" : "ready",
-    messages: [],
-    readOnly: true
+  const previousSessions = sessions.value;
+  const snapshotSessions = snapshot.sessions.map((live): ChatSession => {
+    const previous = previousSessions.find((session) => session.id === live.id || session.storedSessionId === live.id);
+    const runtimeStatus = live.activity === "thinking" || live.activity === "using-tool"
+      ? "streaming" as const
+      : live.activity === "waiting-for-user" ? "waiting" as const : "ready" as const;
+    return {
+      ...(previous ?? { id: live.id, messages: [] }),
+      storedSessionId: live.id,
+      profileId: live.profileId,
+      title: live.title,
+      status: previous?.status === "streaming" ? previous.status : runtimeStatus,
+      connectionState: previous?.connectionState ?? "disconnected",
+      historyState: previous?.historyState ?? "unloaded",
+      remoteKind: "stored",
+      readOnly: previous?.connectionState !== "ready"
+    };
   });
+  const unpersistedDrafts = previousSessions.filter((session) => session.remoteKind === "draft" && !session.storedSessionId);
+  sessions.value = [...snapshotSessions, ...unpersistedDrafts];
 
   const liveSessionIds = new Set(sessions.value.map((session) => session.id));
-  openSessionIds.value = openSessionIds.value.filter((id) => liveSessionIds.has(id));
+  const previouslyOpen = openSessionIds.value;
+  openSessionIds.value = previouslyOpen.filter((id) => liveSessionIds.has(id));
+  for (const removedId of previouslyOpen.filter((id) => !liveSessionIds.has(id))) releaseChatSession(removedId);
   if (!liveSessionIds.has(activeSessionId.value)) activeSessionId.value = openSessionIds.value.at(-1) ?? "";
   if (!profileList.value.some((profile) => profile.id === selectedProfileId.value)) {
     selectedProfileId.value = profileList.value[0]?.id ?? "";
   }
+  for (const target of getOpenChatTargets()) ensureChatSession(target);
 }
 
 export function setOfficeEventStream(eventStream: OfficeConnection["eventStream"]): void {
@@ -147,14 +280,27 @@ export function selectProfile(profileId: string): void {
 
 export function openSession(sessionId: string): void {
   if (!openSessionIds.value.includes(sessionId)) {
-    openSessionIds.value = [...openSessionIds.value, sessionId].slice(-4);
+    const previousIds = openSessionIds.value;
+    const nextIds = appendOpenSessionId(previousIds, sessionId);
+    openSessionIds.value = nextIds;
+    for (const evictedId of previousIds.filter((id) => !nextIds.includes(id))) releaseChatSession(evictedId);
   }
   activeSessionId.value = sessionId;
   const session = sessions.value.find((item) => item.id === sessionId);
-  if (session) selectedProfileId.value = session.profileId;
+  if (session) {
+    selectedProfileId.value = session.profileId;
+    const target = chatTarget(session);
+    if (target) ensureChatSession(target);
+  }
+}
+
+export function appendOpenSessionId(currentIds: readonly string[], sessionId: string): string[] {
+  if (currentIds.includes(sessionId)) return [...currentIds];
+  return [...currentIds, sessionId].slice(-MAX_OPEN_CHAT_SESSIONS);
 }
 
 export function closeSession(sessionId: string): void {
+  releaseChatSession(sessionId);
   openSessionIds.value = openSessionIds.value.filter((id) => id !== sessionId);
   if (activeSessionId.value === sessionId) {
     activeSessionId.value = openSessionIds.value.at(-1) ?? "";
@@ -163,12 +309,17 @@ export function closeSession(sessionId: string): void {
 }
 
 export function createSession(profileId: string): void {
+  const isLive = officeConnection.value.source === "server" && officeConnection.value.runtime === "ready";
   const session: ChatSession = {
     id: crypto.randomUUID(),
     profileId,
     title: "新しい会話",
     status: "ready",
-    messages: []
+    messages: [],
+    connectionState: isLive ? "connecting" : "ready",
+    historyState: "loaded",
+    remoteKind: isLive ? "draft" : "demo",
+    readOnly: isLive
   };
   sessions.value = [...sessions.value, session];
   openSession(session.id);
@@ -177,11 +328,14 @@ export function createSession(profileId: string): void {
 export function sendMessage(sessionId: string, body: string): void {
   const trimmed = body.trim();
   if (!trimmed) return;
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (!session || session.pendingInteraction || (session.remoteKind !== "demo" && session.connectionState !== "ready")) return;
   sessions.value = sessions.value.map((session) =>
     session.id === sessionId
       ? {
           ...session,
           status: "streaming",
+          errorMessage: undefined,
           messages: [
             ...session.messages,
             { id: crypto.randomUUID(), from: "user", body: trimmed, at: new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) }
@@ -189,53 +343,401 @@ export function sendMessage(sessionId: string, body: string): void {
         }
       : session
   );
+  if (session.remoteKind !== "demo") submitChatPrompt(sessionId, trimmed);
 }
 
-export function assignTask(taskId: string, profileId: string): void {
-  tasks.value = tasks.value.map((task) =>
-    task.id === taskId ? { ...task, assigneeId: profileId, status: task.status === "triage" ? "ready" : task.status } : task
-  );
+export function interruptSession(sessionId: string): void {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (!session || session.connectionState !== "ready" || session.status !== "streaming") return;
+  interruptChatSession(sessionId);
+  sessions.value = sessions.value.map((item) => item.id === sessionId ? {
+    ...item,
+    status: "ready",
+    streamingMessageId: undefined,
+    messages: item.messages.map((message) => message.status === "streaming" ? { ...message, status: "cancelled" } : message)
+  } : item);
 }
 
-export function moveTask(taskId: string, status: TaskStatus): void {
-  tasks.value = tasks.value.map((task) => task.id === taskId ? { ...task, status } : task);
+export async function respondToClarification(sessionId: string, answer: string): Promise<void> {
+  const trimmed = answer.trim();
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const pending = session?.pendingInteraction;
+  if (!trimmed || session?.connectionState !== "ready" || pending?.kind !== "clarify" || pending.submitting) return;
+  markInteractionSubmitting(sessionId, pending.id);
+  try {
+    await respondClarify(sessionId, pending.requestId, trimmed);
+    clearInteraction(sessionId, pending.id);
+  } catch {
+    failInteraction(sessionId, pending.id, "回答を送信できませんでした。接続を確認して再試行してください。");
+  }
 }
 
-export function createTask(title: string): void {
+export async function respondToApproval(sessionId: string, choice: ApprovalChoice): Promise<void> {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const pending = session?.pendingInteraction;
+  if (session?.connectionState !== "ready" || pending?.kind !== "approval" || pending.submitting) return;
+  if (!pending.choices.includes(choice) || (choice === "always" && !pending.allowPermanent)) return;
+  markInteractionSubmitting(sessionId, pending.id);
+  try {
+    await respondApproval(sessionId, choice);
+    clearInteraction(sessionId, pending.id);
+  } catch {
+    failInteraction(sessionId, pending.id, "承認結果を送信できませんでした。接続を確認して再試行してください。");
+  }
+}
+
+export function reconnectChatSession(sessionId: string): void {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const target = session ? chatTarget(session) : undefined;
+  if (target) ensureChatSession(target);
+}
+
+export function setChatSocketState(state: ChatConnectionState, message = ""): void {
+  chatSocketState.value = { state, message };
+}
+
+export function setChatHistoryLoading(sessionId: string): void {
+  updateChatSession(sessionId, (session) => ({ ...session, historyState: "loading" }));
+}
+
+export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string): void {
+  updateChatSession(sessionId, (session) => {
+    const historyIds = new Set(history.map((message) => message.id));
+    return {
+      ...session,
+      ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
+      historyState: "loaded",
+      errorMessage: session.connectionState === "error" ? session.errorMessage : undefined,
+      messages: [...history, ...session.messages.filter((message) => !historyIds.has(message.id))]
+    };
+  });
+}
+
+export function setChatHistoryError(sessionId: string, message: string): void {
+  updateChatSession(sessionId, (session) => ({ ...session, historyState: "error", errorMessage: message }));
+}
+
+export function setChatSessionConnecting(sessionId: string): void {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    connectionState: "connecting",
+    liveSessionId: undefined,
+    readOnly: true,
+    errorMessage: undefined
+  }));
+}
+
+export function setChatSessionReady(sessionId: string, liveSessionId: string, storedSessionId?: string): void {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    ...(storedSessionId ? { storedSessionId } : {}),
+    liveSessionId,
+    connectionState: "ready",
+    remoteKind: storedSessionId ? "stored" : session.remoteKind,
+    readOnly: false,
+    errorMessage: session.historyState === "error" ? session.errorMessage : undefined
+  }));
+}
+
+export function setChatSessionDisconnected(sessionId: string): void {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    liveSessionId: undefined,
+    connectionState: "disconnected",
+    readOnly: true
+  }));
+}
+
+export function setChatSessionError(sessionId: string, message: string): void {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    connectionState: "error",
+    readOnly: true,
+    errorMessage: message,
+    status: "ready",
+    streamingMessageId: undefined,
+    messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
+  }));
+}
+
+export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent): void {
+  updateChatSession(sessionId, (session) => reduceChatGatewayEvent(session, event));
+}
+
+export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayEvent): ChatSession {
+  const payload = event.payload ?? {};
+  if (event.type === "clarify.request") {
+    const requestId = stringValue(payload.requestId) ?? stringValue(payload.request_id);
+    const question = stringValue(payload.question);
+    if (!requestId || !question) return session;
+    return withPendingInteraction(session, {
+      id: `clarify:${requestId}`,
+      kind: "clarify",
+      requestId,
+      question,
+      choices: stringArray(payload.choices),
+      submitting: false
+    });
+  }
+  if (event.type === "approval.request") {
+    const command = stringValue(payload.command);
+    const description = stringValue(payload.description);
+    const allowPermanent = payload.allowPermanent === true || payload.allow_permanent === true;
+    const choices = approvalChoices(payload.choices, allowPermanent);
+    if (choices.length === 0) return session;
+    return withPendingInteraction(session, {
+      id: `approval:${event.liveSessionId}:${command ?? ""}:${description ?? ""}`,
+      kind: "approval",
+      ...(command ? { command } : {}),
+      ...(description ? { description } : {}),
+      choices,
+      allowPermanent,
+      submitting: false
+    });
+  }
+  if (event.type === "message.start") {
+    const messageId = gatewayMessageId(payload) ?? `stream-${event.liveSessionId}-${Date.now()}`;
+    return {
+      ...session,
+      status: "streaming",
+      streamingMessageId: messageId,
+      messages: [...session.messages, { id: messageId, from: "agent", body: "", at: nowTime(), status: "streaming" }]
+    };
+  }
+  if (event.type === "message.delta") {
+    const delta = stringValue(payload.text) ?? stringValue(payload.delta) ?? "";
+    if (!delta) return session;
+    const messageId = gatewayMessageId(payload) ?? session.streamingMessageId ?? `stream-${event.liveSessionId}`;
+    const exists = session.messages.some((message) => message.id === messageId);
+    return {
+      ...session,
+      status: "streaming",
+      streamingMessageId: messageId,
+      messages: exists
+        ? session.messages.map((message) => message.id === messageId ? { ...message, body: message.body + delta, status: "streaming" } : message)
+        : [...session.messages, { id: messageId, from: "agent", body: delta, at: nowTime(), status: "streaming" }]
+    };
+  }
+  if (event.type === "message.complete") {
+    const messageId = gatewayMessageId(payload) ?? session.streamingMessageId ?? `complete-${event.liveSessionId}-${Date.now()}`;
+    const completeText = stringValue(payload.text);
+    const exists = session.messages.some((message) => message.id === messageId);
+    return {
+      ...session,
+      status: "ready",
+      streamingMessageId: undefined,
+      pendingInteraction: undefined,
+      messages: exists
+        ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" } : message)
+        : completeText ? [...session.messages, { id: messageId, from: "agent", body: completeText, at: nowTime(), status: "complete" }] : session.messages
+    };
+  }
+  if (event.type === "status.update") {
+    const status = stringValue(payload.status);
+    return { ...session, status: status === "waiting-for-user" ? "waiting" : status === "thinking" || status === "using-tool" ? "streaming" : "ready" };
+  }
+  if (event.type.startsWith("tool.")) {
+    const toolId = stringValue(payload.toolId) ?? stringValue(payload.tool_id) ?? `tool-${event.liveSessionId}`;
+    const name = stringValue(payload.name) ?? "Tool";
+    const detail = stringValue(payload.summary) ?? stringValue(payload.status);
+    const body = detail ? `${name}: ${detail}` : `${name}${event.type === "tool.complete" ? " 完了" : "を実行中…"}`;
+    const exists = session.messages.some((message) => message.id === toolId);
+    return {
+      ...session,
+      status: event.type === "tool.complete" ? session.status : "streaming",
+      messages: exists
+        ? session.messages.map((message) => message.id === toolId ? { ...message, body, status: event.type === "tool.complete" ? "complete" : "streaming" } : message)
+        : [...session.messages, { id: toolId, from: "tool", body, at: nowTime(), status: event.type === "tool.complete" ? "complete" : "streaming" }]
+    };
+  }
+  if (event.type === "error") {
+    const message = stringValue(payload.message) ?? "Hermesの実行中にエラーが発生しました。";
+    return {
+      ...session,
+      status: "ready",
+      errorMessage: message,
+      streamingMessageId: undefined,
+      messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
+    };
+  }
+  return session;
+}
+
+function withPendingInteraction(session: ChatSession, interaction: ChatPendingInteraction): ChatSession {
+  const current = session.pendingInteraction;
+  const pendingInteraction = current?.id === interaction.id
+    ? { ...interaction, submitting: current.submitting, error: current.error }
+    : interaction;
+  return { ...session, status: "waiting", pendingInteraction };
+}
+
+function markInteractionSubmitting(sessionId: string, interactionId: string): void {
+  updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
+    ? { ...session, pendingInteraction: { ...session.pendingInteraction, submitting: true, error: undefined } }
+    : session);
+}
+
+function clearInteraction(sessionId: string, interactionId: string): void {
+  updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
+    ? { ...session, status: "streaming", pendingInteraction: undefined }
+    : session);
+}
+
+function failInteraction(sessionId: string, interactionId: string, error: string): void {
+  updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
+    ? { ...session, pendingInteraction: { ...session.pendingInteraction, submitting: false, error } }
+    : session);
+}
+
+function chatTarget(session: ChatSession): ChatTarget | undefined {
+  if (!session.remoteKind || session.remoteKind === "demo") return undefined;
+  return {
+    clientSessionId: session.id,
+    profileId: session.profileId,
+    ...(session.storedSessionId ? { storedSessionId: session.storedSessionId } : {})
+  };
+}
+
+function updateChatSession(sessionId: string, update: (session: ChatSession) => ChatSession): void {
+  sessions.value = sessions.value.map((session) => session.id === sessionId ? update(session) : session);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function approvalChoices(value: unknown, allowPermanent: boolean): ApprovalChoice[] {
+  const allowed = new Set<ApprovalChoice>(["once", "session", "deny", ...(allowPermanent ? ["always" as const] : [])]);
+  return stringArray(value).filter((choice): choice is ApprovalChoice => allowed.has(choice as ApprovalChoice));
+}
+
+function gatewayMessageId(payload: Record<string, unknown>): string | undefined {
+  return stringValue(payload.messageId) ?? stringValue(payload.message_id);
+}
+
+function nowTime(): string {
+  return new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+export async function assignTask(taskId: string, profileId: string | null): Promise<void> {
+  if (!kanbanApi) return;
+  const previous = tasks.value.find((task) => task.id === taskId);
+  if (!previous || previous.pending || previous.assigneeId === (profileId ?? undefined)) return;
+  setTaskPending(taskId, { ...previous, ...(profileId ? { assigneeId: profileId } : { assigneeId: undefined }) });
+  beginKanbanMutation("担当を更新中");
+  try {
+    applyKanbanCard(await kanbanApi.updateCard(taskId, { assignee: profileId }));
+    finishKanbanMutation();
+  } catch (error) {
+    restoreKanbanCard(previous, error);
+  }
+}
+
+export async function moveTask(taskId: string, status: TaskWritableStatus): Promise<void> {
+  if (!kanbanApi) return;
+  const previous = tasks.value.find((task) => task.id === taskId);
+  if (!previous || previous.pending || previous.status === status) return;
+  setTaskPending(taskId, { ...previous, status });
+  beginKanbanMutation("カードを移動中");
+  try {
+    applyKanbanCard(await kanbanApi.updateCard(taskId, { status }));
+    finishKanbanMutation();
+  } catch (error) {
+    restoreKanbanCard(previous, error);
+  }
+}
+
+export async function createTask(title: string): Promise<boolean> {
   const trimmed = title.trim();
-  if (!trimmed) return;
-  const number = Math.max(100, ...tasks.value.map((task) => Number.parseInt(task.id.replace(/^t-/, ""), 10)).filter(Number.isFinite)) + 1;
-  tasks.value = [...tasks.value, { id: `t-${number}`, title: trimmed, status: "triage", priority: "normal", comments: 0 }];
+  if (!trimmed || !kanbanApi) return false;
+  const temporaryId = `pending-${crypto.randomUUID()}`;
+  tasks.value = [...tasks.value, { id: temporaryId, title: trimmed, status: "triage", priority: "normal", comments: 0, pending: true }];
+  beginKanbanMutation("カードを作成中");
+  try {
+    const created = await kanbanApi.createCard(trimmed);
+    tasks.value = tasks.value.some((task) => task.id === temporaryId)
+      ? tasks.value.map((task) => task.id === temporaryId ? created : task)
+      : [...tasks.value.filter((task) => task.id !== created.id), created];
+    finishKanbanMutation();
+    updateProfileTaskCounts();
+    return true;
+  } catch (error) {
+    tasks.value = tasks.value.filter((task) => task.id !== temporaryId);
+    failKanbanMutation(error);
+    return false;
+  }
 }
 
-export function updateProfile(profileId: string, patch: Partial<Pick<Profile, "name" | "role" | "memoryNote">>): void {
-  profileList.value = profileList.value.map((profile) => profile.id === profileId ? { ...profile, ...patch } : profile);
+export async function addTaskComment(taskId: string, body: string): Promise<boolean> {
+  const trimmed = body.trim();
+  if (!trimmed || !kanbanApi) return false;
+  const previous = tasks.value.find((task) => task.id === taskId);
+  if (!previous || previous.pending) return false;
+  setTaskPending(taskId, { ...previous, comments: previous.comments + 1 });
+  beginKanbanMutation("コメントを送信中");
+  try {
+    await kanbanApi.addComment(taskId, trimmed);
+    setTaskPending(taskId, { ...previous, comments: previous.comments + 1 }, false);
+    finishKanbanMutation();
+    return true;
+  } catch (error) {
+    restoreKanbanCard(previous, error);
+    return false;
+  }
 }
 
-export function addProfileSkill(profileId: string, skill: string): void {
-  const value = skill.trim();
-  if (!value) return;
-  profileList.value = profileList.value.map((profile) => profile.id === profileId && !profile.skills.includes(value)
-    ? { ...profile, skills: [...profile.skills, value] }
-    : profile);
+function setTaskPending(taskId: string, task: WorkTask, pending = true): void {
+  tasks.value = tasks.value.map((item) => item.id === taskId ? { ...task, pending } : item);
 }
 
-export function removeProfileSkill(profileId: string, skill: string): void {
-  profileList.value = profileList.value.map((profile) => profile.id === profileId
-    ? { ...profile, skills: profile.skills.filter((item) => item !== skill) }
-    : profile);
+function applyKanbanCard(card: WorkTask): void {
+  const next = { ...card, pending: false };
+  tasks.value = tasks.value.some((task) => task.id === card.id)
+    ? tasks.value.map((task) => task.id === card.id ? next : task)
+    : [...tasks.value, next];
+  updateProfileTaskCounts();
 }
 
-export function setGlobalSettings(patch: Partial<GlobalSettings>): void {
-  globalSettings.value = { ...globalSettings.value, ...patch };
+function restoreKanbanCard(card: WorkTask, error: unknown): void {
+  tasks.value = tasks.value.map((task) => task.id === card.id ? { ...card, pending: false } : task);
+  failKanbanMutation(error);
 }
 
-export function addGlobalSkill(skill: string): void {
-  const value = skill.trim();
-  if (!value || globalSettings.value.skills.includes(value)) return;
-  setGlobalSettings({ skills: [...globalSettings.value.skills, value] });
+function beginKanbanMutation(message: string): void {
+  kanbanMutations += 1;
+  kanbanState.value = { ...kanbanState.value, state: "saving", message };
 }
 
-export function removeGlobalSkill(skill: string): void {
-  setGlobalSettings({ skills: globalSettings.value.skills.filter((item) => item !== skill) });
+function finishKanbanMutation(): void {
+  kanbanMutations = Math.max(0, kanbanMutations - 1);
+  kanbanState.value = {
+    ...kanbanState.value,
+    state: kanbanMutations > 0 ? "saving" : "ready",
+    message: kanbanMutations > 0 ? "変更を保存中" : `${tasks.value.length}件のカード`
+  };
+}
+
+function failKanbanMutation(error: unknown): void {
+  kanbanMutations = Math.max(0, kanbanMutations - 1);
+  setKanbanError(error);
+}
+
+function setKanbanError(error: unknown): void {
+  kanbanState.value = {
+    ...kanbanState.value,
+    state: "error",
+    message: error instanceof Error ? error.message : "Hermes Kanbanを更新できませんでした"
+  };
+}
+
+function updateProfileTaskCounts(): void {
+  const counts = new Map<string, number>();
+  for (const task of tasks.value) if (task.assigneeId && task.status !== "done" && task.status !== "archived") {
+    counts.set(task.assigneeId, (counts.get(task.assigneeId) ?? 0) + 1);
+  }
+  profileList.value = profileList.value.map((profile) => ({ ...profile, taskCount: counts.get(profile.id) ?? 0 }));
 }
