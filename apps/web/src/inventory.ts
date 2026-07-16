@@ -2,7 +2,7 @@ import { signal } from "@preact/signals";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "./domain";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
-import { profileList, sessions } from "./store";
+import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
 type InventoryPage = {
@@ -12,7 +12,13 @@ type InventoryPage = {
   pagination: OfficeInventoryPagination;
 };
 type InventoryLoadState = OfficeInventoryPagination & { loading: boolean; error?: string | undefined };
-type InventoryIdentity = OfficeSnapshotRequestIdentity & { inventoryGeneration: number };
+type InventoryIdentity = OfficeSnapshotRequestIdentity & {
+  inventoryGeneration: number;
+  seenProfiles: Set<string>;
+  seenSessions: Set<string>;
+  profilesReliable: boolean;
+  sessionsReliable: boolean;
+};
 type SnapshotRefresh = (expected: Pick<OfficeSnapshotRequestIdentity, "serverUrl" | "connectionGeneration">) => Promise<OfficeSnapshotRequestIdentity | undefined>;
 
 const emptyState: InventoryLoadState = { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0, loading: false };
@@ -28,7 +34,14 @@ export function initializeInventory(snapshot: OfficeSnapshot, source: string | O
   const snapshotIdentity = typeof source === "string"
     ? { serverUrl: source, connectionGeneration: 0, requestGeneration: ++nextLegacyRequestGeneration }
     : source;
-  inventoryIdentity = { ...snapshotIdentity, inventoryGeneration: ++nextInventoryGeneration };
+  inventoryIdentity = {
+    ...snapshotIdentity,
+    inventoryGeneration: ++nextInventoryGeneration,
+    seenProfiles: new Set(snapshot.profiles.map((profile) => profile.id)),
+    seenSessions: new Set(snapshot.sessions.map(sessionKey)),
+    profilesReliable: isReliablePage(snapshot.inventory.profiles),
+    sessionsReliable: isReliablePage(snapshot.inventory.sessions)
+  };
   profileInventoryState.value = { ...snapshot.inventory.profiles, loading: false };
   sessionInventoryState.value = { ...snapshot.inventory.sessions, loading: false };
 }
@@ -52,7 +65,7 @@ async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promi
     const page = await officeFetchJson<unknown>(`/api/v1/inventory?${query}`, {}, identity.serverUrl);
     if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
     if (!isInventoryPage(page, kind)) throw new Error("Office Serverの一覧ページに互換性がありません。");
-    mergeInventoryPage(page);
+    commitInventoryPage(page, identity);
     stateSignal.value = { ...page.pagination, loading: false };
   } catch (caught) {
     if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
@@ -106,31 +119,99 @@ export function mergeInventoryPage(page: InventoryPage): void {
   else mergeSessions(page.sessions);
 }
 
-function mergeProfiles(rows: OfficeSnapshotProfile[]): void {
-  const existing = new Set(profileList.value.map((profile) => profile.id));
-  const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
-  const additions = rows.flatMap((live): Profile[] => {
-    if (existing.has(live.id)) return [];
-    existing.add(live.id);
-    const index = existing.size - 1;
-    return [{ id: live.id, name: live.name, role: "", status: activityToStatus(live.activity), color: palette[index % palette.length]!, sessions: live.activeSessionCount, taskCount: 0, memoryBytes: 0, memoryNote: "Hermes runtimeから読み取ったProfileです。", skills: [], inheritedSkills: [] }];
-  });
-  if (additions.length > 0) profileList.value = [...profileList.value, ...additions];
+function commitInventoryPage(page: InventoryPage, identity: InventoryIdentity): void {
+  if (page.kind === "profiles") {
+    identity.profilesReliable &&= isReliablePage(page.pagination);
+    mergeProfiles(page.profiles, identity.seenProfiles);
+    if (identity.profilesReliable && isTerminal(page.pagination)) pruneProfiles(identity.seenProfiles);
+  } else {
+    identity.sessionsReliable &&= isReliablePage(page.pagination);
+    mergeSessions(page.sessions, identity.seenSessions);
+    if (identity.sessionsReliable && isTerminal(page.pagination)) pruneSessions(identity.seenSessions);
+  }
 }
 
-function mergeSessions(rows: OfficeSnapshot["sessions"]): void {
-  const existing = new Set(sessions.value.flatMap((session) => session.remoteKind === "stored" ? [`${session.profileId}\0${session.storedSessionId ?? session.id}`] : []));
-  const additions = rows.flatMap((live): ChatSession[] => {
-    const key = `${live.profileId}\0${live.id}`;
-    if (existing.has(key)) return [];
-    existing.add(key);
-    return [{ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status: live.activity === "thinking" || live.activity === "using-tool" ? "streaming" : live.activity === "waiting-for-user" ? "waiting" : "ready", messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true }];
-  });
-  if (additions.length === 0) return;
-  sessions.value = [...sessions.value, ...additions];
+function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void {
+  const next = [...profileList.value];
+  const existing = new Map(next.map((profile, index) => [profile.id, index]));
+  const pageSeen = new Set<string>();
+  const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
+  for (const live of rows) {
+    if (pageSeen.has(live.id)) continue;
+    pageSeen.add(live.id);
+    seen?.add(live.id);
+    const index = existing.get(live.id);
+    if (index === undefined) {
+      existing.set(live.id, next.length);
+      next.push({ id: live.id, name: live.name, role: "", status: activityToStatus(live.activity), color: palette[next.length % palette.length]!, sessions: live.activeSessionCount, taskCount: 0, memoryBytes: 0, memoryNote: "Hermes runtimeから読み取ったProfileです。", skills: [], inheritedSkills: [] });
+      continue;
+    }
+    const previous = next[index]!;
+    next[index] = { ...previous, name: live.name, status: activityToStatus(live.activity), sessions: live.activeSessionCount };
+  }
+  profileList.value = next;
+}
+
+function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): void {
+  const next = [...sessions.value];
+  const existing = new Map(next.flatMap((session, index) => session.remoteKind === "stored" ? [[sessionKey(session), index] as const] : []));
+  const pageSeen = new Set<string>();
+  for (const live of rows) {
+    const key = sessionKey(live);
+    if (pageSeen.has(key)) continue;
+    pageSeen.add(key);
+    seen?.add(key);
+    const index = existing.get(key);
+    const status = activityToSessionStatus(live.activity);
+    if (index === undefined) {
+      existing.set(key, next.length);
+      next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
+      continue;
+    }
+    const previous = next[index]!;
+    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, status, remoteKind: "stored" };
+  }
+  sessions.value = next;
+  updateProfileSessionCounts();
+}
+
+function pruneProfiles(seen: ReadonlySet<string>): void {
+  const draftProfiles = new Set(sessions.value.flatMap((session) => session.remoteKind === "draft" ? [session.profileId] : []));
+  profileList.value = profileList.value.filter((profile) => seen.has(profile.id) || draftProfiles.has(profile.id));
+  if (!profileList.value.some((profile) => profile.id === selectedProfileId.value)) selectedProfileId.value = profileList.value[0]?.id ?? "";
+}
+
+function pruneSessions(seen: ReadonlySet<string>): void {
+  const removedIds = new Set(sessions.value.flatMap((session) => session.remoteKind === "stored" && !seen.has(sessionKey(session)) ? [session.id] : []));
+  if (removedIds.size === 0) return;
+  sessions.value = sessions.value.filter((session) => session.remoteKind !== "stored" || !removedIds.has(session.id));
+  for (const sessionId of openSessionIds.value.filter((id) => removedIds.has(id))) closeSession(sessionId);
+  if (removedIds.has(activeSessionId.value)) activeSessionId.value = openSessionIds.value.at(-1) ?? "";
+  updateProfileSessionCounts();
+}
+
+function updateProfileSessionCounts(): void {
   const counts = new Map<string, number>();
-  for (const session of sessions.value) if (session.remoteKind === "stored") counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
-  profileList.value = profileList.value.map((profile) => ({ ...profile, sessions: Math.max(profile.sessions, counts.get(profile.id) ?? 0) }));
+  for (const session of sessions.value) if (session.remoteKind !== "demo") counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  profileList.value = profileList.value.map((profile) => ({ ...profile, sessions: counts.get(profile.id) ?? 0 }));
+}
+
+function isReliablePage(page: OfficeInventoryPagination): boolean {
+  return !page.truncated && page.partialFailures === 0;
+}
+
+function isTerminal(page: OfficeInventoryPagination): boolean {
+  return !page.hasMore;
+}
+
+function sessionKey(session: { profileId: string; id: string; storedSessionId?: string | undefined }): string {
+  return `${session.profileId}\0${session.storedSessionId ?? session.id}`;
+}
+
+function activityToSessionStatus(activity: string): ChatSession["status"] {
+  if (activity === "thinking" || activity === "using-tool") return "streaming";
+  if (activity === "waiting-for-user") return "waiting";
+  return "ready";
 }
 
 function isInventoryPage(value: unknown, kind: InventoryKind): value is InventoryPage {
