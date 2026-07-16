@@ -325,7 +325,7 @@ function isHealthResponse(value: unknown): value is HealthResponse {
   return candidate.ok === true && typeof candidate.protocolVersion === "number" && typeof candidate.runtime === "string";
 }
 
-function isOfficeSnapshot(value: unknown): value is OfficeSnapshot {
+export function isOfficeSnapshot(value: unknown): value is OfficeSnapshot {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<OfficeSnapshot>;
   return typeof candidate.generatedAt === "string"
@@ -334,7 +334,20 @@ function isOfficeSnapshot(value: unknown): value is OfficeSnapshot {
     && Array.isArray(candidate.sessions)
     && Array.isArray(candidate.boards)
     && typeof candidate.capabilities?.protocolVersion === "number"
-    && typeof candidate.capabilities.runtime?.state === "string";
+    && typeof candidate.capabilities.runtime?.state === "string"
+    && isOfficeAccess(candidate.capabilities.access);
+}
+
+function isOfficeAccess(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const access = value as Record<string, unknown>;
+  return typeof access.deviceId === "string" && access.deviceId.length > 0 && access.deviceId.length <= 128
+    && ["viewer", "operator", "manager", "owner"].includes(String(access.tier))
+    && ["loopback", "tailnet", "public"].includes(String(access.exposure))
+    && ["desktop-capability", "local-cookie", "device-cookie", "tailscale-identity", "oidc"].includes(String(access.authentication))
+    && Array.isArray(access.allowedOperations)
+    && access.allowedOperations.length <= 128
+    && access.allowedOperations.every((operation) => typeof operation === "string" && operation.length > 0 && operation.length <= 80);
 }
 
 function errorMessage(error: unknown): string {

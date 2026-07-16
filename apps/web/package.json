@@ -16,6 +16,7 @@
     "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
+    "@hermes-office/protocol": "0.0.0",
     "@preact/signals": "^2.0.1",
     "preact": "^10.26.4"
   },

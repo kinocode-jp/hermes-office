@@ -38,17 +38,21 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test web
+      # The workspace glob includes audit-api, auth-state, and snapshot-access
+      # contract tests so authorization UI regressions cannot bypass CI.
+      - name: Test web authorization, audit, and client contracts
         run: npm test --workspace @hermes-office/web
 
-      - name: Test server
+      # The server script compiles and runs every dist/*.test.js file, including
+      # remote-auth, remote-chat, gateway, and capability integration tests.
+      - name: Test server authorization and runtime contracts
         run: npm run test:server
 
       - name: Build production web and server
         run: npm run build:production
 
   desktop:
-    name: Desktop compile check
+    name: Desktop tests and compile check
     runs-on: macos-14
     timeout-minutes: 30
     steps:
@@ -71,6 +75,9 @@ jobs:
 
       - name: Check pinned Rust toolchain
         run: rustc --version
+
+      - name: Test Tauri runtime validation
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Compile-check Tauri shell
         run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

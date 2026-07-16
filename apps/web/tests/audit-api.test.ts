@@ -28,15 +28,31 @@ test("audit parser preserves logout entries without unknown fields", () => {
   assert.deepEqual(parsed.currentAccess, { deviceName: "Phone", local: false });
 });
 
-test("audit parser skips unsupported operations", () => {
+test("audit parser preserves all current mutation operations and skips unknown operations", () => {
   const parsed = parseAccessAuditResponse({
-    records: [{
-      occurredAt: "2026-07-16T01:02:03.000Z",
-      operation: "secret.read",
-      outcome: "allowed",
-      deviceName: "Phone",
-      local: false,
-    }],
+    records: [
+      {
+        occurredAt: "2026-07-16T01:02:03.000Z",
+        operation: "kanban.card.update",
+        outcome: "allowed",
+        deviceName: "Phone",
+        local: false,
+      },
+      {
+        occurredAt: "2026-07-16T01:03:03.000Z",
+        operation: "global-settings.update",
+        outcome: "denied",
+        deviceName: "Phone",
+        local: false,
+      },
+      {
+        occurredAt: "2026-07-16T01:04:03.000Z",
+        operation: "secret.read",
+        outcome: "allowed",
+        deviceName: "Phone",
+        local: false,
+      },
+    ],
   });
-  assert.deepEqual(parsed.records, []);
+  assert.deepEqual(parsed.records.map((record) => record.operation), ["global-settings.update", "kanban.card.update"]);
 });

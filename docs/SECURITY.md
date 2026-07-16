@@ -20,8 +20,8 @@ independent audit, certification, or warranty.
 ### Listener and request boundary
 
 - Office Server binds to loopback by default.
-- Non-loopback binding requires an explicit opt-in plus valid remote-token and
-  allowed-origin configuration.
+- Office Server requires a loopback listener; direct non-loopback binding is
+  rejected. Remote browsers must arrive through the configured loopback proxy.
 - Local bootstrap checks the peer address, exact Host/Origin allowlists, and
   rejects forwarded requests rather than trusting proxy headers.
 - CORS and WebSocket upgrades validate exact configured origins.
@@ -44,20 +44,37 @@ They do not make direct public binding a supported deployment.
   configured loopback HTTPS proxy. The comparison uses a digest and
   constant-time equality; attempts are rate-limited globally, per client, and
   per credential digest in bounded maps.
-- Enrollment creates a separate long-lived device credential and an `operator`
-  session. A local owner can list or revoke in-memory devices; revocation
-  invalidates sessions and closes matching event/chat sockets.
+- Enrollment creates a separate long-lived device credential with a fixed
+  `operator` tier. The registry stores only its digest, expiry, revocation, and
+  the enrollment-token generation/consumption state in a mode-0600 file under a
+  mode-0700 directory by default.
+- A restart with the same enrollment token reloads the durable device. Changing
+  the token and restarting invalidates all previous devices and opens one
+  replacement enrollment.
+- A local owner can list or durably revoke the remote device. Remote logout also
+  revokes that device, clears both device/session cookies, invalidates its
+  sessions, and closes matching event/chat sockets.
 - Per-operation policy checks enforce minimum tiers and distinguish remote-safe,
   step-up-required, and local-only operations. No remote step-up flow exists, so
   step-up operations fail closed for remote devices.
+- Hermes chat sessions are shared within the declared single-operator trust
+  model; a remote operator may resume/read stored sessions shown in its snapshot.
+  This is not per-device chat isolation.
+- Pending approval replies are bound to the authenticated device and exact chat
+  socket that received the request. Permanent approval remains local-only.
+- Snapshot `capabilities.access` and allowed operations are calculated from the
+  authenticated request rather than a fixed local-owner value.
 - WebSocket authentication uses the existing Office session/capability boundary,
   origin checks, frame bounds, and connection cleanup.
-- Authentication events are kept in a bounded in-memory audit feed.
+- Audit records are kept in a bounded in-memory feed. Both the audit endpoint
+  and audit-derived event notifications require owner access.
 
 The current enrollment flow is not a complete multi-user authorization system.
-Device, session, enrollment-consumed, rate-limit, and audit state is not durable;
-a restart invalidates devices and permits fresh use of the configured enrollment
-token.
+The device registry is durable, but sessions, rate limits, pending approvals,
+socket bindings, and audit state are not. A normal restart does not revoke a
+device or reopen enrollment; only an enrollment-token generation change performs
+the documented global reset. An unreadable, malformed, wrong-version, or
+invalid-digest registry fails closed and does not reopen enrollment.
 
 ### Hermes boundary
 
@@ -81,6 +98,14 @@ and requires Node 22.x plus Hermes Agent 0.18.x. These executables are not yet
 verified against a project-signed digest manifest. Treat the local installation
 and user account as part of the trusted computing base.
 
+Source development with `npm run dev` is a different trust boundary: managed
+mode accepts the explicitly configured executable value and the default bare
+`hermes` name is resolved by the allowlisted `PATH`. It receives the same child
+environment allowlist, loopback constraints, and version compatibility check,
+but not the desktop shell's canonical-path owner/mode validation. Use a trusted
+local installation and set an absolute executable path when stricter source-run
+selection is required.
+
 ### Browser content and storage
 
 - The UI renders structured text/event data rather than injecting raw tool HTML.
@@ -101,8 +126,13 @@ If remote access is necessary:
    reuse a Hermes/provider credential;
 5. restrict the private network to devices controlled by the same trusted
    operator;
-6. rotate the token and restart Office if a browser/device is lost;
-7. never expose stock `hermes serve` directly.
+6. if a device is lost, generate a different token, replace
+   `HERMES_OFFICE_REMOTE_TOKEN`, restart Office, and enroll the replacement;
+   this revokes every older remote device;
+7. if the registry is corrupt, stop Office, move the registry aside as the local
+   host owner, configure a different token, restart, and enroll again; never edit
+   the registry while Office is running;
+8. never expose stock `hermes serve` directly.
 
 TLS and proxy authentication are provided by the proxy; Office's loopback HTTP
 listener does not itself terminate TLS or validate Tailscale/OIDC identity.
@@ -111,10 +141,10 @@ listener does not itself terminate TLS or validate Tailscale/OIDC identity.
 
 The following are not implemented or not claimed as complete:
 
-- durable device enrollment and configurable per-device grants;
-- RBAC, recovery, and tenant boundaries suitable for untrusted users (the
-  current fixed remote `operator` tier and local revocation are defense-in-depth
-  for the single-operator model);
+- configurable grants or multiple simultaneously enrolled remote devices;
+- RBAC, independent account recovery, and tenant boundaries suitable for
+  untrusted users (the current durable fixed `operator` and global token-rotation
+  recovery are for the single-operator model);
 - remote reauthentication/step-up (step-up operations currently fail closed)
   and an unforgeable native presence flow beyond the Tauri capability;
 - OIDC, PKCE, trusted proxy identity, public recovery, or public-internet mode;

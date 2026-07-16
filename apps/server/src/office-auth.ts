@@ -1,11 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { dirname, isAbsolute } from "node:path";
 import {
   OPERATION_POLICIES,
   type DeviceSummary,
+  type EffectiveAccess,
   type Operation,
   type PermissionTier,
 } from "@hermes-office/protocol";
@@ -87,6 +88,7 @@ export class OfficeAuth {
   readonly #sessions = new Map<string, StoredSession>();
   readonly #devices = new Map<string, DeviceRecord>();
   readonly #remoteTokenDigest: Buffer | undefined;
+  readonly #remoteTokenGeneration: string | undefined;
   readonly #desktopCapabilityDigest: Buffer | undefined;
   readonly #desktopSession: OfficeAuthSession | undefined;
   readonly #desktopOrigins: ReadonlySet<string>;
@@ -105,6 +107,7 @@ export class OfficeAuth {
         throw new Error("Remote enrollment token must contain 32 to 4096 characters.");
       }
       this.#remoteTokenDigest = secretDigest(options.remoteToken);
+      this.#remoteTokenGeneration = tokenDigest(options.remoteToken);
     }
     if (options.desktopCapability !== undefined) {
       if (!isValidDesktopCapability(options.desktopCapability)) {
@@ -231,6 +234,23 @@ export class OfficeAuth {
     return { allowed: false, reason };
   }
 
+  effectiveAccess(session: OfficeAuthSession): EffectiveAccess {
+    const allowedOperations = (Object.keys(OPERATION_POLICIES) as Operation[]).filter((operation) => {
+      const policy = OPERATION_POLICIES[operation];
+      if (TIER_RANK[session.principal.tier] < TIER_RANK[policy.minimumTier]) return false;
+      return session.principal.local || (policy.boundary !== "local-only" && policy.boundary !== "step-up-required");
+    });
+    return {
+      deviceId: session.principal.id,
+      tier: session.principal.tier,
+      exposure: session.principal.local ? "loopback" : "tailnet",
+      authentication: session.principal.id === "local-desktop"
+        ? "desktop-capability"
+        : session.principal.local ? "local-cookie" : "device-cookie",
+      allowedOperations,
+    };
+  }
+
   readAudit(session: OfficeAuthSession): { records: OfficePublicAuditRecord[] } | undefined {
     if (session.principal.tier !== "owner") return undefined;
     this.#appendAudit("audit.read", "allowed", session, session.principal.local);
@@ -256,9 +276,18 @@ export class OfficeAuth {
   revoke(request: IncomingMessage, response: ServerResponse): boolean {
     const session = this.authenticate(request);
     const rawToken = readCookie(request.headers.cookie, COOKIE_NAME);
-    if (rawToken === undefined) return false;
-    const removed = this.#sessions.delete(tokenDigest(rawToken));
-    response.setHeader("Set-Cookie", expireCookie(COOKIE_NAME));
+    if (rawToken === undefined || session === undefined) return false;
+    if (!session.principal.local) {
+      const device = this.#devices.get(session.principal.id);
+      if (device === undefined || device.revokedAt !== undefined) return false;
+      device.revokedAt = new Date().toISOString();
+      if (!this.#saveDeviceRegistry()) { delete device.revokedAt; return false; }
+      for (const [key, stored] of this.#sessions) if (stored.principal.id === device.id) this.#sessions.delete(key);
+    }
+    const removed = session.principal.local ? this.#sessions.delete(tokenDigest(rawToken)) : true;
+    response.setHeader("Set-Cookie", session.principal.local
+      ? [expireCookie(COOKIE_NAME, "/")]
+      : [expireCookie(COOKIE_NAME, "/"), expireCookie(DEVICE_COOKIE_NAME, "/api/v1/auth/device")]);
     this.#appendAudit("auth.logout", removed ? "allowed" : "denied", session, session?.principal.local ?? false);
     return removed;
   }
@@ -337,31 +366,57 @@ export class OfficeAuth {
   #loadDeviceRegistry(): void {
     if (this.#deviceRegistryPath === undefined || this.#remoteTokenDigest === undefined) return;
     if (!existsSync(this.#deviceRegistryPath)) return;
-    // Once a registry exists, malformed state must never reopen bootstrap enrollment.
     this.#enrollmentConsumed = true;
     try {
       const parsed = JSON.parse(readFileSync(this.#deviceRegistryPath, "utf8")) as unknown;
-      if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.devices)) return;
+      if (!isRecord(parsed) || parsed.version !== 1 || typeof parsed.enrollmentTokenDigest !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(parsed.enrollmentTokenDigest) || !Array.isArray(parsed.devices)) {
+        this.#devices.clear();
+        return;
+      }
+      if (parsed.enrollmentTokenDigest !== this.#remoteTokenGeneration) {
+        this.#resetRegistryGeneration();
+        return;
+      }
+      this.#enrollmentConsumed = parsed.enrollmentConsumed === true;
       for (const raw of parsed.devices.slice(0, MAX_DEVICES)) {
         const device = parseStoredDevice(raw);
         if (device !== undefined) this.#devices.set(device.id, device);
       }
-    } catch { /* Missing or invalid state rejects old device credentials. */ }
+    } catch { this.#devices.clear(); }
+  }
+
+  #resetRegistryGeneration(): void {
+    this.#devices.clear();
+    this.#enrollmentConsumed = false;
+    this.#saveDeviceRegistry();
   }
 
   #saveDeviceRegistry(): boolean {
     if (this.#deviceRegistryPath === undefined || this.#remoteTokenDigest === undefined) return true;
     const temporary = `${this.#deviceRegistryPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    let fileDescriptor: number | undefined;
     try {
-      mkdirSync(dirname(this.#deviceRegistryPath), { recursive: true, mode: 0o700 });
-      writeFileSync(temporary, JSON.stringify({
+      const directory = dirname(this.#deviceRegistryPath);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      chmodSync(directory, 0o700);
+      fileDescriptor = openSync(temporary, "wx", 0o600);
+      writeFileSync(fileDescriptor, JSON.stringify({
         version: 1,
+        enrollmentTokenDigest: this.#remoteTokenGeneration,
         enrollmentConsumed: this.#enrollmentConsumed,
         devices: [...this.#devices.values()],
-      }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+      }), { encoding: "utf8" });
+      fsyncSync(fileDescriptor);
+      closeSync(fileDescriptor);
+      fileDescriptor = undefined;
       renameSync(temporary, this.#deviceRegistryPath);
+      chmodSync(this.#deviceRegistryPath, 0o600);
+      const directoryDescriptor = openSync(directory, "r");
+      try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
       return true;
     } catch {
+      if (fileDescriptor !== undefined) try { closeSync(fileDescriptor); } catch { /* best effort */ }
+      try { unlinkSync(temporary); } catch { /* best effort */ }
       // A write failure never expands access. Process-local enrollment remains one-time.
       return false;
     }
@@ -413,7 +468,7 @@ function serializeSessionCookie(token: string, request: IncomingMessage, proxyHo
 function serializeDeviceCookie(token: string, request: IncomingMessage, proxyHops: number): string {
   return `${DEVICE_COOKIE_NAME}=${token}; Path=/api/v1/auth/device; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(DEVICE_TTL_MS / 1_000)}${isSecureRequest(request, proxyHops) ? "; Secure" : ""}`;
 }
-function expireCookie(name: string): string { return `${name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`; }
+function expireCookie(name: string, path: string): string { return `${name}=; Path=${path}; HttpOnly; SameSite=Strict; Max-Age=0`; }
 function isSecureRequest(request: IncomingMessage, proxyHops: number): boolean {
   return ("encrypted" in request.socket && request.socket.encrypted === true)
     || (proxyHops > 0 && isLoopbackAddress(request.socket.remoteAddress) && request.headers["x-forwarded-proto"] === "https");

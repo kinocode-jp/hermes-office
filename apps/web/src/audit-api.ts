@@ -1,6 +1,8 @@
 import { officeFetchJson } from "./office-api";
+import type { Operation } from "@hermes-office/protocol";
 
-export type AccessAuditOperation = "auth.local" | "auth.device" | "auth.logout" | "audit.read";
+type AuthenticationAuditOperation = "auth.local" | "auth.device" | "auth.logout";
+export type AccessAuditOperation = AuthenticationAuditOperation | Operation;
 export type AccessAuditOutcome = "allowed" | "denied" | "rate_limited";
 
 export type AccessAuditEntry = {
@@ -17,6 +19,18 @@ export type AccessAuditSnapshot = {
 };
 
 const MAX_AUDIT_RECORDS = 256;
+const PROTOCOL_AUDIT_OPERATIONS: Record<Operation, true> = {
+  "state.read": true, "chat.session.create": true, "chat.session.archive": true,
+  "chat.message.send": true, "chat.run.cancel": true, "chat.approval.permanent": true,
+  "kanban.card.create": true, "kanban.card.update": true, "kanban.card.comment": true,
+  "profile.create": true, "profile.update": true, "profile.delete": true,
+  "memory.update": true, "skill.enable": true, "skill.install": true,
+  "global-settings.update": true, "runtime.start": true, "runtime.stop": true,
+  "runtime.configure": true, "secret.write": true, "device.revoke": true, "audit.read": true,
+};
+const SUPPORTED_AUDIT_OPERATIONS: ReadonlySet<string> = new Set([
+  "auth.local", "auth.device", "auth.logout", ...Object.keys(PROTOCOL_AUDIT_OPERATIONS),
+]);
 const auditListeners = new Set<() => void>();
 
 export async function fetchAccessAudit(): Promise<AccessAuditSnapshot> {
@@ -74,7 +88,9 @@ export function parseAccessAuditResponse(value: unknown): AccessAuditSnapshot {
 }
 
 function safeOperation(value: unknown): AccessAuditOperation | undefined {
-  return value === "auth.local" || value === "auth.device" || value === "auth.logout" || value === "audit.read" ? value : undefined;
+  return typeof value === "string" && SUPPORTED_AUDIT_OPERATIONS.has(value)
+    ? value as AccessAuditOperation
+    : undefined;
 }
 
 function safeOutcome(value: unknown): AccessAuditOutcome | undefined {

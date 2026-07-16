@@ -9,7 +9,7 @@ import { locale, t, type TranslationKey } from "../i18n";
 import { InfoTip } from "./info-tip";
 import "./access-audit.css";
 
-const operationLabels: Record<AccessAuditEntry["operation"], TranslationKey> = {
+const operationLabels: Partial<Record<AccessAuditEntry["operation"], TranslationKey>> = {
   "auth.local": "audit.operation.local",
   "auth.device": "audit.operation.device",
   "auth.logout": "audit.operation.logout",
@@ -85,7 +85,7 @@ export function AccessAudit() {
               <li key={`${record.occurredAt}-${record.operation}-${index}`}>
                 <time dateTime={record.occurredAt}>{formatTime(record.occurredAt)}</time>
                 <span class="access-audit__device"><i class={record.local ? "is-local" : "is-remote"} />{record.deviceName ?? (record.local ? t("audit.thisMac") : t("audit.remoteDevice"))}</span>
-                <span>{t(operationLabels[record.operation])}</span>
+                <span>{operationLabel(record.operation)}</span>
                 <span class={`access-audit__outcome is-${record.outcome}`}>{t(outcomeLabels[record.outcome])}</span>
               </li>
             ))}
@@ -106,4 +106,9 @@ function formatTime(timestamp: string): string {
     second: "2-digit",
     hour12: false,
   }).format(new Date(timestamp)).replaceAll("/", ".");
+}
+
+function operationLabel(operation: AccessAuditEntry["operation"]): string {
+  const translation = operationLabels[operation];
+  return translation === undefined ? operation : t(translation);
 }

@@ -14,7 +14,6 @@ export interface ChatGatewayDependencies {
   auth: OfficeAuth;
   officeSession: OfficeAuthSession;
   runtimeSource: HermesRuntimeSource;
-  sessionBindings: Map<string, string>;
   maxJsonBytes: number;
   deviceLimiter: ChatDeviceRateLimiter;
 }
@@ -39,7 +38,7 @@ export class ChatDeviceRateLimiter {
 }
 
 export function handleOfficeChatConnection(client: WebSocket, dependencies: ChatGatewayDependencies): void {
-  const { auth, officeSession, runtimeSource, sessionBindings, maxJsonBytes, deviceLimiter } = dependencies;
+  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter } = dependencies;
   let chatTransport: ReturnType<HermesRuntimeSource["chat"]>;
   try { chatTransport = runtimeSource.chat(); }
   catch { client.close(1013, "Hermes runtime unavailable"); return; }
@@ -68,10 +67,6 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       const access = auth.authorizeSession(officeSession, chatOperation(frame.method));
       if (!access.allowed) { sendRpcError(send, frame.id, -32003, "Operation is not permitted for this device."); return; }
       const targetId = chatTargetId(frame.method, frame.params);
-      if (targetId !== undefined && !officeSession.principal.local && sessionBindings.get(targetId) !== officeSession.principal.id) {
-        sendRpcError(send, frame.id, -32004, "Chat session was not found.");
-        return;
-      }
       if (frame.method === "approval.respond") {
         const choice = typeof frame.params?.choice === "string" ? frame.params.choice : "";
         if (choice === "always" && !auth.authorizeSession(officeSession, "chat.approval.permanent").allowed) {
@@ -99,10 +94,6 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         { method: frame.method, ...(frame.params === undefined ? {} : { params: frame.params }) },
         seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
       );
-      if (frame.method === "session.create" || frame.method === "session.resume") {
-        for (const id of chatResultSessionIds(result.value)) bindSession(sessionBindings, id, officeSession.principal.id);
-      }
-      if (frame.method === "session.close" && targetId !== undefined) sessionBindings.delete(targetId);
       send({ jsonrpc: "2.0", id: frame.id, result: result.value });
     } catch {
       sendRpcError(send, frame.id, -32000, "Hermes request failed.");
@@ -175,20 +166,8 @@ function chatTargetId(method: HermesChatMethod, params: Record<string, unknown> 
   return typeof params?.session_id === "string" ? params.session_id : undefined;
 }
 
-function chatResultSessionIds(value: Record<string, boolean | number | string | null>): string[] {
-  return [value.liveSessionId, value.storedSessionId, value.resumedSessionId]
-    .filter((item): item is string => typeof item === "string");
-}
-
 function sendRpcError(send: (value: unknown) => void, id: string | number, code: number, message: string): void {
   send({ jsonrpc: "2.0", id, error: { code, message } });
-}
-
-function bindSession(bindings: Map<string, string>, sessionId: string, principalId: string): void {
-  bindings.set(sessionId, principalId);
-  if (bindings.size <= 1_024) return;
-  const oldest = bindings.keys().next();
-  if (!oldest.done) bindings.delete(oldest.value);
 }
 
 function trimOldest<T>(collection: Map<string, T> | Set<string>, maximum: number): void {

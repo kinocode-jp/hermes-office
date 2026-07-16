@@ -136,6 +136,13 @@ export type OfficeSnapshot = {
     protocolVersion: number;
     serverVersion: string;
     runtime: { state: OfficeRuntimeState; hermesVersion?: string };
+    access: {
+      deviceId: string;
+      tier: "viewer" | "operator" | "manager" | "owner";
+      exposure: "loopback" | "tailnet" | "public";
+      authentication: "desktop-capability" | "local-cookie" | "device-cookie" | "tailscale-identity" | "oidc";
+      allowedOperations: string[];
+    };
   };
   profiles: OfficeSnapshotProfile[];
   sessions: Array<{ id: string; profileId: string; title: string; activity: string }>;

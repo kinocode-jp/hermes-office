@@ -33,6 +33,8 @@ export type RuntimeState =
 export type NetworkExposure = "loopback" | "tailnet" | "public";
 export type AuthenticationMode =
   | "desktop-capability"
+  | "local-cookie"
+  | "device-cookie"
   | "tailscale-identity"
   | "oidc";
 

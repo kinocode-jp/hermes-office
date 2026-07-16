@@ -13,7 +13,8 @@ Browser / PWA ─┼── HTTP + WebSocket ── Office Server ── loopback
                │                         │
                └── same Preact UI        ├── global settings state
                                          ├── Profile backend pool
-                                         └── bounded in-memory auth/audit state
+                                         ├── durable remote-device registry
+                                         └── bounded in-memory sessions/audit
 ```
 
 ### Web interface
@@ -41,11 +42,23 @@ tokens and backend URLs are not part of the public browser DTOs.
 6. starts Profile-pinned Hermes processes for process-scoped settings calls;
 7. stores the Office-owned global skill/shared-context state.
 
-Authentication sessions, enrolled devices, rate-limit windows, one-time-token
-consumption state, and the bounded authentication audit feed are currently in
-memory and reset with the server. The project does not currently implement a
-general multi-user identity provider, persistent device registry, or
-public-internet deployment mode.
+The remote-device credential digest, fixed `operator` tier, expiry, revocation,
+enrollment-token generation digest, and one-time consumption state are persisted
+in the device registry (by default `~/.hermes-office/devices.json`). Session
+cookies, rate-limit windows, socket bindings, pending approvals, and the bounded
+audit feed remain in memory and reset with the server. The project does not
+implement a general multi-user identity provider or public-internet mode.
+
+Hermes stored chat sessions are intentionally shared across the single trusted
+operator namespace rather than owned by one remote device. An authenticated
+remote operator may open/resume a session shown in its snapshot. Approval
+responses are different: pending approval state is ephemeral and bound to the
+device and chat WebSocket that received it, preventing a second socket/device
+from answering that prompt.
+
+Snapshot capabilities are derived from the authenticated principal, exposure,
+and operation policies at response time. Audit HTTP data and audit-derived
+events are delivered only to owner-authorized clients.
 
 ### Hermes adapter and runtime
 
@@ -58,6 +71,11 @@ Managed mode starts a user-installed Hermes executable and supervises it. The
 desktop shell starts the bundled Office Server JavaScript using a Node runtime
 available on the machine. These are local runtime integrations, not bundled,
 signed Hermes or Node distributions.
+
+The desktop launcher canonicalizes and validates executable ownership/mode and
+requires Node 22.x/Hermes 0.18.x. A source `npm run dev` launch uses the explicit
+Hermes executable value; its default bare `hermes` name is resolved through the
+allowlisted `PATH` and does not receive the desktop path ownership/mode check.
 
 The exact upstream research and known compatibility uncertainties are in
 [`HERMES-INTEGRATION.md`](HERMES-INTEGRATION.md).
@@ -104,24 +122,34 @@ requires its launch-scoped capability.
 
 The same trusted operator may put the loopback listener behind an authenticated
 HTTPS private-network proxy with an exact trusted-hop count. Office can spend a
-configured token once to enroll one in-memory `operator` device, then uses a
+configured token once to enroll one durable `operator` device, then uses a
 separate device cookie and short-lived HttpOnly session cookie. Cookie mutations
-require CSRF. A local owner can list/revoke the device and active sockets close.
-The server restart boundary resets all of this state. This is not durable device
-administration, general multi-user identity, or a tenant boundary.
+require CSRF. A restart with the same token reloads the device registry. A local
+owner revoke or remote logout durably revokes the device and closes active
+sockets.
+
+Replacement enrollment is deliberately global: change the configured random
+enrollment token and restart Office. A token-generation mismatch clears all
+previous remote-device grants and reopens one enrollment. This is not general
+multi-user identity or a tenant boundary.
+
+Malformed, unreadable, wrong-version, or invalid-digest registry data fails
+closed without reopening enrollment. Local-host recovery is to stop Office,
+move the damaged registry aside, change the random token, restart, and enroll a
+replacement; all previous device credentials are invalid after that recovery.
 
 ### Public internet (unsupported)
 
-OIDC, trusted proxy identity, durable device grants/revocation, recovery, and a
-reviewed public exposure mode are roadmap items. Do not interpret their mention
-in design documents as an implemented feature.
+OIDC, trusted proxy identity, multiple independently granted remote devices,
+account recovery, and a reviewed public exposure mode are roadmap items. Do not
+interpret their mention in design documents as an implemented feature.
 
 ## Roadmap architecture (not implemented contract)
 
 Possible future work includes:
 
-- persistent device identities and configurable viewer/operator/manager/owner
-  grants (the current remote enrollment always creates an `operator`);
+- configurable multiple-device viewer/operator/manager/owner grants (the current
+  durable enrollment permits one fixed `operator` per token generation);
 - reauthentication/step-up and native local-presence proof for high-risk work;
 - persistent, append-oriented audit storage;
 - OIDC Authorization Code with PKCE and explicit trusted-proxy identity;

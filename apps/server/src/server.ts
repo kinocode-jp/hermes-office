@@ -88,9 +88,9 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     clientTracking: true,
   });
   const eventSocketPrincipals = new WeakMap<WebSocket, string>();
+  const eventSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
   const chatSocketPrincipals = new WeakMap<WebSocket, string>();
   const chatSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
-  const sessionBindings = new Map<string, string>();
   const chatDeviceLimiter = new ChatDeviceRateLimiter();
   publishAudit = (record) => {
     const publicRecord = {
@@ -101,7 +101,12 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       local: record.local,
     };
     const event = makeEvent(++sequence, "access.changed", { audit: publicRecord });
-    for (const client of websocketServer.clients) sendBoundedEvent(client, event, maxEventBytes);
+    for (const client of websocketServer.clients) {
+      const session = eventSocketSessions.get(client);
+      if (session !== undefined && auth.authorizeSession(session, "audit.read").allowed) {
+        sendBoundedEvent(client, event, maxEventBytes);
+      }
+    }
     if (record.operation === "auth.logout" && record.actorId !== null) {
       for (const client of websocketServer.clients) {
         if (eventSocketPrincipals.get(client) === record.actorId) client.close(1008, "Session revoked");
@@ -367,10 +372,6 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       let sessionId: string;
       try { sessionId = decodeURIComponent(historyMatch[1]!); }
       catch { writeError(response, 400, "bad_request", "Session identifier is malformed.", maxJsonBytes); return; }
-      if (!authenticatedSession.principal.local && sessionBindings.get(sessionId) !== authenticatedSession.principal.id) {
-        writeError(response, 404, "not_found", "Chat history was not found.", maxJsonBytes);
-        return;
-      }
       try {
         const history = await runtimeSource.chat().fetchHistory({
           sessionId,
@@ -389,7 +390,10 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       const snapshot = runtimeSource === undefined
         ? createDemoSnapshot()
         : await runtimeSource.snapshot().catch(() => createDemoSnapshot());
-      writeJson(response, 200, snapshot, maxJsonBytes);
+      writeJson(response, 200, {
+        ...snapshot,
+        capabilities: { ...snapshot.capabilities, access: auth.effectiveAccess(authenticatedSession) },
+      }, maxJsonBytes);
       return;
     }
 
@@ -435,6 +439,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     targetServer.handleUpgrade(request, socket, head, (websocket) => {
       (isChat ? chatSocketPrincipals : eventSocketPrincipals).set(websocket, authenticatedSession.principal.id);
       if (isChat) chatSocketSessions.set(websocket, authenticatedSession);
+      else eventSocketSessions.set(websocket, authenticatedSession);
       const expiryDelay = Math.max(1, Date.parse(authenticatedSession.expiresAt) - Date.now());
       const expiryTimer = setTimeout(() => websocket.close(1008, "Session expired"), expiryDelay);
       websocket.once("close", () => clearTimeout(expiryTimer));
@@ -463,7 +468,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     const officeSession = chatSocketSessions.get(client);
     if (officeSession === undefined) { client.close(1008, "Office session unavailable"); return; }
     handleOfficeChatConnection(client, {
-      auth, officeSession, runtimeSource, sessionBindings, maxJsonBytes, deviceLimiter: chatDeviceLimiter,
+      auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter,
     });
   });
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -112,6 +112,21 @@ test("one-time enrollment creates a revocable remote operator device without exp
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie },
     });
     assert.equal(audit.status, 403);
+    const snapshot = await fetch(`${base}/api/v1/snapshot`, {
+      headers: { Origin: REMOTE_ORIGIN, Cookie: cookie },
+    });
+    assert.equal(snapshot.status, 200);
+    const access = (await snapshot.json() as {
+      capabilities: { access: { deviceId: string; tier: string; exposure: string; authentication: string; allowedOperations: string[] } };
+    }).capabilities.access;
+    assert.deepEqual({ deviceId: access.deviceId, tier: access.tier, exposure: access.exposure, authentication: access.authentication }, {
+      deviceId: session.principal.id,
+      tier: "operator",
+      exposure: "tailnet",
+      authentication: "device-cookie",
+    });
+    assert.equal(access.allowedOperations.includes("chat.session.create"), true);
+    assert.equal(access.allowedOperations.includes("global-settings.update"), false);
 
     assert.equal((await fetch(`${base}/api/v1/auth/logout`, {
       method: "POST",
@@ -130,7 +145,25 @@ test("one-time enrollment creates a revocable remote operator device without exp
     const events = new WebSocket(`${base.replace("http:", "ws:")}/api/v1/events`, {
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie },
     });
+    const remoteRuntime = waitForTopic(events, "runtime.status");
     await once(events, "open");
+    await remoteRuntime;
+    const operatorAuditLeak = expectNoTopic(events, "access.changed", 100);
+    const localLogin = await fetch(`${base}/api/v1/auth/local`, { method: "POST", headers: { Origin: LOCAL_ORIGIN } });
+    assert.equal(localLogin.status, 200);
+    assert.equal(await operatorAuditLeak, true);
+
+    const localCookie = (localLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+    const ownerEvents = new WebSocket(`${base.replace("http:", "ws:")}/api/v1/events`, {
+      headers: { Origin: LOCAL_ORIGIN, Cookie: localCookie },
+    });
+    const ownerRuntime = waitForTopic(ownerEvents, "runtime.status");
+    await once(ownerEvents, "open");
+    await ownerRuntime;
+    const ownerAudit = waitForTopic(ownerEvents, "access.changed");
+    assert.equal((await fetch(`${base}/api/v1/auth/local`, { method: "POST", headers: { Origin: LOCAL_ORIGIN } })).status, 200);
+    await ownerAudit;
+    ownerEvents.close();
     const closed = once(events, "close");
 
     const logout = await fetch(`${base}/api/v1/auth/logout`, {
@@ -138,7 +171,9 @@ test("one-time enrollment creates a revocable remote operator device without exp
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-CSRF-Token": session.csrfToken },
     });
     assert.equal(logout.status, 200);
-    assert.match(logout.headers.get("set-cookie") ?? "", /Max-Age=0/);
+    const logoutCookies = logout.headers.get("set-cookie") ?? "";
+    assert.match(logoutCookies, /hermes_office_session=;[^,]*Path=\/;[^,]*Max-Age=0/i);
+    assert.match(logoutCookies, /hermes_office_device=;[^,]*Path=\/api\/v1\/auth\/device;[^,]*Max-Age=0/i);
     await closed;
     assert.equal((await fetch(`${base}/api/v1/audit`, { headers: { Origin: REMOTE_ORIGIN, Cookie: cookie } })).status, 401);
     assert.equal((await fetch(`${base}/api/v1/auth/logout`, {
@@ -150,7 +185,7 @@ test("one-time enrollment creates a revocable remote operator device without exp
       method: "POST",
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-Forwarded-Proto": "https" },
     });
-    assert.equal(renewal.status, 200);
+    assert.equal(renewal.status, 401);
 
     const nextLogin = await deviceLogin(base, REMOTE_TOKEN, "Owner phone");
     assert.equal(nextLogin.status, 409);
@@ -158,6 +193,34 @@ test("one-time enrollment creates a revocable remote operator device without exp
     await server.close();
   }
 });
+
+async function waitForTopic(websocket: WebSocket, topic: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`WebSocket topic ${topic} timed out.`)); }, 2_000);
+    const onMessage = (data: WebSocket.RawData): void => {
+      try {
+        const value = JSON.parse(data.toString()) as { topic?: unknown };
+        if (value.topic === topic) { cleanup(); resolve(); }
+      } catch { /* Ignore unrelated malformed test frames. */ }
+    };
+    const cleanup = (): void => { clearTimeout(timer); websocket.off("message", onMessage); };
+    websocket.on("message", onMessage);
+  });
+}
+
+async function expectNoTopic(websocket: WebSocket, topic: string, durationMs: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const onMessage = (data: WebSocket.RawData): void => {
+      try {
+        const value = JSON.parse(data.toString()) as { topic?: unknown };
+        if (value.topic === topic) { cleanup(); resolve(false); }
+      } catch { /* Ignore unrelated malformed test frames. */ }
+    };
+    const timer = setTimeout(() => { cleanup(); resolve(true); }, durationMs);
+    const cleanup = (): void => { clearTimeout(timer); websocket.off("message", onMessage); };
+    websocket.on("message", onMessage);
+  });
+}
 
 test("device authentication is disabled by default, bounded, strict, and rate limited", async () => {
   const disabledServer = createOfficeServer({ port: 0, allowedOrigins: [REMOTE_ORIGIN] });
@@ -206,7 +269,7 @@ test("device authentication is disabled by default, bounded, strict, and rate li
   }
 });
 
-test("consumed enrollment survives a server restart", async (t) => {
+test("device registry survives restart and token rotation replaces its generation", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRegistryPath = join(directory, "devices.json");
@@ -219,14 +282,48 @@ test("consumed enrollment survives a server restart", async (t) => {
   } as const;
   const first = createOfficeServer(options);
   const firstAddress = await first.listen();
-  assert.equal((await deviceLogin(`http://127.0.0.1:${firstAddress.port}`, REMOTE_TOKEN)).status, 200);
+  const firstLogin = await deviceLogin(`http://127.0.0.1:${firstAddress.port}`, REMOTE_TOKEN);
+  assert.equal(firstLogin.status, 200);
+  const firstCookies = responseCookies(firstLogin);
   await first.close();
 
   const second = createOfficeServer(options);
   const secondAddress = await second.listen();
+  const secondBase = `http://127.0.0.1:${secondAddress.port}`;
+  assert.equal((await deviceLogin(secondBase, REMOTE_TOKEN, "Second phone")).status, 409);
+  assert.equal((await fetch(`${secondBase}/api/v1/auth/device/renew`, {
+    method: "POST",
+    headers: { Origin: REMOTE_ORIGIN, Cookie: firstCookies, "X-Forwarded-Proto": "https" },
+  })).status, 200);
+  await second.close();
+
+  const rotatedToken = "replacement-enrollment-token-with-32-characters";
+  const rotated = createOfficeServer({ ...options, remoteToken: rotatedToken });
+  const rotatedAddress = await rotated.listen();
+  const rotatedBase = `http://127.0.0.1:${rotatedAddress.port}`;
   try {
-    assert.equal((await deviceLogin(`http://127.0.0.1:${secondAddress.port}`, REMOTE_TOKEN, "Second phone")).status, 409);
-  } finally {
-    await second.close();
-  }
+    assert.equal((await fetch(`${rotatedBase}/api/v1/auth/device/renew`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, Cookie: firstCookies, "X-Forwarded-Proto": "https" },
+    })).status, 401);
+    assert.equal((await deviceLogin(rotatedBase, rotatedToken, "Replacement phone")).status, 200);
+  } finally { await rotated.close(); }
+});
+
+test("malformed device registry fails closed without reopening enrollment", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-corrupt-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const deviceRegistryPath = join(directory, "devices.json");
+  await writeFile(deviceRegistryPath, "{not-json", { mode: 0o600 });
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath,
+  });
+  const address = await server.listen();
+  try {
+    assert.equal((await deviceLogin(`http://127.0.0.1:${address.port}`, REMOTE_TOKEN)).status, 409);
+  } finally { await server.close(); }
 });

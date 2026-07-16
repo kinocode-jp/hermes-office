@@ -136,21 +136,38 @@ npm start
 ```
 
 The first remote browser exchanges the enrollment token over the configured
-HTTPS proxy for a device credential and HttpOnly session cookie. The enrollment
-token cannot enroll a second device during that server process. Later login uses
-the device cookie; cookie-based writes also require a CSRF token. A remote
-device receives the `operator` tier, so it can chat and update Kanban but cannot
-change Profile/global settings or invoke local-only operations. A verified
-local owner can list/revoke enrolled devices, which also closes their active
-sockets.
+HTTPS proxy for a separate device credential and HttpOnly session cookie. The
+one-time enrollment state and device credential digest are persisted in
+`~/.hermes-office/devices.json` by default; plaintext credentials are not stored
+there. Restarting with the same enrollment token preserves that device, which
+can renew its short-lived session from its device cookie.
 
-Device records, enrollment-consumed state, sessions, and the audit buffer are
-currently in memory. A server restart therefore invalidates device credentials
-and allows the configured enrollment token to be used for a fresh enrollment.
-This is not OIDC, durable device administration, tenant isolation, or a claim
-that an untrusted remote user can safely share the host. Direct public-internet
-exposure is unsupported. Direct non-loopback binding requires an additional
-explicit setting, but is not the recommended deployment.
+A remote device receives the `operator` tier. It can use the shared
+single-operator chat/session namespace and update Kanban, but cannot change
+Profile/global settings or invoke step-up/local-only operations. Capabilities in
+the snapshot are calculated for the authenticated client. Approval replies are
+bound to the requesting device and chat socket; permanent approvals remain
+local-only. Audit records and audit events are owner-only.
+
+A verified local owner can list/revoke an enrolled device. Remote **Log out**
+also revokes that device, clears both cookies, and closes its active sockets. A
+revoked or lost device cannot be replaced with an already-consumed token. To
+recover, generate a different random enrollment token, update
+`HERMES_OFFICE_REMOTE_TOKEN`, and restart Office. The token-generation change
+invalidates every previously enrolled remote device and opens one replacement
+enrollment. Enroll the replacement browser using the new token. Token rotation
+is therefore a global remote-device reset, not a per-device operation.
+
+An unreadable or malformed registry fails closed: stored devices are not
+accepted and enrollment is not reopened. To recover as the local host owner,
+stop Office, move the damaged registry out of the way, configure a different
+random enrollment token, restart, and enroll again. Do not edit a live registry;
+this recovery intentionally invalidates every old remote-device credential.
+
+This is not OIDC, general multi-user device administration, tenant isolation,
+or a claim that an untrusted remote user can safely share the host. Direct
+public-internet and direct non-loopback exposure are unsupported; Office must
+remain on loopback behind the configured private HTTPS proxy.
 
 Read [`docs/SECURITY.md`](docs/SECURITY.md) for implemented controls, known
 limitations, and roadmap boundaries. Report suspected vulnerabilities through

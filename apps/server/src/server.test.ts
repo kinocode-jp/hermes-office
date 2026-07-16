@@ -49,6 +49,19 @@ test("snapshot is bounded, explicit, and does not expose secret-shaped fields", 
     const body = await response.text();
     assert.equal(/password|api[_-]?key|access[_-]?token|refresh[_-]?token/i.test(body), false);
     assert.equal(response.headers.get("cache-control"), "no-store");
+    const access = (JSON.parse(body) as { capabilities: { access: { deviceId: string; tier: string; exposure: string; authentication: string } } }).capabilities.access;
+    assert.deepEqual(access, {
+      deviceId: "local-browser",
+      tier: "owner",
+      exposure: "loopback",
+      authentication: "local-cookie",
+      allowedOperations: [
+        "state.read", "chat.session.create", "chat.session.archive", "chat.message.send", "chat.run.cancel",
+        "chat.approval.permanent", "kanban.card.create", "kanban.card.update", "kanban.card.comment",
+        "profile.create", "profile.update", "profile.delete", "memory.update", "skill.enable", "skill.install",
+        "global-settings.update", "runtime.start", "runtime.stop", "runtime.configure", "secret.write", "device.revoke", "audit.read",
+      ],
+    });
 
     const rejected = await fetch(`${base}/api/v1/snapshot`, {
       headers: { Origin: "https://attacker.example" },
@@ -74,6 +87,7 @@ test("launch-scoped desktop capability authenticates Tauri HTTP and WebSocket re
       headers: { Origin: origin, "X-Hermes-Office-Desktop-Capability": desktopCapability },
     });
     assert.equal(authenticated.status, 200);
+    assert.equal((await authenticated.json() as { capabilities: { access: { authentication: string } } }).capabilities.access.authentication, "desktop-capability");
 
     const wrongOrigin = await fetch(`${base}/api/v1/snapshot`, {
       headers: { Origin: "http://localhost:4173", "X-Hermes-Office-Desktop-Capability": desktopCapability },
