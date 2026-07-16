@@ -47,11 +47,13 @@ export class OfficeDeviceAuthRequiredError extends Error {
 }
 
 export class OfficeSessionUnavailableError extends Error {
-  constructor(message: string, readonly retryAfterMs = 0) {
+  constructor(message: string, readonly retryAfterMs = 0, readonly retryAutomatically = true) {
     super(message);
     this.name = "OfficeSessionUnavailableError";
   }
 }
+
+export const REMOTE_PROXY_CONFIGURATION_MESSAGE = "Office Serverのtrusted HTTPS proxyまたは転送ヘッダー設定を修正してから再接続してください。端末の再認証は不要です。";
 
 export class OfficeHttpError extends Error {
   constructor(readonly status: number) {
@@ -265,6 +267,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       if (error instanceof OfficeDeviceAuthRequiredError) callbacks.onAuthRequired?.(serverUrl);
       else {
         reportRecoveryUnavailable(errorMessage(error));
+        if (error instanceof OfficeSessionUnavailableError && !error.retryAutomatically) return;
         const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
         if (!scheduleEventReconnect(retryAfterMs)) reportRecoveryUnavailable("Office Serverへ再接続できませんでした。手動で再試行してください。");
       }
@@ -331,6 +334,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
         (error) => {
           if (stopped || connectionGeneration !== recoveryConnectionGeneration || error instanceof OfficeDeviceAuthRequiredError) return;
           reportRecoveryUnavailable(errorMessage(error));
+          if (error instanceof OfficeSessionUnavailableError && !error.retryAutomatically) return;
           const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
           if (!scheduleEventReconnect(retryAfterMs)) reportRecoveryUnavailable("Office Serverへ再接続できませんでした。手動で再試行してください。");
         },
@@ -515,7 +519,8 @@ async function bootstrapLocalSession(serverUrl: string): Promise<OfficeClientSes
       if (renewed) return issueOfficeClientSession(renewed.csrfToken);
       throw new OfficeSessionUnavailableError("Office session renewal response is incompatible.");
     }
-    if (renewal.status === 401 || renewal.status === 403) throw new OfficeDeviceAuthRequiredError();
+    if (renewal.status === 401) throw new OfficeDeviceAuthRequiredError();
+    if (renewal.status === 403) throw new OfficeSessionUnavailableError(REMOTE_PROXY_CONFIGURATION_MESSAGE, 0, false);
     throw new OfficeSessionUnavailableError(
       `Office device session renewal failed with HTTP ${renewal.status}.`,
       renewal.status === 429 ? retryAfterMilliseconds(renewal.headers.get("Retry-After")) : 0,

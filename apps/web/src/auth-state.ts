@@ -1,3 +1,5 @@
+import type { OfficeAccessState } from "./domain";
+
 export type OfficeClientLocation = {
   protocol: string;
   hostname: string;
@@ -17,6 +19,10 @@ export function isLocalOfficeClient(location: OfficeClientLocation): boolean {
     || location.hostname === "localhost"
     || location.hostname === "127.0.0.1"
     || location.hostname === "::1";
+}
+
+export function shouldShowDeviceEnrollmentForm(state: OfficeAccessState): boolean {
+  return state === "login-required" || state === "submitting";
 }
 
 export function classifyDeviceLoginFailure(status: number, retryAfterHeader: string | null): DeviceLoginFailure {

@@ -8,6 +8,7 @@ import {
   setDeviceLoginFailure,
   setDeviceLoginSubmitting
 } from "../store";
+import { shouldShowDeviceEnrollmentForm } from "../auth-state";
 
 export function DeviceLogin() {
   const access = officeAccess.value;
@@ -53,7 +54,7 @@ export function DeviceLogin() {
           {localizeRuntimeMessage(access.message)}
         </p>
 
-        {!checking && (
+        {shouldShowDeviceEnrollmentForm(access.state) && (
           <form class="device-login-form" autoComplete="off" onSubmit={submit}>
             <label>
               <span>{t("login.deviceName")}</span>

@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   classifyDeviceLoginFailure,
   isLocalOfficeClient,
-  normalizeDeviceName
+  normalizeDeviceName,
+  shouldShowDeviceEnrollmentForm,
 } from "../src/auth-state.ts";
 
 test("local and Tauri clients keep local bootstrap while remote origins require device auth", () => {
@@ -30,4 +31,12 @@ test("device names are normalized without accepting control characters", () => {
   assert.equal(normalizeDeviceName(""), undefined);
   assert.equal(normalizeDeviceName(`phone\nname`), undefined);
   assert.equal(normalizeDeviceName("x".repeat(65)), undefined);
+});
+
+test("temporary Office unavailability never asks for a new device enrollment token", () => {
+  assert.equal(shouldShowDeviceEnrollmentForm("login-required"), true);
+  assert.equal(shouldShowDeviceEnrollmentForm("submitting"), true);
+  assert.equal(shouldShowDeviceEnrollmentForm("unavailable"), false);
+  assert.equal(shouldShowDeviceEnrollmentForm("checking"), false);
+  assert.equal(shouldShowDeviceEnrollmentForm("authenticated"), false);
 });

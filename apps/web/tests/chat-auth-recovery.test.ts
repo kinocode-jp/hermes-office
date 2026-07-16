@@ -119,6 +119,39 @@ test("temporary recovery honors Retry-After and reconnects without requesting de
   api.stop();
 });
 
+test("trusted proxy configuration failure waits for manual retry instead of looping", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const states: string[] = [];
+  const delays: number[] = [];
+  let proxyHealthy = false;
+  const api = connectChatApi(callbacks(states), {
+    serverUrl: "https://office.example",
+    openWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return { socket: socket as unknown as WebSocket, authRevision: sockets.length };
+    },
+    recoverAuthentication: async () => {
+      if (!proxyHealthy) throw new OfficeSessionUnavailableError("trusted proxy configuration required", 0, false);
+    },
+    reconnectDelay: (attempt) => { delays.push(attempt); return 0; },
+  });
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  sockets[0]!.serverClose(1008, "Session expired");
+  await waitFor(() => states.at(-1) === "error");
+  await flush();
+  assert.equal(sockets.length, 1);
+  assert.deepEqual(delays, []);
+
+  proxyHealthy = true;
+  api.retry();
+  await waitFor(() => sockets.length === 2);
+  sockets[1]!.open();
+  assert.equal(states.at(-1), "ready");
+  api.stop();
+});
+
 test("manual Office retry supersedes a pending chat recovery without opening a duplicate socket", async () => {
   const sockets: FakeWebSocket[] = [];
   let finishRecovery!: () => void;

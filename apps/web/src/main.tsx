@@ -3,7 +3,7 @@ import { App } from "./app";
 import { initializeAppearance } from "./appearance";
 import { connectChatApi } from "./chat-api";
 import { createKanbanApi } from "./kanban-api";
-import { connectOfficeApi } from "./office-api";
+import { connectOfficeApi, REMOTE_PROXY_CONFIGURATION_MESSAGE } from "./office-api";
 import { isLocalOfficeClient } from "./auth-state";
 import { notifyAccessAuditChanged, shouldRefreshAccessAudit } from "./audit-api";
 import { initializeI18n } from "./i18n";
@@ -74,7 +74,9 @@ const officeApi = connectOfficeApi({
   onError(message, serverUrl) {
     setOfficeError(message, serverUrl);
     if (isLocalOfficeClient(location)) setOfficeAuthenticated(serverUrl);
-    else setOfficeAccessUnavailable(serverUrl, "Office Serverへ接続できませんでした。ネットワークを確認してください。");
+    else setOfficeAccessUnavailable(serverUrl, message === REMOTE_PROXY_CONFIGURATION_MESSAGE
+      ? message
+      : "Office Serverへ接続できませんでした。ネットワークを確認してください。");
   },
   onEvent(event) {
     if (event.topic === "kanban.changed" || event.topic === "resync.required") void refreshKanbanBoard();

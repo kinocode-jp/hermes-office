@@ -337,6 +337,7 @@ const englishRuntimeMessages: Record<string, string> = {
   "Office Serverへ再接続しています": "Reconnecting to Office Server",
   "Office Serverへ接続できませんでした。": "Unable to connect to Office Server.",
   "Office Serverへ接続できませんでした。ネットワークを確認してください。": "Unable to connect to Office Server. Check your network.",
+  "Office Serverのtrusted HTTPS proxyまたは転送ヘッダー設定を修正してから再接続してください。端末の再認証は不要です。": "Fix the Office Server trusted HTTPS proxy or forwarded-header configuration, then reconnect. This device does not need to be authenticated again.",
   "Office Serverへの接続がタイムアウトしました。": "The Office Server connection timed out.",
   "ローカルデモデータを表示中": "Showing local demo data",
   "この端末からOffice Serverへログインしてください": "Sign in to Office Server from this device",

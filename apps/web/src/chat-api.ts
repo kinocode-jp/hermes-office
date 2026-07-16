@@ -184,6 +184,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       (error) => {
         if (stopped || lifecycleGeneration !== recoveryGeneration) return;
         if (error instanceof OfficeDeviceAuthRequiredError) { haltTransport("端末の再認証が必要です。"); return; }
+        if (error instanceof OfficeSessionUnavailableError && !error.retryAutomatically) { haltTransport(errorText(error)); return; }
         const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
         if (!scheduleReconnect(retryAfterMs)) haltTransport("Chat Serverへ再接続できませんでした。手動で再接続してください。");
       },
@@ -256,6 +257,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (error instanceof OfficeDeviceAuthRequiredError) haltTransport("端末の再認証が必要です。");
       else {
         callbacks.onSocketState("disconnected", errorText(error));
+        if (error instanceof OfficeSessionUnavailableError && !error.retryAutomatically) { haltTransport(errorText(error)); return; }
         const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
         if (!scheduleReconnect(retryAfterMs)) haltTransport("Chat Serverへ再接続できませんでした。手動で再接続してください。");
       }
