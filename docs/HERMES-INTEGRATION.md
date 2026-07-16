@@ -85,6 +85,12 @@ that live id. A Browser disconnect explicitly closes only its owned live
 sessions; only Server shutdown or shared-upstream failure closes the Hermes
 connection and reaps all `close_on_disconnect` sessions.
 
+Each Office lease owns exactly one Hermes live id. A second, different live id
+returned while converging a durable compression alias is a duplicate `_sessions`
+entry, not another name for the existing pane. Office discards its early events
+and closes that duplicate directly; if the close cannot be confirmed, Office
+resets the shared generation and requires every affected pane to resynchronize.
+
 ## Live chat contract
 
 JSON-RPC frames are ordinary JSON objects (one frame per WebSocket message):

@@ -5,7 +5,7 @@ import { WebSocket } from "ws";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { HermesChatTransportError, type HermesChatEvent, type HermesChatRequest, type HermesChatResult } from "./hermes-chat.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
-import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
+import { ChatSessionCoordinator, type ChatSessionLeaseSnapshot, type ChatSessionOwner } from "./chat-session-coordinator.js";
 import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 import { OfficeAuth, type OfficeAuthSession } from "./office-auth.js";
 
@@ -69,14 +69,14 @@ test("shared hub preserves native targets, merges unseen aliases, and routes onl
   assert.equal(a.errorCode(21), -32006, "a duplicate rotated pane must converge without replacing the original pane route");
   assert.equal(a.closed, undefined);
   assert.equal(hermes.resumeRequests.length, resumeCount + 1, "the unseen alias is learned from the native response");
+  assert.equal(hermes.sessionCloseRequests.includes("live-main"), false, "a known live id must never be closed as a duplicate");
   a.rpc(26, "session.resume", { session_id: "rotated-live-tip", profile: "coder" });
   await settle();
   assert.equal(a.errorCode(26), -32006);
-  assert.equal(
-    a.events("live-main-rotated").at(-1)?.payload?.text,
-    "early rotated live event",
-    "a newly returned live alias must flush its pre-bind events to the established owner",
-  );
+  assert.equal(a.events("live-main-rotated").length, 0, "a duplicate live session must never feed the established pane");
+  assert.equal(hermes.sessionCloseRequests.includes("live-main-rotated"), true);
+  assert.equal(hermes.isLive("live-main-rotated"), false);
+  assert.equal(hermes.isLive("live-main"), true, "closing the duplicate must preserve the established live session");
   b.rpc(22, "session.resume", { session_id: "rotated-tip", profile: "coder" });
   await settle();
   assert.equal(b.errorCode(22), -32006);
@@ -109,6 +109,89 @@ test("shared hub preserves native targets, merges unseen aliases, and routes onl
   assert.equal(hermes.isLive("live-main"), true);
   hermes.emit({ type: "message.delta", sessionId: "live-main", payload: { text: "A survives B" } });
   assert.equal(a.events("live-main").at(-1)?.payload?.text, "A survives B");
+});
+
+test("a duplicate live close failure resets the shared generation and terminalizes existing owners", async () => {
+  const hermes = new NativeFakeHermes();
+  const coordinator = new ChatSessionCoordinator();
+  const runtime = hermes.runtime();
+  const hub = new ChatUpstreamHub(runtime, coordinator, 64 * 1024);
+  const dependencies = {
+    auth: new OfficeAuth(), officeSession: SESSION, runtimeSource: runtime,
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    sessionCoordinator: coordinator, chatHub: hub,
+  };
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+  client.rpc(27, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle();
+  hermes.makeParentReturnDuplicateLive();
+  hermes.failCloseFor.add("live-main-rotated");
+  client.rpc(28, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(6);
+
+  assert.equal(hermes.sessionCloseRequests.includes("live-main-rotated"), true);
+  assert.equal(client.events("live-main-rotated").length, 0);
+  assert.equal(client.events("live-main").at(-1)?.payload?.status, "resync_required");
+  assert.equal(client.closed?.code, 1013);
+  assert.equal(hermes.connectionCloseCount, 1);
+  assert.equal(hermes.isLive("live-main"), false, "generation reset must reap every close-on-disconnect live session");
+});
+
+test("coordinator converges durable aliases without ever adding a second live id", () => {
+  const owner = {};
+  const coordinator = new ChatSessionCoordinator();
+  const initial = coordinator.claimCreate(owner, "coder");
+  assert.equal(coordinator.bind(initial, { storedSessionId: "stored-old", liveSessionId: "live-old" }, true), "bound");
+
+  const sameLease = coordinator.claimResume(owner, "coder", "stored-old");
+  assert.ok(sameLease);
+  assert.equal(coordinator.bind(sameLease, { storedSessionId: "stored-new", liveSessionId: "live-new" }, false), "conflict");
+  assert.deepEqual(coordinator.ownedLiveSessionIds(owner), ["live-old"]);
+  assert.equal(coordinator.ownerForLive("live-new"), undefined);
+  assert.equal(coordinator.claimResume({}, "coder", "stored-new"), undefined, "the safe durable alias still converges");
+
+  const provisional = coordinator.claimResume(owner, "coder", "unseen-rotation");
+  assert.ok(provisional);
+  assert.equal(coordinator.bind(provisional, { storedSessionId: "stored-old", liveSessionId: "live-another" }, false), "conflict");
+  assert.deepEqual(coordinator.ownedLiveSessionIds(owner), ["live-old"]);
+  assert.equal(coordinator.ownerForLive("live-another"), undefined);
+  assert.equal(coordinator.claimResume({}, "coder", "unseen-rotation"), undefined);
+});
+
+test("lease-level close completes every legacy live id before releasing ownership", async () => {
+  const owner = {};
+  const coordinator = new LegacyMultiLiveCoordinator(owner, ["legacy-old", "legacy-new"]);
+  const hermes = new NativeFakeHermes();
+  hermes.seedLive("legacy-old");
+  const hub = new ChatUpstreamHub(hermes.runtime(), coordinator, 64 * 1024);
+  await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
+  hub.detach(owner);
+
+  const result = await hub.closeOwnedSession(owner, "legacy-old");
+  assert.equal(result.value.closed, true);
+  assert.deepEqual(hermes.sessionCloseRequests, ["legacy-old", "legacy-new"]);
+  assert.equal(coordinator.released, true, "true and already-absent false must both complete before lease release");
+  assert.equal(hermes.isLive("legacy-old"), false);
+});
+
+test("one failed legacy live close retains the whole lease after bounded retries", async () => {
+  const owner = {};
+  const coordinator = new LegacyMultiLiveCoordinator(owner, ["legacy-old", "legacy-new"]);
+  const hermes = new NativeFakeHermes();
+  hermes.seedLive("legacy-old");
+  hermes.seedLive("legacy-new");
+  hermes.failCloseFor.add("legacy-new");
+  const hub = new ChatUpstreamHub(hermes.runtime(), coordinator, 64 * 1024);
+  await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
+  hub.detach(owner);
+
+  assert.equal(await hub.closeOwnerSessions(owner), false);
+  assert.deepEqual(hermes.sessionCloseRequests, ["legacy-old", "legacy-new", "legacy-new"]);
+  assert.equal(coordinator.released, false);
+  assert.deepEqual(coordinator.ownedLiveSessionIds(owner), ["legacy-old", "legacy-new"]);
+  assert.equal(hermes.isLive("legacy-new"), true);
 });
 
 test("disconnect cleanup releases absent sessions but retains transport-failed close leases", async () => {
@@ -328,7 +411,6 @@ class NativeFakeHermes {
   readonly createRequests: Array<{ profile: string; closeOnDisconnect: boolean }> = [];
   readonly sessionCloseRequests: string[] = [];
   readonly failCloseFor = new Set<string>();
-  readonly alreadyAbsentOnClose = new Set<string>();
   connectCount = 0;
   connectionCloseCount = 0;
   readonly #events: Array<(event: HermesChatEvent) => void> = [];
@@ -337,6 +419,7 @@ class NativeFakeHermes {
   readonly #live = new Map<string, FakeLive>();
   #pending: { resolve(result: HermesChatResult): void } | undefined;
   #mainStored = "compression-tip";
+  #parentReturnsDuplicate = false;
   #createSequence = 0;
 
   runtime(): HermesRuntimeSource {
@@ -366,11 +449,12 @@ class NativeFakeHermes {
   emit(event: HermesChatEvent): void { this.#events.at(-1)?.(event); }
   eventEmitter(generation: number): (event: HermesChatEvent) => void { return this.#events[generation]!; }
   isLive(liveId: string): boolean { return this.#live.has(liveId); }
-  markAlreadyAbsent(liveId: string): void {
-    this.#live.delete(liveId);
-    this.alreadyAbsentOnClose.add(liveId);
+  markAlreadyAbsent(liveId: string): void { this.#live.delete(liveId); }
+  seedLive(liveSessionId: string, storedSessionId = liveSessionId): void {
+    this.#live.set(liveSessionId, { liveSessionId, storedSessionId });
   }
   rotateMainWithoutEvent(): void { this.#mainStored = "rotated-tip"; }
+  makeParentReturnDuplicateLive(): void { this.#parentReturnsDuplicate = true; }
   failGeneration(generation: number): void {
     this.#generationClosed[generation] = true;
     this.#live.clear();
@@ -390,8 +474,7 @@ class NativeFakeHermes {
       const liveId = String(request.params?.session_id);
       this.sessionCloseRequests.push(liveId);
       if (this.failCloseFor.has(liveId)) throw new HermesChatTransportError("timed_out", "fake close timeout");
-      const closed = !this.alreadyAbsentOnClose.has(liveId);
-      this.#live.delete(liveId);
+      const closed = this.#live.delete(liveId);
       return { method: request.method, value: { closed } };
     }
     if (request.method === "session.create") {
@@ -476,6 +559,9 @@ class NativeFakeHermes {
   }
 
   #nativeIdentity(requested: string): FakeLive {
+    if (requested === "parent" && this.#parentReturnsDuplicate) {
+      return { liveSessionId: "live-main-rotated", storedSessionId: this.#mainStored };
+    }
     if (["parent", "compression-tip", "rotated-tip", "profile-collision"].includes(requested)) {
       return { liveSessionId: "live-main", storedSessionId: this.#mainStored };
     }
@@ -491,6 +577,41 @@ class NativeFakeHermes {
     if (requested === "overflow") return { liveSessionId: "live-overflow", storedSessionId: requested };
     if (requested === "tombstone-revisit") return { liveSessionId: "live-tombstone-revisit", storedSessionId: requested };
     return { liveSessionId: `live-${requested}`, storedSessionId: requested };
+  }
+}
+
+class LegacyMultiLiveCoordinator extends ChatSessionCoordinator {
+  readonly #owner: ChatSessionOwner;
+  readonly #token = Symbol("legacy-multi-live");
+  readonly #liveIds: string[];
+  released = false;
+
+  constructor(owner: ChatSessionOwner, liveIds: string[]) {
+    super();
+    this.#owner = owner;
+    this.#liveIds = liveIds;
+  }
+
+  override ownedLiveSessionIds(owner: ChatSessionOwner): string[] {
+    return owner === this.#owner && !this.released ? [...this.#liveIds] : [];
+  }
+
+  override ownedSessionLeases(owner: ChatSessionOwner): ChatSessionLeaseSnapshot[] {
+    return owner === this.#owner && !this.released ? [this.#snapshot()] : [];
+  }
+
+  override leaseForSession(owner: ChatSessionOwner, sessionId: string): ChatSessionLeaseSnapshot | undefined {
+    return owner === this.#owner && !this.released && this.#liveIds.includes(sessionId) ? this.#snapshot() : undefined;
+  }
+
+  override releaseLease(owner: ChatSessionOwner, token: symbol): boolean {
+    if (owner !== this.#owner || token !== this.#token || this.released) return false;
+    this.released = true;
+    return true;
+  }
+
+  #snapshot(): ChatSessionLeaseSnapshot {
+    return { token: this.#token, owner: this.#owner, liveSessionIds: [...this.#liveIds] };
   }
 }
 

@@ -223,37 +223,35 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         ? await runtimeSource.globalInheritance?.().sessionCreateContext()
         : undefined;
       if (closed) { sessionCoordinator.releaseFailedClaim(sessionClaim); return; }
-      const result = await chatHub.request(
-        sessionOwner,
-        { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
-        seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
-      );
+      const result = frame.method === "session.close" && typeof frame.params?.session_id === "string"
+        ? await chatHub.closeOwnedSession(sessionOwner, frame.params.session_id)
+        : await chatHub.request(
+          sessionOwner,
+          { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
+          seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
+        );
       let boundLiveId: string | undefined;
       if (sessionClaim !== undefined) {
         const identities = sessionIdentities(result.value);
         const binding = sessionCoordinator.bind(sessionClaim, identities, frame.method === "session.create");
         if (binding !== "bound") {
           sessionCoordinator.releaseFailedClaim(sessionClaim);
-          if (!closed && binding === "conflict") sendSessionInUse(send, frame.id);
-          else if (!closed) sendRpcError(send, frame.id, -32000, "Hermes returned an invalid session identity.");
           if (binding === "conflict" && identities.liveSessionId !== undefined) {
-            // A native resume can reveal a new live alias for a lease that an
-            // existing pane already owns. The duplicate caller stays rejected,
-            // but any pre-response events belong to that established owner.
-            chatHub.flushLiveSession(identities.liveSessionId);
+            // A different live id is a separate Hermes session, not a pane
+            // alias. Never route its early events to the established pane.
+            chatHub.discardBufferedSession(identities.liveSessionId);
+            if (sessionCoordinator.ownerForLive(identities.liveSessionId) === undefined) {
+              try { await chatHub.closeDuplicateSession(identities.liveSessionId); }
+              catch { return; }
+            }
           } else if (identities.liveSessionId !== undefined) {
             chatHub.discardBufferedSession(identities.liveSessionId);
           }
+          if (!closed && binding === "conflict") sendSessionInUse(send, frame.id);
+          else if (!closed) sendRpcError(send, frame.id, -32000, "Hermes returned an invalid session identity.");
           return;
         }
         boundLiveId = identities.liveSessionId;
-      }
-      if (frame.method === "session.close" && typeof result.value.closed !== "boolean") {
-        throw new Error("Hermes returned an invalid close result.");
-      }
-      if (frame.method === "session.close" && typeof frame.params?.session_id === "string") {
-        sessionCoordinator.releaseSession(sessionOwner, frame.params.session_id);
-        chatHub.discardBufferedSession(frame.params.session_id);
       }
       const promoted = consumeClaim(claim, pendingApprovals, pendingClarifications);
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));

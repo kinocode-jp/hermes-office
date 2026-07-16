@@ -7,7 +7,11 @@ import type {
   HermesChatRequest,
   HermesChatResult,
 } from "./hermes-chat.js";
-import { ChatSessionCoordinator, type ChatSessionOwner } from "./chat-session-coordinator.js";
+import {
+  ChatSessionCoordinator,
+  type ChatSessionLeaseSnapshot,
+  type ChatSessionOwner,
+} from "./chat-session-coordinator.js";
 
 const MAX_UNBOUND_SESSIONS = 64;
 const MAX_UNBOUND_EVENTS = 128;
@@ -70,6 +74,13 @@ export class ChatUpstreamHub {
     if (!this.#subscribers.has(owner) && this.#coordinator.ownedLiveSessionIds(owner).length === 0) {
       throw new Error("Chat owner is detached.");
     }
+    return await this.#requestUnchecked(request, internal);
+  }
+
+  async #requestUnchecked(
+    request: HermesChatRequest,
+    internal?: HermesChatInternalRequestOptions,
+  ): Promise<HermesChatResult> {
     const connection = await this.#ensureConnection();
     const generation = this.#generation;
     try {
@@ -113,23 +124,70 @@ export class ChatUpstreamHub {
   }
 
   async closeOwnerSessions(owner: ChatSessionOwner): Promise<boolean> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const liveIds = this.#coordinator.ownedLiveSessionIds(owner);
-      if (liveIds.length === 0) return true;
-      for (const liveId of liveIds) {
+    for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
+      await this.#closeLease(owner, lease, 2);
+    }
+    return this.#coordinator.ownedSessionLeases(owner).length === 0;
+  }
+
+  async closeOwnedSession(owner: ChatSessionOwner, sessionId: string): Promise<HermesChatResult> {
+    const lease = this.#coordinator.leaseForSession(owner, sessionId);
+    if (lease === undefined) {
+      const result = await this.request(owner, { method: "session.close", params: { session_id: sessionId } });
+      if (typeof result.value.closed !== "boolean") throw new Error("Hermes returned an invalid close result.");
+      this.discardBufferedSession(sessionId);
+      return result;
+    }
+    const outcome = await this.#closeLease(owner, lease, 2, sessionId);
+    if (!outcome.completed) throw new Error("Hermes session close could not be confirmed.");
+    return outcome.targetResult ?? { method: "session.close", value: { closed: true } };
+  }
+
+  async closeDuplicateSession(liveSessionId: string): Promise<"closed" | "known"> {
+    this.discardBufferedSession(liveSessionId);
+    const closeToken = this.#coordinator.claimUnownedLiveClose(liveSessionId);
+    if (closeToken === undefined) return "known";
+    let generation = this.#generation;
+    try {
+      const connection = await this.#ensureConnection();
+      generation = this.#generation;
+      const result = await connection.request({ method: "session.close", params: { session_id: liveSessionId } });
+      if (generation !== this.#generation || connection !== this.#connection || typeof result.value.closed !== "boolean") {
+        throw new Error("Hermes duplicate session close was not authoritative.");
+      }
+      this.discardBufferedSession(liveSessionId);
+      return "closed";
+    } catch (error) {
+      if (generation === this.#generation) this.#resetGeneration(generation);
+      throw error;
+    } finally {
+      this.#coordinator.finishUnownedLiveClose(liveSessionId, closeToken);
+    }
+  }
+
+  async #closeLease(
+    owner: ChatSessionOwner,
+    lease: ChatSessionLeaseSnapshot,
+    maxAttempts: number,
+    targetSessionId?: string,
+  ): Promise<{ completed: boolean; targetResult?: HermesChatResult }> {
+    const remaining = new Set(lease.liveSessionIds);
+    let targetResult: HermesChatResult | undefined;
+    for (let attempt = 0; attempt < maxAttempts && remaining.size > 0; attempt += 1) {
+      for (const liveId of [...remaining]) {
         this.discardBufferedSession(liveId);
         try {
           const result = await this.request(owner, { method: "session.close", params: { session_id: liveId } });
-          if (typeof result.value.closed === "boolean") {
-            // Hermes returns false when the live session was already absent;
-            // both boolean results prove the idempotent close is complete.
-            this.#coordinator.releaseSession(owner, liveId);
-            this.discardBufferedSession(liveId);
-          }
-        } catch { /* Keep the lease fail-closed and retry once. */ }
+          if (typeof result.value.closed !== "boolean") continue;
+          remaining.delete(liveId);
+          if (liveId === targetSessionId) targetResult = result;
+        } catch { /* Keep the whole lease fail-closed and retry unresolved IDs. */ }
       }
     }
-    return this.#coordinator.ownedLiveSessionIds(owner).length === 0;
+    if (remaining.size > 0) return { completed: false };
+    this.#coordinator.releaseLease(owner, lease.token);
+    for (const liveId of lease.liveSessionIds) this.discardBufferedSession(liveId);
+    return { completed: true, ...(targetResult === undefined ? {} : { targetResult }) };
   }
 
   async close(): Promise<void> {
@@ -256,14 +314,14 @@ export class ChatUpstreamHub {
   #markDropped(liveSessionId: string): boolean {
     if (this.#droppedUnbound.has(liveSessionId)) return true;
     if (this.#droppedUnbound.size >= MAX_UNBOUND_SESSIONS * 2) {
-      this.#resetForBufferOverflow(this.#generation);
+      this.#resetGeneration(this.#generation);
       return false;
     }
     this.#droppedUnbound.add(liveSessionId);
     return true;
   }
 
-  #resetForBufferOverflow(generation: number): void {
+  #resetGeneration(generation: number): void {
     if (this.#stopping || generation !== this.#generation || this.#resetting !== undefined) return;
     const connection = this.#connection;
     const connecting = this.#connecting;
