@@ -6,6 +6,7 @@ import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInter
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
+import { canSubmitChatPrompt, mergeServerSessionStatus } from "./session-runtime";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
@@ -247,15 +248,12 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   const previousSessions = sessions.value;
   const snapshotSessions = snapshot.sessions.map((live): ChatSession => {
     const previous = findStoredSession(previousSessions, live);
-    const runtimeStatus = live.activity === "thinking" || live.activity === "using-tool"
-      ? "streaming" as const
-      : live.activity === "waiting-for-user" ? "waiting" as const : "ready" as const;
     return {
       ...(previous ?? { id: storedSessionClientId(live.profileId, live.id), messages: [] }),
       storedSessionId: live.id,
       profileId: live.profileId,
       title: live.title,
-      status: previous?.status === "streaming" ? previous.status : runtimeStatus,
+      status: mergeServerSessionStatus(previous, live.activity),
       connectionState: previous?.connectionState ?? "disconnected",
       historyState: previous?.historyState ?? "unloaded",
       remoteKind: "stored",
@@ -402,7 +400,7 @@ export function sendMessage(sessionId: string, body: string): void {
   const trimmed = body.trim();
   if (!trimmed) return;
   const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session || session.pendingInteraction || (session.remoteKind !== "demo" && session.connectionState !== "ready")) return;
+  if (!session || !canSubmitChatPrompt(session)) return;
   sessions.value = sessions.value.map((session) =>
     session.id === sessionId
       ? {

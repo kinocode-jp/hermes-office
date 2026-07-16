@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
 import { locale, localizeRuntimeMessage, t } from "../i18n";
 import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage } from "../store";
+import { canSubmitChatPrompt } from "../session-runtime";
 
 export function ChatPane({ session, profile }: { session: ChatSession; profile: Profile }) {
   const [draft, setDraft] = useState("");
@@ -9,7 +10,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const isActive = activeSessionId.value === session.id;
   const isLiveChat = session.remoteKind === "stored" || session.remoteKind === "draft";
   const isConnected = !isLiveChat || session.connectionState === "ready";
-  const canSend = isConnected && !session.pendingInteraction;
+  const canSend = canSubmitChatPrompt(session);
   const statusText = useMemo(() => {
     if (session.connectionState === "error") return t("chat.status.error");
     if (session.connectionState === "connecting") return t("chat.status.connecting");

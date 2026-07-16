@@ -2,6 +2,7 @@ import { signal } from "@preact/signals";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "./domain";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
+import { mergeServerSessionStatus } from "./session-runtime";
 import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
@@ -141,12 +142,12 @@ function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void 
     pageSeen.add(live.id);
     seen?.add(live.id);
     const index = existing.get(live.id);
-    if (index === undefined) {
+    const previous = index === undefined ? undefined : next[index];
+    if (index === undefined || previous === undefined) {
       existing.set(live.id, next.length);
       next.push({ id: live.id, name: live.name, role: "", status: activityToStatus(live.activity), color: palette[next.length % palette.length]!, sessions: live.activeSessionCount, taskCount: 0, memoryBytes: 0, memoryNote: "Hermes runtimeから読み取ったProfileです。", skills: [], inheritedSkills: [] });
       continue;
     }
-    const previous = next[index]!;
     next[index] = { ...previous, name: live.name, status: activityToStatus(live.activity), sessions: live.activeSessionCount };
   }
   profileList.value = next;
@@ -162,13 +163,13 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
     pageSeen.add(key);
     seen?.add(key);
     const index = existing.get(key);
-    const status = activityToSessionStatus(live.activity);
-    if (index === undefined) {
+    const previous = index === undefined ? undefined : next[index]!;
+    const status = mergeServerSessionStatus(previous, live.activity);
+    if (index === undefined || previous === undefined) {
       existing.set(key, next.length);
       next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
       continue;
     }
-    const previous = next[index]!;
     next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, status, remoteKind: "stored" };
   }
   sessions.value = next;
@@ -206,12 +207,6 @@ function isTerminal(page: OfficeInventoryPagination): boolean {
 
 function sessionKey(session: { profileId: string; id: string; storedSessionId?: string | undefined }): string {
   return `${session.profileId}\0${session.storedSessionId ?? session.id}`;
-}
-
-function activityToSessionStatus(activity: string): ChatSession["status"] {
-  if (activity === "thinking" || activity === "using-tool") return "streaming";
-  if (activity === "waiting-for-user") return "waiting";
-  return "ready";
 }
 
 function isInventoryPage(value: unknown, kind: InventoryKind): value is InventoryPage {

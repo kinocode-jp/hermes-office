@@ -3,25 +3,26 @@ import test from "node:test";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "../src/domain.ts";
 import { initializeInventory, loadMoreProfiles, loadMoreSessions } from "../src/inventory.ts";
 import { storedSessionClientId } from "../src/session-identity.ts";
-import { activeSessionId, applyOfficeSnapshot, openSessionIds, profileList, registerChatRuntime, selectedProfileId, sessions } from "../src/store.ts";
+import { activeSessionId, applyChatGatewayEvent, applyOfficeSnapshot, interruptSession, openSessionIds, profileList, registerChatRuntime, selectedProfileId, sessions } from "../src/store.ts";
 
 test("a complete session generation upserts extras, prunes unseen rows, and releases an open target once", async () => {
   const browser = installBrowserGlobals();
   const serverUrl = "http://127.0.0.1:55201";
-  const pages = [sessionPage([stored("p0", "keep", "Updated", "using-tool")], terminal(1))];
+  const pages = [sessionPage([stored("p0", "keep", "Updated", "idle")], terminal(1))];
   globalThis.fetch = inventoryFetch(pages);
   const keepId = storedSessionClientId("p0", "keep");
   const deleteId = storedSessionClientId("p0", "delete");
   const released: string[] = [];
+  const interrupted: string[] = [];
   profileList.value = [profile("p0")];
   sessions.value = [
-    storedClient("p0", "keep", "Old", { connectionState: "ready", historyState: "loaded", messages: [{ id: "kept", from: "agent", body: "local", at: "00:00" }] }),
+    storedClient("p0", "keep", "Old", { status: "streaming", streamingMessageId: "kept", connectionState: "ready", historyState: "loaded", messages: [{ id: "kept", from: "agent", body: "local", at: "00:00", status: "streaming" }] }),
     storedClient("p0", "delete", "Delete", { connectionState: "ready" }),
     { id: "draft", profileId: "p0", title: "Draft", status: "ready", messages: [], remoteKind: "draft", connectionState: "ready", historyState: "unloaded" }
   ];
   openSessionIds.value = [keepId, deleteId];
   activeSessionId.value = deleteId;
-  registerRuntime(released);
+  registerRuntime(released, interrupted);
 
   try {
     const firstRows = Array.from({ length: 100 }, (_, index) => stored("p0", `first-${index}`, `First ${index}`));
@@ -42,6 +43,10 @@ test("a complete session generation upserts extras, prunes unseen rows, and rele
     assert.deepEqual(openSessionIds.value, [keepId]);
     assert.equal(activeSessionId.value, keepId);
     assert.equal(profileList.value[0]?.sessions, 102);
+    interruptSession(keepId);
+    assert.deepEqual(interrupted, [keepId]);
+    assert.equal(sessions.value.find((session) => session.id === keepId)?.status, "ready");
+    assert.equal(sessions.value.find((session) => session.id === keepId)?.messages[0]?.status, "cancelled");
 
     const reuse = snapshot({ sessions: firstRows, sessionPage: continuing(100, "reuse-next"), sequence: 2 });
     applyOfficeSnapshot(reuse, serverUrl);
@@ -57,6 +62,23 @@ test("a complete session generation upserts extras, prunes unseen rows, and rele
   } finally {
     browser.restore();
   }
+});
+
+test("initial snapshots use the same non-regressing runtime status merge and accept completion", () => {
+  const serverUrl = "http://127.0.0.1:55206";
+  const clientId = storedSessionClientId("p0", "runtime");
+  profileList.value = [profile("p0")];
+  sessions.value = [storedClient("p0", "runtime", "Runtime", {
+    status: "streaming", streamingMessageId: "agent-live", connectionState: "ready",
+    messages: [{ id: "agent-live", from: "agent", body: "work", at: "00:00", status: "streaming" }]
+  })];
+
+  applyOfficeSnapshot(snapshot({ sessions: [stored("p0", "runtime", "Runtime", "idle")] }), serverUrl);
+  assert.equal(sessions.value[0]?.status, "streaming");
+  applyChatGatewayEvent(clientId, { type: "message.complete", liveSessionId: "live", payload: { messageId: "agent-live", text: "done" } });
+  applyOfficeSnapshot(snapshot({ sessions: [stored("p0", "runtime", "Runtime", "idle")], sequence: 2 }), serverUrl);
+  assert.equal(sessions.value[0]?.status, "ready");
+  assert.equal(sessions.value[0]?.messages[0]?.status, "complete");
 });
 
 test("profile pages upsert server fields, preserve UI fields, and prune only at a complete terminal", async () => {
@@ -253,11 +275,11 @@ function inventoryFetch(pages: unknown[]): typeof fetch {
   };
 }
 
-function registerRuntime(released: string[]): void {
+function registerRuntime(released: string[], interrupted: string[] = []): void {
   registerChatRuntime({
     ensureSession() {},
     releaseSession(sessionId) { released.push(sessionId); },
-    submitPrompt() {}, interrupt() {},
+    submitPrompt() {}, interrupt(sessionId) { interrupted.push(sessionId); },
     async respondClarify() {}, async respondApproval() {}
   });
 }
