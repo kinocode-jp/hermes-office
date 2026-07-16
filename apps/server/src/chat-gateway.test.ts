@@ -262,7 +262,6 @@ test("a same-session approval arriving during a claim survives both success and 
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["once"], allowPermanent: false } });
   client.rpc(40, "approval.respond", { session_id: "s-successor", choice: "once" });
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["deny"], allowPermanent: false } });
-  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["deny"], allowPermanent: false } });
   publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["later"], allowPermanent: false } });
   const completedApprovalId = client.approvalId("s-successor");
   assert.equal(client.frames().filter((frame) => (frame.params as { type?: string } | undefined)?.type === "approval.request").length, 1);
@@ -294,6 +293,85 @@ test("a same-session approval arriving during a claim survives both success and 
   assert.equal(requests.filter((request) => request.method === "approval.respond").length, 7);
   assert.equal(requests.some((request) => "approval_id" in (request.params ?? {})), false);
   assert.equal(client.hasError(47), false);
+});
+
+test("identical approvals remain independent FIFO entries", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  const requests: HermesChatRequest[] = [];
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publish = onEvent; return connection(async (request) => { requests.push(request); return { method: request.method, value: { status: "ok" } }; }); }),
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+  });
+  await flush();
+  const identical: HermesChatEvent = { type: "approval.request", sessionId: "s-identical", payload: { command: "same", choices: ["once"], allowPermanent: false } };
+  publish(identical); publish(identical); publish(identical);
+  const ids: string[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    ids.push(client.approvalId("s-identical"));
+    client.rpc(60 + index, "approval.respond", { session_id: "s-identical", choice: "once" });
+    await flush();
+  }
+  assert.equal(new Set(ids).size, 3);
+  assert.equal(requests.length, 3);
+});
+
+test("hidden approvals receive a full TTL only when promoted", async () => {
+  let now = 0;
+  let publish!: (event: HermesChatEvent) => void;
+  const first = deferred<void>();
+  let count = 0;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publish = onEvent; return connection(async (request) => { count += 1; if (count === 1) await first.promise; return { method: request.method, value: { status: "ok" } }; }); }),
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    now: () => now, limits: { approvalTtlMs: 50, socketRateCapacity: 100 },
+  });
+  await flush();
+  for (const choice of ["once", "deny", "later"]) publish({ type: "approval.request", sessionId: "s-long", payload: { choices: [choice], allowPermanent: false } });
+  client.rpc(70, "approval.respond", { session_id: "s-long", choice: "once" });
+  now = 1_000;
+  first.resolve(undefined);
+  await flush();
+  now = 1_049;
+  client.rpc(71, "approval.respond", { session_id: "s-long", choice: "deny" });
+  await flush();
+  now = 1_098;
+  client.rpc(72, "approval.respond", { session_id: "s-long", choice: "later" });
+  await flush();
+  assert.equal(count, 3);
+});
+
+test("active expiry promotes the next approval with a full TTL and rejects the old ID", async () => {
+  let now = 0;
+  let publish!: (event: HermesChatEvent) => void;
+  const requests: HermesChatRequest[] = [];
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publish = onEvent; return connection(async (request) => { requests.push(request); return { method: request.method, value: { status: "ok" } }; }); }),
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    now: () => now, limits: { approvalTtlMs: 50, socketRateCapacity: 100 },
+  });
+  await flush();
+  publish({ type: "approval.request", sessionId: "s-expire-next", payload: { choices: ["once"], allowPermanent: false } });
+  publish({ type: "approval.request", sessionId: "s-expire-next", payload: { choices: ["deny"], allowPermanent: false } });
+  const oldId = client.approvalId("s-expire-next");
+  now = 51;
+  client.rpc(80, "approval.respond", { session_id: "s-expire-next", approval_id: oldId, choice: "once" });
+  await flush();
+  const nextId = client.approvalId("s-expire-next");
+  assert.notEqual(nextId, oldId);
+  client.rpc(81, "approval.respond", { session_id: "s-expire-next", approval_id: oldId, choice: "once" });
+  await flush();
+  now = 100;
+  client.rpc(82, "approval.respond", { session_id: "s-expire-next", approval_id: nextId, choice: "deny" });
+  await flush();
+  assert.equal(client.errorCode(80), -32004);
+  assert.equal(client.errorCode(81), -32004);
+  assert.equal(requests.length, 1);
 });
 
 test("approval queue overflow is explicit and closes the socket", async () => {

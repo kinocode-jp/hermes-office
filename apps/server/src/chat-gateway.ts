@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { WebSocket } from "ws";
 import type { Operation } from "@hermes-office/protocol";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
@@ -51,11 +51,14 @@ interface PendingResponse {
   expiresAt: number;
   state: PendingResponseState;
 }
-interface PendingApproval extends PendingResponse {
+interface PendingApproval {
   id: string;
   choices: ReadonlySet<string>;
   event: HermesChatEvent;
-  fingerprint: string;
+  state: PendingResponseState;
+  createdAt?: number;
+  createdOrder?: number;
+  expiresAt?: number;
 }
 type PendingClaim =
   | { kind: "approval"; key: string; entry: PendingApproval }
@@ -167,10 +170,10 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         const approvalId = typeof frame.params?.approval_id === "string" ? frame.params.approval_id : "";
         const queue = targetId === undefined ? undefined : pendingApprovals.get(targetId);
         const pending = queue?.[0];
-        if (pending === undefined || pending.id !== approvalId || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
-          if (targetId !== undefined && pending?.id === approvalId && pending.expiresAt <= receivedAt) {
+        if (pending === undefined || pending.createdAt === undefined || pending.createdOrder === undefined || pending.expiresAt === undefined || pending.id !== approvalId || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
+          if (targetId !== undefined && pending?.id === approvalId && pending.expiresAt !== undefined && pending.expiresAt <= receivedAt) {
             const promoted = expireApproval(pendingApprovals, targetId, pending);
-            if (promoted !== undefined) sendWire(serializeOfficeChatEvent(promoted, maxJsonBytes));
+            if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
           }
           sendRpcError(send, frame.id, -32004, "Pending approval was not found or has expired.");
           return;
@@ -197,11 +200,11 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
       );
       const promoted = consumeClaim(claim, pendingApprovals, pendingClarifications);
-      if (promoted !== undefined) sendWire(serializeOfficeChatEvent(promoted, maxJsonBytes));
+      if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       send({ jsonrpc: "2.0", id: frame.id, result: result.value });
     } catch {
       const promoted = restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
-      if (promoted !== undefined) sendWire(serializeOfficeChatEvent(promoted, maxJsonBytes));
+      if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       sendRpcError(send, frame.id, -32000, "Hermes request failed.");
     }
   };
@@ -243,11 +246,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       const choices = Array.isArray(event.payload.choices)
         ? event.payload.choices.filter((choice): choice is string => typeof choice === "string")
         : [];
-      const createdAt = now();
-      const createdOrder = ++chronology;
-      const fingerprint = approvalFingerprint(event);
       const queue = pendingApprovals.get(event.sessionId) ?? [];
-      if (queue.some((approval) => approval.fingerprint === fingerprint)) return;
       if ((queue.length === 0 && pendingApprovals.size >= MAX_APPROVAL_SESSIONS) || queue.length >= limits.maxApprovalQueue) {
         sendWire(serializeOfficeChatEvent({ type: "error", sessionId: event.sessionId, payload: { status: "resync_required", message: "Approval queue overflow. Reload the session." } }, maxJsonBytes));
         client.close(1013, "Approval queue overflow; reload history");
@@ -255,12 +254,11 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       }
       const approval: PendingApproval = {
         id: `approval_${randomBytes(16).toString("base64url")}`,
-        choices: new Set(choices), event, fingerprint, createdAt, createdOrder,
-        expiresAt: createdAt + limits.approvalTtlMs, state: "pending",
+        choices: new Set(choices), event, state: "pending",
       };
       queue.push(approval);
       pendingApprovals.set(event.sessionId, queue);
-      if (queue.length === 1) sendWire(serializeOfficeChatEvent(officeApprovalEvent(approval), maxJsonBytes));
+      if (queue.length === 1) sendWire(serializeOfficeChatEvent(activateApproval(approval, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       return;
     }
     if (event.type === "clarify.request" && typeof event.payload.requestId === "string") {
@@ -311,7 +309,7 @@ function consumeClaim(
   claim: PendingClaim | undefined,
   approvals: Map<string, PendingApproval[]>,
   clarifications: ReadonlyMap<string, PendingResponse>,
-): HermesChatEvent | undefined {
+): PendingApproval | undefined {
   if (claim === undefined) return undefined;
   if (claim.kind === "approval") {
     const queue = approvals.get(claim.key);
@@ -319,7 +317,7 @@ function consumeClaim(
     claim.entry.state = "consumed";
     queue.shift();
     if (queue.length === 0) { approvals.delete(claim.key); return undefined; }
-    return officeApprovalEvent(queue[0]!);
+    return queue[0]!;
   }
   const current = clarifications.get(claim.key);
   if (current === claim.entry && claim.entry.state === "claimed") claim.entry.state = "consumed";
@@ -332,12 +330,12 @@ function restoreClaim(
   clarifications: ReadonlyMap<string, PendingResponse>,
   closed: boolean,
   currentTime: number,
-): HermesChatEvent | undefined {
+): PendingApproval | undefined {
   if (claim === undefined || closed) return undefined;
   if (claim.kind === "approval") {
     const queue = approvals.get(claim.key);
     if (queue?.[0] !== claim.entry || claim.entry.state !== "claimed") return undefined;
-    if (claim.entry.expiresAt > currentTime) { claim.entry.state = "pending"; return undefined; }
+    if (claim.entry.expiresAt !== undefined && claim.entry.expiresAt > currentTime) { claim.entry.state = "pending"; return undefined; }
     return expireApproval(approvals, claim.key, claim.entry);
   }
   const current = clarifications.get(claim.key);
@@ -345,12 +343,12 @@ function restoreClaim(
   return undefined;
 }
 
-function expireApproval(approvals: Map<string, PendingApproval[]>, key: string, entry: PendingApproval): HermesChatEvent | undefined {
+function expireApproval(approvals: Map<string, PendingApproval[]>, key: string, entry: PendingApproval): PendingApproval | undefined {
   const queue = approvals.get(key);
   if (queue?.[0] !== entry) return undefined;
   queue.shift();
   if (queue.length === 0) { approvals.delete(key); return undefined; }
-  return officeApprovalEvent(queue[0]!);
+  return queue[0]!;
 }
 
 function upstreamRequestParams(method: HermesChatMethod, params: Record<string, unknown> | undefined): { params?: Record<string, unknown> } {
@@ -366,8 +364,12 @@ function officeApprovalEvent(approval: PendingApproval): HermesChatEvent {
   return { ...approval.event, payload: { ...approval.event.payload, approvalId: approval.id } };
 }
 
-function approvalFingerprint(event: HermesChatEvent): string {
-  return createHash("sha256").update(JSON.stringify(event) ?? "").digest("base64url");
+function activateApproval(approval: PendingApproval, createdAt: number, createdOrder: number, ttlMs: number): HermesChatEvent {
+  approval.createdAt = createdAt;
+  approval.createdOrder = createdOrder;
+  approval.expiresAt = createdAt + ttlMs;
+  approval.state = "pending";
+  return officeApprovalEvent(approval);
 }
 
 function trimOldest<T>(collection: Map<string, T> | Set<string>, maximum: number): void {
