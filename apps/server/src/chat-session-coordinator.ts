@@ -26,7 +26,7 @@ type Lease = {
 };
 
 export class ChatSessionCoordinator {
-  readonly #durable = new Map<string, Lease>();
+  readonly #durable = new Map<string, Map<string, Lease>>();
   readonly #live = new Map<string, Lease>();
   readonly #leases = new Map<symbol, Lease>();
   readonly #owners = new Map<ChatSessionOwner, Set<symbol>>();
@@ -38,7 +38,7 @@ export class ChatSessionCoordinator {
 
   claimResume(owner: ChatSessionOwner, profile: string | undefined, requestedId: string): ChatSessionClaim | undefined {
     const normalized = normalizedProfile(profile);
-    const existing = this.#durable.get(requestedId);
+    const existing = this.#durableLease(normalized, requestedId);
     if (existing !== undefined) {
       return existing.owner === owner && existing.profile === normalized
         ? this.#claim(existing)
@@ -60,7 +60,7 @@ export class ChatSessionCoordinator {
     if (identities.storedSessionId !== undefined) aliases.add(identities.storedSessionId);
     const conflicts = new Set<Lease>();
     for (const alias of aliases) {
-      const current = this.#durable.get(alias);
+      const current = this.#durableLease(lease.profile, alias);
       if (current !== undefined && current !== lease) conflicts.add(current);
     }
     const liveLease = this.#live.get(identities.liveSessionId);
@@ -89,10 +89,10 @@ export class ChatSessionCoordinator {
     if (conflicts.size === 1 && existing !== undefined && !lease.bound) {
       // The native Hermes resolver may return a compression-rotated identity
       // that Office has never observed. A shared upstream makes its transport
-      // rebind harmless, so consolidate only durable identity after the
-      // authoritative response. A different live id remains a distinct
-      // duplicate session for the Hub to close.
-      this.#bindDurableAliases(existing, aliases);
+      // rebind harmless, so consolidate durable identity only inside the same
+      // Profile after the authoritative response. A different live id remains
+      // a distinct duplicate session for the Hub to close.
+      if (existing.profile === lease.profile) this.#bindDurableAliases(existing, aliases);
       this.#releaseLease(lease);
       // Even same-owner/profile rotation aliases converge on the existing
       // lease but reject the duplicate resume. Otherwise the Web live-to-pane
@@ -118,7 +118,7 @@ export class ChatSessionCoordinator {
   }
 
   isOwnedByAnother(owner: ChatSessionOwner, sessionId: string): boolean {
-    const lease = this.#live.get(sessionId) ?? this.#durable.get(sessionId);
+    const lease = this.#live.get(sessionId);
     return lease !== undefined && lease.owner !== owner;
   }
 
@@ -140,7 +140,7 @@ export class ChatSessionCoordinator {
   }
 
   leaseForSession(owner: ChatSessionOwner, sessionId: string): ChatSessionLeaseSnapshot | undefined {
-    const lease = this.#live.get(sessionId) ?? this.#durable.get(sessionId);
+    const lease = this.#live.get(sessionId);
     return lease?.owner === owner ? this.#snapshot(lease) : undefined;
   }
 
@@ -210,10 +210,19 @@ export class ChatSessionCoordinator {
   }
 
   #bindDurableAliases(lease: Lease, aliases: Iterable<string>): void {
+    let profileAliases = this.#durable.get(lease.profile);
+    if (profileAliases === undefined) {
+      profileAliases = new Map();
+      this.#durable.set(lease.profile, profileAliases);
+    }
     for (const alias of aliases) {
       lease.durableIds.add(alias);
-      this.#durable.set(alias, lease);
+      profileAliases.set(alias, lease);
     }
+  }
+
+  #durableLease(profile: string, durableId: string): Lease | undefined {
+    return this.#durable.get(profile)?.get(durableId);
   }
 
   #bindLiveAlias(lease: Lease, liveId: string): void {
@@ -233,7 +242,11 @@ export class ChatSessionCoordinator {
 
   #releaseLease(lease: Lease | undefined): void {
     if (lease === undefined || !this.#leases.delete(lease.token)) return;
-    for (const durableId of lease.durableIds) if (this.#durable.get(durableId) === lease) this.#durable.delete(durableId);
+    const profileAliases = this.#durable.get(lease.profile);
+    for (const durableId of lease.durableIds) {
+      if (profileAliases?.get(durableId) === lease) profileAliases.delete(durableId);
+    }
+    if (profileAliases?.size === 0) this.#durable.delete(lease.profile);
     for (const liveId of lease.liveIds) if (this.#live.get(liveId) === lease) this.#live.delete(liveId);
     const owned = this.#owners.get(lease.owner);
     owned?.delete(lease.token);

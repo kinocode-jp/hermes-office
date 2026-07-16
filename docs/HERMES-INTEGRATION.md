@@ -69,7 +69,8 @@ UI code must preserve two session identities:
   process-local gateway handle used by `prompt.submit`, `session.interrupt`, and
   approval responses.
 - `stored_session_id` (or `resumed`) is the durable `state.db` conversation id
-  used by REST history, rename, archive, export, and later resume.
+  used by REST history, rename, archive, export, and later resume. It is unique
+  only within its Profile, so Office indexes it as `(profile, stored_session_id)`.
 
 Treating those ids as interchangeable creates reconnect and compression bugs.
 Hermes can rotate a stored id during compression. Office forwards the exact
@@ -90,6 +91,10 @@ returned while converging a durable compression alias is a duplicate `_sessions`
 entry, not another name for the existing pane. Office discards its early events
 and closes that duplicate directly; if the close cannot be confirmed, Office
 resets the shared generation and requires every affected pane to resynchronize.
+Live ids are process-global and are the only accepted targets for non-resume
+chat RPCs, including prompt, interrupt, and explicit close. A raw durable id is
+never resolved implicitly for those operations because equal durable ids may
+belong to several Profiles.
 
 ## Live chat contract
 

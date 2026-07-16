@@ -90,7 +90,7 @@ test("unknown live and durable ids never reach explicit upstream close", async (
   assert.deepEqual(hermes.sessionCloseRequests, []);
 });
 
-test("an owned durable alias closes its authoritative live session", async () => {
+test("an owned durable alias is not accepted by the live-only explicit close contract", async () => {
   const { hermes, coordinator, dependencies } = setup();
   const client = new FakeWebSocket();
   handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
@@ -100,10 +100,105 @@ test("an owned durable alias closes its authoritative live session", async () =>
   client.rpc(10, "session.close", { session_id: "parent" });
   await settle(4);
 
-  assert.equal(client.errorCode(10), undefined);
-  assert.deepEqual(hermes.sessionCloseRequests, ["live-old"]);
-  assert.equal(hermes.isLive("live-old"), false);
-  assert.equal(coordinator.ownerForLive("live-old"), undefined);
+  assert.equal(client.errorCode(10), -32000);
+  assert.deepEqual(hermes.sessionCloseRequests, []);
+  assert.equal(hermes.isLive("live-old"), true);
+  assert.ok(coordinator.ownerForLive("live-old"));
+});
+
+test("one socket independently routes equal durable ids from two profiles", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, dependencies);
+  await settle();
+  client.rpc(50, "session.resume", { session_id: "shared", profile: "alpha" });
+  client.rpc(51, "session.resume", { session_id: "shared", profile: "beta" });
+  await settle(4);
+
+  assert.equal(client.errorCode(50), undefined);
+  assert.equal(client.errorCode(51), undefined);
+  assert.equal(coordinator.ownerForLive("live-alpha"), coordinator.ownerForLive("live-beta"));
+  assert.ok(coordinator.ownerForLive("live-alpha"));
+
+  hermes.emit("live-alpha", "alpha-event");
+  hermes.emit("live-beta", "beta-event");
+  await settle();
+  assert.equal(client.events("live-alpha").at(-1)?.payload?.text, "alpha-event");
+  assert.equal(client.events("live-beta").at(-1)?.payload?.text, "beta-event");
+
+  client.rpc(52, "prompt.submit", { session_id: "live-alpha", text: "alpha-prompt" });
+  client.rpc(53, "session.interrupt", { session_id: "live-beta" });
+  await settle(4);
+  assert.deepEqual(hermes.targetedRequests, [
+    { method: "prompt.submit", sessionId: "live-alpha" },
+    { method: "session.interrupt", sessionId: "live-beta" },
+  ]);
+
+  client.rpc(54, "session.close", { session_id: "live-alpha" });
+  await settle(4);
+  assert.deepEqual(hermes.sessionCloseRequests, ["live-alpha"]);
+  assert.equal(coordinator.ownerForLive("live-alpha"), undefined);
+  assert.ok(coordinator.ownerForLive("live-beta"));
+  assert.equal(hermes.isLive("live-beta"), true);
+
+  const betaEvents = client.events("live-beta").length;
+  hermes.emit("live-alpha", "closed-alpha-event");
+  hermes.emit("live-beta", "beta-continues");
+  await settle();
+  assert.equal(client.events("live-alpha").some((event) => event.payload?.text === "closed-alpha-event"), false);
+  assert.equal(client.events("live-beta").length, betaEvents + 1);
+  assert.equal(client.events("live-beta").at(-1)?.payload?.text, "beta-continues");
+  client.rpc(57, "prompt.submit", { session_id: "live-beta", text: "still-running" });
+  await settle();
+  assert.deepEqual(hermes.targetedRequests.at(-1), { method: "prompt.submit", sessionId: "live-beta" });
+});
+
+test("two sockets independently own equal durable ids from different profiles", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const alpha = new FakeWebSocket();
+  const beta = new FakeWebSocket();
+  handleOfficeChatConnection(alpha as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(beta as unknown as WebSocket, dependencies);
+  await settle();
+  alpha.rpc(55, "session.resume", { session_id: "shared", profile: "alpha" });
+  beta.rpc(56, "session.resume", { session_id: "shared", profile: "beta" });
+  await settle(4);
+
+  assert.equal(alpha.errorCode(55), undefined);
+  assert.equal(beta.errorCode(56), undefined);
+  const alphaOwner = coordinator.ownerForLive("live-alpha");
+  const betaOwner = coordinator.ownerForLive("live-beta");
+  assert.ok(alphaOwner);
+  assert.ok(betaOwner);
+  assert.notEqual(alphaOwner, betaOwner);
+
+  hermes.emit("live-alpha", "only-alpha");
+  hermes.emit("live-beta", "only-beta");
+  await settle();
+  assert.equal(alpha.events("live-alpha").at(-1)?.payload?.text, "only-alpha");
+  assert.equal(alpha.events("live-beta").length, 0);
+  assert.equal(beta.events("live-beta").at(-1)?.payload?.text, "only-beta");
+  assert.equal(beta.events("live-alpha").length, 0);
+});
+
+test("durable aliases stay profile-scoped when a live id collides globally", () => {
+  const coordinator = new ChatSessionCoordinator();
+  const alphaOwner = {};
+  const betaOwner = {};
+  const alpha = coordinator.claimResume(alphaOwner, "alpha", "shared");
+  const beta = coordinator.claimResume(betaOwner, "beta", "shared");
+  assert.ok(alpha);
+  assert.ok(beta);
+  assert.equal(coordinator.bind(alpha, { storedSessionId: "alpha-tip", liveSessionId: "live-shared" }, false), "bound");
+  assert.equal(coordinator.bind(beta, { storedSessionId: "beta-tip", liveSessionId: "live-shared" }, false), "conflict");
+  assert.equal(coordinator.ownerForLive("live-shared"), alphaOwner);
+
+  const alphaMustNotLearnBetaAlias = coordinator.claimResume({}, "alpha", "beta-tip");
+  assert.ok(alphaMustNotLearnBetaAlias);
+  coordinator.releaseFailedClaim(alphaMustNotLearnBetaAlias);
+  const betaRetry = coordinator.claimResume(betaOwner, "beta", "shared");
+  assert.ok(betaRetry);
+  coordinator.releaseFailedClaim(betaRetry);
 });
 
 test("an owned close reservation blocks rebind after a lease release TOCTOU", () => {
@@ -269,6 +364,7 @@ function setup(): {
 
 class RaceFakeHermes {
   readonly sessionCloseRequests: string[] = [];
+  readonly targetedRequests: Array<{ method: string; sessionId: string }> = [];
   readonly failCloseFor = new Set<string>();
   connectionCloseCount = 0;
   readonly #live = new Set<string>();
@@ -302,6 +398,9 @@ class RaceFakeHermes {
 
   isLive(liveId: string): boolean { return this.#live.has(liveId); }
   liveIds(): string[] { return [...this.#live]; }
+  emit(liveId: string, text: string): void {
+    this.#event?.({ type: "message.delta", sessionId: liveId, payload: { text } });
+  }
   holdNextParentResume(): void { this.#holdParent = true; }
   resolvePendingOnly(): void {
     this.#live.add("live-pending");
@@ -316,6 +415,10 @@ class RaceFakeHermes {
 
   async #request(request: HermesChatRequest): Promise<HermesChatResult> {
     if (this.#closed) throw new Error("generation closed");
+    if (request.method === "prompt.submit" || request.method === "session.interrupt") {
+      this.targetedRequests.push({ method: request.method, sessionId: String(request.params?.session_id) });
+      return { method: request.method, value: { status: "ok" } };
+    }
     if (request.method === "session.close") {
       const liveId = String(request.params?.session_id);
       this.sessionCloseRequests.push(liveId);
@@ -339,6 +442,12 @@ class RaceFakeHermes {
     }
     if (request.method === "session.resume") {
       const storedId = String(request.params?.session_id);
+      if (storedId === "shared") {
+        const profile = String(request.params?.profile);
+        const liveId = `live-${profile}`;
+        this.#live.add(liveId);
+        return { method: request.method, value: sessionValue(liveId, storedId) };
+      }
       if (storedId === "pending-only") {
         return await new Promise<HermesChatResult>((resolve) => { this.#pendingOnly = resolve; });
       }
