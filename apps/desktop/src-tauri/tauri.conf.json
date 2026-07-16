@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "icon": ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"],
     "resources": ["resources/server/hermes-office-server.mjs"]
   }
 }
