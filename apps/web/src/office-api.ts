@@ -76,7 +76,8 @@ const officeSessions = new Map<string, Promise<OfficeClientSession>>();
 const officeSessionRefreshes = new Map<string, Promise<OfficeClientSession>>();
 const officeSessionRecoveryPending = new Set<string>();
 const officeAuthChangeObservers = new Set<(serverUrl: string) => void>();
-const officeSessionRecoveryObservers = new Set<(serverUrl: string) => void>();
+const officeSessionRecoveryObservers = new Set<(serverUrl: string, authRevision: number) => void>();
+const officeSessionSynchronizedObservers = new Set<(serverUrl: string, authRevision: number) => void>();
 let authRequiredObserver: ((serverUrl: string) => void) | undefined;
 let nextOfficeConnectionGeneration = 0;
 let nextOfficeAuthRevision = 0;
@@ -96,6 +97,12 @@ export function officeServerUrl(): string {
 export function subscribeOfficeAuthChanges(observer: (serverUrl: string) => void): () => void {
   officeAuthChangeObservers.add(observer);
   return () => officeAuthChangeObservers.delete(observer);
+}
+
+/** Runs after a renewed session has committed a fresh authoritative snapshot. */
+export function subscribeOfficeSessionSynchronizations(observer: (serverUrl: string, authRevision: number) => void): () => void {
+  officeSessionSynchronizedObservers.add(observer);
+  return () => officeSessionSynchronizedObservers.delete(observer);
 }
 
 /**
@@ -155,7 +162,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
   let stopped = false;
   let connectionGeneration = 0;
   let latestSnapshotRequestGeneration = 0;
-  let snapshotRequestsInFlight = 0;
+  const snapshotRequestsAwaitingSession = new Set<number>();
   let socket: WebSocket | undefined;
   let eventStreamOpening = false;
   let eventStreamAttempt: symbol | undefined;
@@ -167,7 +174,16 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
   let socketFailedBeforeOpen = false;
   let attemptedRecoveryRevision: number | undefined;
   let preOpenFailureCount = 0;
+  let recoverySynchronizationGeneration: number | undefined;
+  let recoverySynchronizationRevision: number | undefined;
+  let rearmEventsAfterRecovery = false;
+  let reportedEventStreamState: "closed" | "connecting" | "open" | undefined;
   const reportRecoveryUnavailable = (message: string) => (callbacks.onRecoveryUnavailable ?? callbacks.onError)(message, serverUrl);
+  const reportEventStream = (state: "closed" | "connecting" | "open") => {
+    if (reportedEventStreamState === state) return;
+    reportedEventStreamState = state;
+    callbacks.onEventStream(state);
+  };
 
   const scheduleEventReconnect = (minimumDelayMs = 0): boolean => {
     if (stopped || reconnectTimer !== undefined) return true;
@@ -194,7 +210,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
     socketOpened = false;
     socketFailedBeforeOpen = false;
     closingSocket?.close(1000, "Client stopped");
-    callbacks.onEventStream("closed");
+    reportEventStream("closed");
   };
 
   const isCurrentSnapshotRequest = (identity: OfficeSnapshotRequestIdentity) => !stopped
@@ -210,8 +226,9 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       requestGeneration: ++latestSnapshotRequestGeneration
     };
     if (showConnecting) callbacks.onConnecting(serverUrl);
-    snapshotRequestsInFlight += 1;
     try {
+      snapshotRequestsAwaitingSession.add(identity.requestGeneration);
+      try { await ensureOfficeSession(serverUrl); } finally { snapshotRequestsAwaitingSession.delete(identity.requestGeneration); }
       const health = await officeFetchJson<HealthResponse>("/api/v1/health", {}, serverUrl);
       if (!isHealthResponse(health)) throw new Error("Office Server health response is incompatible.");
       const snapshot = await officeFetchJson<OfficeSnapshot>("/api/v1/snapshot", {}, serverUrl);
@@ -221,25 +238,44 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       }
       if (!isCurrentSnapshotRequest(identity)) return undefined;
       callbacks.onSnapshot(snapshot, identity);
+      if (recoverySynchronizationGeneration === identity.connectionGeneration) {
+        const synchronizedRevision = recoverySynchronizationRevision;
+        const shouldRearmEvents = rearmEventsAfterRecovery;
+        recoverySynchronizationGeneration = undefined;
+        recoverySynchronizationRevision = undefined;
+        rearmEventsAfterRecovery = false;
+        if (shouldRearmEvents) void openEvents();
+        if (synchronizedRevision !== undefined) notifyOfficeSessionSynchronized(serverUrl, synchronizedRevision);
+      }
       return identity;
     } catch (error) {
       if (!isCurrentSnapshotRequest(identity)) return undefined;
+      const recoverySnapshotFailed = recoverySynchronizationGeneration === identity.connectionGeneration;
+      if (recoverySnapshotFailed) {
+        recoverySynchronizationGeneration = undefined;
+        if (rearmEventsAfterRecovery) reportEventStream("closed");
+        rearmEventsAfterRecovery = false;
+      }
       if (error instanceof OfficeDeviceAuthRequiredError) {
         callbacks.onAuthRequired?.(serverUrl);
         return undefined;
       }
-      const report = preserveRuntime ? callbacks.onRecoveryUnavailable ?? callbacks.onError : callbacks.onError;
+      const report = preserveRuntime || recoverySnapshotFailed ? callbacks.onRecoveryUnavailable ?? callbacks.onError : callbacks.onError;
       report(errorMessage(error), serverUrl);
       return undefined;
-    } finally {
-      snapshotRequestsInFlight -= 1;
     }
   };
 
-  const refreshAfterSessionRecovery = (recoveredServerUrl: string) => {
+  const refreshAfterSessionRecovery = (recoveredServerUrl: string, authRevision: number) => {
     if (stopped || recoveredServerUrl !== serverUrl) return;
-    if (snapshotRequestsInFlight > 0) return;
     const expectedConnectionGeneration = connectionGeneration;
+    recoverySynchronizationGeneration = expectedConnectionGeneration;
+    recoverySynchronizationRevision = authRevision;
+    if (!socket && !eventStreamOpening && reconnectTimer === undefined) {
+      rearmEventsAfterRecovery = true;
+      reportEventStream("connecting");
+    }
+    if (snapshotRequestsAwaitingSession.has(latestSnapshotRequestGeneration)) return;
     void loadSnapshot(false, expectedConnectionGeneration, true);
   };
   officeSessionRecoveryObservers.add(refreshAfterSessionRecovery);
@@ -255,7 +291,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
     const attempt = Symbol("event-stream-open");
     eventStreamOpening = true;
     eventStreamAttempt = attempt;
-    callbacks.onEventStream("connecting");
+    reportEventStream("connecting");
     let lease: OfficeWebSocketLease;
     try {
       lease = await openOfficeWebSocket(toWebSocketUrl(serverUrl), serverUrl);
@@ -263,7 +299,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       if (eventStreamAttempt !== attempt) return;
       eventStreamOpening = false;
       eventStreamAttempt = undefined;
-      callbacks.onEventStream("closed");
+      reportEventStream("closed");
       if (error instanceof OfficeDeviceAuthRequiredError) callbacks.onAuthRequired?.(serverUrl);
       else {
         reportRecoveryUnavailable(errorMessage(error));
@@ -288,7 +324,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       preOpenFailureCount = 0;
       reconnectAttempt = 0;
       attemptedRecoveryRevision = undefined;
-      callbacks.onEventStream("open");
+      reportEventStream("open");
     });
     socket.addEventListener("message", (event) => {
       const message = parseEvent(event.data);
@@ -309,7 +345,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       socketAuthRevision = undefined;
       socketOpened = false;
       socketFailedBeforeOpen = false;
-      callbacks.onEventStream("closed");
+      reportEventStream("closed");
       if (stopped) return;
       if (ambiguousPreOpenFailure && preOpenFailureCount >= MAX_PREOPEN_WEBSOCKET_FAILURES) {
         reportRecoveryUnavailable("Office WebSocketへ接続できませんでした。再接続をお試しください。");
@@ -327,7 +363,9 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       const recoveryConnectionGeneration = connectionGeneration;
       void recoverOfficeWebSocketAuthentication(serverUrl, rejectedRevision).then(
         () => {
-          if (!stopped && connectionGeneration === recoveryConnectionGeneration && !scheduleEventReconnect()) {
+          if (!stopped && connectionGeneration === recoveryConnectionGeneration
+            && recoverySynchronizationGeneration !== recoveryConnectionGeneration
+            && !scheduleEventReconnect()) {
             reportRecoveryUnavailable("Office WebSocketへ再接続できませんでした。手動で再試行してください。");
           }
         },
@@ -354,7 +392,13 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
     attemptedRecoveryRevision = undefined;
     preOpenFailureCount = 0;
     stopSocket();
-    const identity = await loadSnapshot(true, connectionGeneration);
+    const synchronizingRecovery = recoverySynchronizationRevision !== undefined;
+    if (synchronizingRecovery) {
+      recoverySynchronizationGeneration = connectionGeneration;
+      rearmEventsAfterRecovery = true;
+      reportEventStream("connecting");
+    }
+    const identity = await loadSnapshot(true, connectionGeneration, synchronizingRecovery);
     if (identity && isCurrentSnapshotRequest(identity)) void openEvents();
   };
 
@@ -365,6 +409,9 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       officeSessionRecoveryObservers.delete(refreshAfterSessionRecovery);
       connectionGeneration = ++nextOfficeConnectionGeneration;
       latestSnapshotRequestGeneration = 0;
+      recoverySynchronizationGeneration = undefined;
+      recoverySynchronizationRevision = undefined;
+      rearmEventsAfterRecovery = false;
       stopSocket();
     },
     retry() {
@@ -462,8 +509,8 @@ function ensureOfficeSession(serverUrl: string): Promise<OfficeClientSession> {
     throw error;
   });
   officeSessions.set(serverUrl, pending);
-  void pending.then(() => {
-    if (officeSessions.get(serverUrl) === pending && officeSessionRecoveryPending.delete(serverUrl)) notifyOfficeSessionRecovered(serverUrl);
+  void pending.then((session) => {
+    if (officeSessions.get(serverUrl) === pending && officeSessionRecoveryPending.delete(serverUrl)) notifyOfficeSessionRecovered(serverUrl, session.authRevision);
   }, () => undefined);
   return pending;
 }
@@ -548,9 +595,15 @@ function notifyOfficeAuthChange(serverUrl: string): void {
   }
 }
 
-function notifyOfficeSessionRecovered(serverUrl: string): void {
+function notifyOfficeSessionRecovered(serverUrl: string, authRevision: number): void {
   for (const observer of officeSessionRecoveryObservers) {
-    try { observer(serverUrl); } catch { /* recovery observers cannot interrupt a renewed session */ }
+    try { observer(serverUrl, authRevision); } catch { /* recovery observers cannot interrupt a renewed session */ }
+  }
+}
+
+function notifyOfficeSessionSynchronized(serverUrl: string, authRevision: number): void {
+  for (const observer of officeSessionSynchronizedObservers) {
+    try { observer(serverUrl, authRevision); } catch { /* transport observers cannot interrupt synchronization */ }
   }
 }
 

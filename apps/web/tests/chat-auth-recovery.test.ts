@@ -152,6 +152,44 @@ test("trusted proxy configuration failure waits for manual retry instead of loop
   api.stop();
 });
 
+test("a synchronized Office recovery rearms a chat-only halt exactly once for active targets", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const states: string[] = [];
+  let synchronized!: (serverUrl: string, authRevision: number) => void;
+  const api = connectChatApi(callbacks(states), {
+    serverUrl: "https://office.example",
+    openWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return { socket: socket as unknown as WebSocket, authRevision: sockets.length };
+    },
+    recoverAuthentication: async () => { throw new OfficeSessionUnavailableError("proxy configuration", 0, false); },
+    reconnectDelay: () => 0,
+    subscribeSessionSynchronizations(observer) { synchronized = observer; return () => {}; },
+  });
+  api.ensureSession({ clientSessionId: "active", profileId: "profile" });
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  sockets[0]!.serverClose(1008, "Session expired");
+  await waitFor(() => states.at(-1) === "error");
+
+  synchronized("https://other.example", 2);
+  assert.equal(sockets.length, 1);
+  synchronized("https://office.example", 1);
+  assert.equal(sockets.length, 1);
+  synchronized("https://office.example", 2);
+  synchronized("https://office.example", 2);
+  await waitFor(() => sockets.length === 2);
+  await flush();
+  assert.equal(sockets.length, 2);
+  sockets[1]!.open();
+  assert.equal(states.at(-1), "ready");
+  api.stop();
+  synchronized("https://office.example", 3);
+  await flush();
+  assert.equal(sockets.length, 2);
+});
+
 test("manual Office retry supersedes a pending chat recovery without opening a duplicate socket", async () => {
   const sockets: FakeWebSocket[] = [];
   let finishRecovery!: () => void;

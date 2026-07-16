@@ -7,6 +7,7 @@ import {
   openOfficeWebSocket,
   recoverOfficeWebSocketAuthentication,
   shouldRecoverOfficeWebSocket,
+  subscribeOfficeSessionSynchronizations,
   type OfficeWebSocketLease,
 } from "./office-api";
 import { DEFAULT_CLIENT_HISTORY_LIMITS, HistoryAccumulator, type ChatHistoryResult } from "./history-loader";
@@ -56,6 +57,7 @@ export type ChatApiDependencies = {
   reconnectDelay?: (attempt: number, minimumDelayMs: number) => number;
   fetchJson?: typeof officeFetchJson;
   randomId?: () => string;
+  subscribeSessionSynchronizations?: (observer: (serverUrl: string, authRevision: number) => void) => () => void;
 };
 
 type JsonRpcResult = {
@@ -93,6 +95,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   const reconnectDelay = dependencies.reconnectDelay ?? ((attempt: number, minimumDelayMs: number) => Math.max(minimumDelayMs, Math.min(RECONNECT_MAX_MS, 800 * (2 ** attempt))));
   const fetchJson = dependencies.fetchJson ?? officeFetchJson;
   const randomId = dependencies.randomId ?? (() => crypto.randomUUID());
+  const subscribeSessionSynchronizations = dependencies.subscribeSessionSynchronizations ?? subscribeOfficeSessionSynchronizations;
   const targets = new Map<string, ActiveTarget>();
   const liveToClient = new Map<string, LiveTarget>();
   const pending = new Map<string, PendingRequest>();
@@ -113,6 +116,8 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   let attemptedRecoveryRevision: number | undefined;
   let preOpenFailureCount = 0;
   let transportHalted = false;
+  let latestSynchronizedAuthRevision = -1;
+  let unsubscribeSessionSynchronizations = () => {};
 
   const rejectPending = (message: string) => {
     for (const request of pending.values()) {
@@ -448,6 +453,14 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     void openSocket();
   };
 
+  unsubscribeSessionSynchronizations = subscribeSessionSynchronizations((recoveredServerUrl, authRevision) => {
+    if (stopped || recoveredServerUrl !== serverUrl || authRevision <= latestSynchronizedAuthRevision) return;
+    latestSynchronizedAuthRevision = authRevision;
+    if (!transportHalted || targets.size === 0
+      || (attemptedRecoveryRevision !== undefined && authRevision <= attemptedRecoveryRevision)) return;
+    restartTransport(false);
+  });
+
   void openSocket();
 
   return {
@@ -506,6 +519,8 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     },
     stop() {
       stopped = true;
+      unsubscribeSessionSynchronizations();
+      unsubscribeSessionSynchronizations = () => {};
       lifecycleGeneration += 1;
       socketOpenAttempt = undefined;
       socketOpening = false;
