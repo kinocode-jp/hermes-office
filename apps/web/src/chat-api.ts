@@ -246,7 +246,10 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     pending.delete(id);
     const error = asRecord(frame.error);
     if (error) {
-      request.reject(new Error(typeof error.message === "string" ? error.message : "Chat RPCに失敗しました。"));
+      const message = error.code === -32006
+        ? "このセッションは別の端末で使用中です。別の端末で閉じてから再接続してください。"
+        : typeof error.message === "string" ? error.message : "Chat RPCに失敗しました。";
+      request.reject(new Error(message));
       return;
     }
     request.resolve(frame.result);

@@ -56,7 +56,7 @@ test("sendMessage rejects every in-flight shape and atomically blocks a second p
   assert.deepEqual(submitted, ["first"]);
 });
 
-test("canonical Hermes status notifications preserve local run state before and after message start", () => {
+test("canonical Hermes status notifications cannot create a run and preserve an active run", () => {
   const submitted: string[] = [];
   registerChatRuntime({
     ensureSession() {}, releaseSession() {}, interrupt() {},
@@ -65,16 +65,22 @@ test("canonical Hermes status notifications preserve local run state before and 
   });
   sessions.value = [{ ...ready }];
   sendMessage(ready.id, "first");
+  const afterSubmitNotice = reduceChatGatewayEvent(sessions.value[0]!, {
+    type: "status.update", liveSessionId: "live", payload: { kind: "process", message: "Preparing follow-up" }
+  });
+  assert.equal(afterSubmitNotice.status, "streaming");
+  assert.equal(isChatRunActive(afterSubmitNotice), true);
+  sessions.value = [afterSubmitNotice];
+  sendMessage(ready.id, "duplicate-after-submit");
 
-  const withoutKind = reduceChatGatewayEvent(sessions.value[0]!, {
+  const withoutKind = reduceChatGatewayEvent(ready, {
     type: "status.update", liveSessionId: "live", payload: { message: "Preparing follow-up" }
   });
   const beforeStart = reduceChatGatewayEvent(withoutKind, {
     type: "status.update", liveSessionId: "live", payload: { kind: "process", message: "Preparing follow-up" }
   });
-  assert.equal(beforeStart.status, "streaming");
-  assert.equal(isChatRunActive(beforeStart), true);
-  sessions.value = [beforeStart];
+  assert.equal(beforeStart, ready);
+  assert.equal(isChatRunActive(beforeStart), false);
   sendMessage(ready.id, "duplicate-before-start");
 
   const started = reduceChatGatewayEvent(beforeStart, {

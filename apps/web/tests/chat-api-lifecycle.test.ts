@@ -106,6 +106,32 @@ test("profile-scoped client IDs isolate resume, history, and events for equal st
   harness.api.stop();
 });
 
+test("session-in-use errors are localized and the same target can retry resume", async () => {
+  const harness = await createHarness(async <T>() => ({
+    sessionId: "stored-busy", messages: [],
+    pagination: { direction: "older", hasMore: false, returned: 0 },
+  }) as T);
+  const target = { clientSessionId: "busy-client", profileId: "coder", storedSessionId: "stored-busy" };
+  harness.api.ensureSession(target);
+  await flush();
+  const first = harness.socket.frames("session.resume", "stored-busy")[0]!;
+  harness.socket.respond(first.id, undefined, {
+    code: -32006,
+    message: "Session is already in use by another Office client.",
+    data: { reason: "session_in_use" },
+  });
+  await flush();
+  assert.deepEqual(harness.errors, [{
+    clientSessionId: "busy-client",
+    message: "このセッションは別の端末で使用中です。別の端末で閉じてから再接続してください。",
+  }]);
+
+  harness.api.ensureSession(target);
+  await flush();
+  assert.equal(harness.socket.frames("session.resume", "stored-busy").length, 2);
+  harness.api.stop();
+});
+
 test("more than 500 saved messages retain the latest ordered window and report older omission", async () => {
   let pages = 0;
   const harness = await createHarness(async <T>() => {
@@ -171,9 +197,11 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   const historyBodies: string[][] = [];
   const historyResults: Array<{ clientSessionId: string; messages: number; result: Pick<ChatHistoryResult, "truncated" | "partial" | "reason"> }> = [];
   const events: string[] = [];
+  const errors: Array<{ clientSessionId: string; message: string }> = [];
   let sequence = 0;
   const callbacks: ChatApiCallbacks = {
-    onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {}, onSessionError() {}, onHistoryError() {},
+    onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {}, onHistoryError() {},
+    onSessionError(clientSessionId, message) { errors.push({ clientSessionId, message }); },
     onHistory(clientSessionId, messages, _storedSessionId, result) { histories.push(clientSessionId); historyBodies.push(messages.map(({ body }) => body)); if (result) historyResults.push({ clientSessionId, messages: messages.length, result: { truncated: result.truncated, partial: result.partial, ...(result.reason ? { reason: result.reason } : {}) } }); },
     onSessionReady(clientSessionId, liveSessionId) { ready.push({ clientSessionId, liveSessionId }); },
     onEvent(clientSessionId) { events.push(clientSessionId); },
@@ -187,7 +215,7 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   await flush();
   socket.open();
   await flush();
-  return { api, socket, ready, histories, historyBodies, historyResults, events };
+  return { api, socket, ready, histories, historyBodies, historyResults, events, errors };
 }
 
 type RpcFrame = { id: string; method: string; params: Record<string, string> };

@@ -62,11 +62,32 @@ test("a new live generation terminalizes old rows while authoritative running re
   const infoRunning = reduceChatGatewayEvent(baseSession, {
     type: "session.info", liveSessionId: "live-new", payload: { running: true, status: "idle" }
   });
-  assert.equal(infoRunning.status, "streaming");
+  assert.equal(infoRunning, baseSession);
   const delayedIdle = reduceChatGatewayEvent(infoRunning, {
     type: "session.info", liveSessionId: "live-new", payload: { running: false, status: "idle" }
   });
   assert.equal(delayedIdle, infoRunning);
+
+  const completed = reduceChatGatewayEvent({ ...baseSession, status: "streaming" }, {
+    type: "message.complete", liveSessionId: "live-new", payload: { messageId: "done", text: "done" }
+  });
+  const lateRunning = reduceChatGatewayEvent(completed, {
+    type: "session.info", liveSessionId: "live-new", payload: { running: true, status: "running" }
+  });
+  const finallyIdle = reduceChatGatewayEvent(lateRunning, {
+    type: "session.info", liveSessionId: "live-new", payload: { running: false, status: "idle" }
+  });
+  assert.equal(finallyIdle.status, "ready");
+  assert.equal(isChatRunActive(finallyIdle), false);
+
+  const nextRun = reduceChatGatewayEvent(finallyIdle, {
+    type: "message.start", liveSessionId: "live-new", payload: { messageId: "next" }
+  });
+  const oldIdle = reduceChatGatewayEvent(nextRun, {
+    type: "session.info", liveSessionId: "live-new", payload: { running: false, status: "idle" }
+  });
+  assert.equal(oldIdle, nextRun);
+  assert.equal(isChatRunActive(oldIdle), true);
 });
 
 test("prompt start, socket close, and cold resume unlock the composer without replaying the prompt", async () => {

@@ -583,11 +583,10 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     };
   }
   if (event.type === "status.update") {
-    return mergeGatewayStatusUpdate(session, payload);
+    return isChatRunActive(session) ? mergeGatewayStatusUpdate(session, payload) : session;
   }
   if (event.type === "session.info") {
-    if (payload.running === true) return session.status === "streaming" ? session : { ...session, status: "streaming" };
-    return payload.running === false ? session : mergeGatewayStatusUpdate(session, payload);
+    return session;
   }
   if (event.type.startsWith("tool.")) {
     const toolId = stringValue(payload.toolId) ?? stringValue(payload.tool_id) ?? `tool-${event.liveSessionId}`;

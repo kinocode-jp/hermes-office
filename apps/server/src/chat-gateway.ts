@@ -4,6 +4,7 @@ import type { Operation } from "@hermes-office/protocol";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { HERMES_CHAT_METHODS, type HermesChatEvent, type HermesChatMethod } from "./hermes-chat.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
+import { ChatSessionCoordinator, type ChatSessionClaim } from "./chat-session-coordinator.js";
 
 const MAX_IN_FLIGHT = 4;
 const MAX_QUEUE = 16;
@@ -42,6 +43,7 @@ export interface ChatGatewayDependencies {
   deviceLimiter: ChatDeviceRateLimiter;
   limits?: Partial<ChatGatewayLimits>;
   now?: () => number;
+  sessionCoordinator: ChatSessionCoordinator;
 }
 
 type PendingResponseState = "pending" | "claimed" | "consumed";
@@ -93,9 +95,14 @@ export class ChatDeviceRateLimiter {
 }
 
 export function handleOfficeChatConnection(client: WebSocket, dependencies: ChatGatewayDependencies): void {
-  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter } = dependencies;
+  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter, sessionCoordinator } = dependencies;
+  if (!(sessionCoordinator instanceof ChatSessionCoordinator)) {
+    client.close(1011, "Chat session coordinator unavailable");
+    return;
+  }
   const canApprovePermanently = auth.effectiveAccess(officeSession).allowedOperations.includes("chat.approval.permanent");
   const now = dependencies.now ?? Date.now;
+  const sessionOwner = {};
   const limits = {
     ...DEFAULT_LIMITS,
     ...dependencies.limits,
@@ -158,10 +165,15 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     try { frame = JSON.parse(body); } catch { client.close(1007, "Invalid JSON"); return; }
     if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
     let claim: PendingClaim | undefined;
+    let sessionClaim: ChatSessionClaim | undefined;
     try {
       const access = auth.authorizeSession(officeSession, chatOperation(frame.method));
       if (!access.allowed) { sendRpcError(send, frame.id, -32003, "Operation is not permitted for this device."); return; }
       const targetId = chatTargetId(frame.method, frame.params);
+      if (frame.method !== "session.resume" && targetId !== undefined && sessionCoordinator.isLiveOwnedByAnother(sessionOwner, targetId)) {
+        sendSessionInUse(send, frame.id);
+        return;
+      }
       if (frame.method === "approval.respond") {
         const choice = typeof frame.params?.choice === "string" ? frame.params.choice : "";
         if (choice === "always" && !auth.authorizeSession(officeSession, "chat.approval.permanent").allowed) {
@@ -193,17 +205,39 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         pending.state = "claimed";
         claim = { kind: "clarification", key: requestId, entry: pending };
       }
+      if (frame.method === "session.create") {
+        sessionClaim = sessionCoordinator.claimCreate(sessionOwner, typeof frame.params?.profile === "string" ? frame.params.profile : undefined);
+      }
+      if (frame.method === "session.resume" && typeof frame.params?.session_id === "string") {
+        sessionClaim = sessionCoordinator.claimResume(sessionOwner, typeof frame.params.profile === "string" ? frame.params.profile : undefined, frame.params.session_id);
+        if (sessionClaim === undefined) { sendSessionInUse(send, frame.id); return; }
+      }
       const seed = frame.method === "session.create"
         ? await runtimeSource.globalInheritance?.().sessionCreateContext()
         : undefined;
+      if (closed) return;
       const result = await upstream!.request(
         { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
         seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
       );
+      if (closed) return;
+      if (sessionClaim !== undefined) {
+        const binding = sessionCoordinator.bind(sessionClaim, sessionIdentities(result.value), frame.method === "session.create");
+        if (binding !== "bound") {
+          if (binding === "conflict") sendSessionInUse(send, frame.id);
+          else sendRpcError(send, frame.id, -32000, "Hermes returned an invalid session identity.");
+          client.close(1013, "Session ownership conflict");
+          return;
+        }
+      }
+      if (frame.method === "session.close" && result.value.closed === true && typeof frame.params?.session_id === "string") {
+        sessionCoordinator.releaseSession(sessionOwner, frame.params.session_id);
+      }
       const promoted = consumeClaim(claim, pendingApprovals, pendingClarifications);
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       send({ jsonrpc: "2.0", id: frame.id, result: result.value });
     } catch {
+      if (!closed) sessionCoordinator.releaseFailedClaim(sessionClaim);
       const promoted = restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       sendRpcError(send, frame.id, -32000, "Hermes request failed.");
@@ -237,12 +271,28 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     queued.length = 0;
     pendingApprovals.clear();
     pendingClarifications.clear();
-    void upstream?.close();
+    if (upstream === undefined) {
+      sessionCoordinator.releaseOwner(sessionOwner);
+      return;
+    }
+    try {
+      // A failed or hung upstream close keeps the lease fail-closed until process restart.
+      // Releasing on a timer could let another socket steal a transport that is still live.
+      void upstream.close().then(
+        () => sessionCoordinator.releaseOwner(sessionOwner),
+        () => undefined,
+      );
+    } catch { /* Retain ownership when close cannot be proven. */ }
   };
   client.on("close", shutdown);
   client.on("error", shutdown);
 
   void chatTransport.connect((event) => {
+    if (closed) return;
+    if (event.sessionId !== undefined && sessionCoordinator.isLiveOwnedByAnother(sessionOwner, event.sessionId)) {
+      client.close(1013, "Session ownership conflict");
+      return;
+    }
     if (event.type === "approval.request" && event.sessionId !== undefined) {
       const normalizedEvent = normalizeApprovalEvent(event, canApprovePermanently);
       const choices = Array.isArray(normalizedEvent.payload.choices)
@@ -307,6 +357,20 @@ function sendRpcError(send: (value: unknown) => void, id: string | number, code:
   send({ jsonrpc: "2.0", id, error: { code, message } });
 }
 
+function sendSessionInUse(send: (value: unknown) => void, id: string | number): void {
+  send({
+    jsonrpc: "2.0", id,
+    error: { code: -32006, message: "Session is already in use by another Office client.", data: { reason: "session_in_use" } },
+  });
+}
+
+function sessionIdentities(value: Record<string, boolean | number | string | null>): { storedSessionId?: string; liveSessionId?: string } {
+  const storedSessionId = typeof value.storedSessionId === "string" ? value.storedSessionId
+    : typeof value.resumedSessionId === "string" ? value.resumedSessionId : undefined;
+  const liveSessionId = typeof value.liveSessionId === "string" ? value.liveSessionId : undefined;
+  return { ...(storedSessionId ? { storedSessionId } : {}), ...(liveSessionId ? { liveSessionId } : {}) };
+}
+
 function consumeClaim(
   claim: PendingClaim | undefined,
   approvals: Map<string, PendingApproval[]>,
@@ -355,6 +419,7 @@ function expireApproval(approvals: Map<string, PendingApproval[]>, key: string, 
 
 function upstreamRequestParams(method: HermesChatMethod, params: Record<string, unknown> | undefined): { params?: Record<string, unknown> } {
   if (params === undefined) return {};
+  if (method === "session.create" || method === "session.resume") return { params: { ...params, close_on_disconnect: true } };
   if (method !== "approval.respond") return { params };
   return { params: {
     ...(typeof params.session_id === "string" ? { session_id: params.session_id } : {}),

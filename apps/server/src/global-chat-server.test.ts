@@ -22,6 +22,12 @@ test("Office Server seeds only session.create with trusted global context", asyn
         close: async () => undefined,
         request: async (request: HermesChatRequest, internal?: HermesChatInternalRequestOptions) => {
           captured.push({ request, ...(internal === undefined ? {} : { internal }) });
+          if (request.method === "session.create") {
+            return { method: request.method, value: { liveSessionId: "live-created", storedSessionId: "stored-created", running: false, status: "idle" } };
+          }
+          if (request.method === "session.resume") {
+            return { method: request.method, value: { liveSessionId: "live-resumed", storedSessionId: String(request.params?.session_id), running: false, status: "idle" } };
+          }
           return { method: request.method, value: { status: "ok" } };
         },
       }),

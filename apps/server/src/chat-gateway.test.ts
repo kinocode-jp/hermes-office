@@ -4,13 +4,29 @@ import test from "node:test";
 import { WebSocket } from "ws";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
 import type { HermesChatEvent, HermesChatRequest } from "./hermes-chat.js";
-import { ChatDeviceRateLimiter, handleOfficeChatConnection, serializeOfficeChatEvent } from "./chat-gateway.js";
+import {
+  ChatDeviceRateLimiter,
+  handleOfficeChatConnection as handleOfficeChatConnectionWithCoordinator,
+  serializeOfficeChatEvent,
+  type ChatGatewayDependencies,
+} from "./chat-gateway.js";
+import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
 import { OfficeAuth, type OfficeAuthSession } from "./office-auth.js";
 
 const REMOTE_SESSION: OfficeAuthSession = {
   principal: { id: "device-test", tier: "operator", local: false, deviceName: "Test device" },
   csrfToken: "c".repeat(32), expiresAt: "2099-01-01T00:00:00.000Z",
 };
+
+function handleOfficeChatConnection(
+  client: WebSocket,
+  dependencies: Omit<ChatGatewayDependencies, "sessionCoordinator"> & { sessionCoordinator?: ChatSessionCoordinator },
+): void {
+  handleOfficeChatConnectionWithCoordinator(client, {
+    ...dependencies,
+    sessionCoordinator: dependencies.sessionCoordinator ?? new ChatSessionCoordinator(),
+  });
+}
 
 test("event serialization truncates UTF-8 safely within the exact envelope budget", () => {
   const boundaryEvent: HermesChatEvent = { type: "message.complete", sessionId: "s-boundary", payload: { text: "境界🦊", role: "assistant" } };
@@ -55,6 +71,17 @@ test("gateway delivers a bounded multibyte event instead of silently dropping it
   assert.equal(event.params.type, "tool.progress");
   assert.equal(event.params.payload.status, "running");
   assert.equal(event.params.payload.truncated, true);
+});
+
+test("gateway fails closed when its shared session coordinator is not injected", () => {
+  const client = new FakeWebSocket();
+  const incomplete = {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnect(async () => connection()), maxJsonBytes: 1_024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+  } as unknown as ChatGatewayDependencies;
+  handleOfficeChatConnectionWithCoordinator(client as unknown as WebSocket, incomplete);
+  assert.deepEqual(client.closed, { code: 1011, reason: "Chat session coordinator unavailable" });
 });
 
 test("slow or failed chat clients are closed with a resynchronization policy", async () => {
@@ -172,6 +199,180 @@ test("approval and clarification remain exact-socket, one-shot, expiring, and di
   localClient.rpc(11, "approval.respond", { session_id: "s-local", choice: "always" });
   await flush();
   assert.deepEqual(localRequests.map((request) => request.method), ["approval.respond"]);
+});
+
+test("two chat sockets cannot split a streaming or pending durable session owner", async () => {
+  const callbacks: Array<(event: HermesChatEvent) => void> = [];
+  const requests: HermesChatRequest[][] = [[], []];
+  const ownerClose = deferred<void>();
+  let connectionIndex = 0;
+  const runtime = runtimeWithConnections((onEvent) => {
+    const index = connectionIndex++;
+    callbacks[index] = onEvent;
+    return connection(async (request) => {
+      requests[index]!.push(request);
+      if (request.method === "session.resume") {
+        const storedSessionId = String(request.params?.session_id);
+        const profile = String(request.params?.profile ?? "default");
+        return { method: request.method, value: { liveSessionId: `live-${index}-${profile}`, storedSessionId, running: false, status: "idle" } };
+      }
+      if (request.method === "session.close") return { method: request.method, value: { closed: true } };
+      return { method: request.method, value: { status: "ok" } };
+    }, index === 0 ? async () => await ownerClose.promise : undefined);
+  });
+  const coordinator = new ChatSessionCoordinator();
+  const dependencies = {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION, runtimeSource: runtime, maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }), sessionCoordinator: coordinator,
+    limits: { socketRateCapacity: 100 },
+  };
+  const a = new FakeWebSocket();
+  const b = new FakeWebSocket();
+  handleOfficeChatConnection(a as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(b as unknown as WebSocket, dependencies);
+  await flush();
+
+  a.rpc(100, "session.resume", { session_id: "stored-shared", profile: "coder" });
+  await flush();
+  assert.equal(requests[0]?.[0]?.params?.close_on_disconnect, true);
+  callbacks[0]!({ type: "message.delta", sessionId: "live-0-coder", payload: { text: "partial" } });
+  callbacks[0]!({ type: "approval.request", sessionId: "live-0-coder", payload: { choices: ["once"], allowPermanent: false } });
+  b.rpc(101, "session.resume", { session_id: "stored-shared", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(101), -32006);
+  assert.equal(requests[1]?.length, 0);
+  assert.equal(b.events().some(({ type }) => type === "approval.request"), false);
+  a.rpc(106, "approval.respond", { session_id: "live-0-coder", choice: "once" });
+  await flush();
+  assert.equal(requests[0]?.some(({ method }) => method === "approval.respond"), true);
+
+  callbacks[0]!({ type: "message.complete", sessionId: "live-0-coder", payload: { text: "done" } });
+  callbacks[0]!({ type: "error", sessionId: "live-0-coder", payload: { message: "turn failed" } });
+  a.rpc(102, "session.interrupt", { session_id: "live-0-coder" });
+  b.rpc(103, "session.resume", { session_id: "stored-shared", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(103), -32006);
+
+  b.rpc(104, "session.resume", { session_id: "stored-shared", profile: "reviewer" });
+  await flush();
+  assert.equal(b.hasError(104), false);
+  assert.equal(requests[1]?.filter(({ method }) => method === "session.resume").length, 1);
+
+  a.emit("close");
+  await flush();
+  b.rpc(105, "session.resume", { session_id: "stored-shared", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(105), -32006);
+  ownerClose.resolve(undefined);
+  await flush();
+  b.rpc(107, "session.resume", { session_id: "stored-shared", profile: "coder" });
+  await flush();
+  assert.equal(b.hasError(107), false);
+  assert.equal(requests[1]?.filter(({ method }) => method === "session.resume").length, 2);
+});
+
+test("ownership claims are atomic, retryable after failure or close, and reject result alias conflicts", async () => {
+  type RpcResult = { method: HermesChatRequest["method"]; value: Record<string, boolean | number | string | null> };
+  const firstResume = deferred<RpcResult>();
+  const concurrentResume = deferred<RpcResult>();
+  const closingResume = deferred<RpcResult>();
+  const requests: HermesChatRequest[][] = [[], [], []];
+  let connectionIndex = 0;
+  let aResumeCount = 0;
+  let bResumeCount = 0;
+  let closeCount = 0;
+  const runtime = runtimeWithConnections(() => {
+    const index = connectionIndex++;
+    return connection(async (request) => {
+      requests[index]!.push(request);
+      if (request.method === "session.resume") {
+        if (index === 0 && ++aResumeCount === 1) return await firstResume.promise;
+        if (index === 0 && aResumeCount === 2) return await concurrentResume.promise;
+        if (index === 0 && aResumeCount === 4) return await closingResume.promise;
+        const count = index === 0 ? aResumeCount : ++bResumeCount;
+        const storedSessionId = String(request.params?.session_id);
+        const liveSessionId = index === 2 ? "live-c" : index === 1 && count === 3 ? "live-a" : index === 0 ? "live-a" : "live-b";
+        return { method: request.method, value: { liveSessionId, storedSessionId, running: false, status: "idle" } };
+      }
+      if (request.method === "session.close") return { method: request.method, value: { closed: ++closeCount !== 3 } };
+      return { method: request.method, value: { status: "ok" } };
+    });
+  });
+  const coordinator = new ChatSessionCoordinator();
+  const dependencies = {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION, runtimeSource: runtime, maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }), sessionCoordinator: coordinator,
+    limits: { socketRateCapacity: 100 },
+  };
+  const a = new FakeWebSocket();
+  const b = new FakeWebSocket();
+  handleOfficeChatConnection(a as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(b as unknown as WebSocket, dependencies);
+  await flush();
+
+  a.rpc(110, "session.resume", { session_id: "stored-race", profile: "coder" });
+  a.rpc(118, "session.resume", { session_id: "stored-race", profile: "coder" });
+  b.rpc(111, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(111), -32006);
+  assert.equal(requests[1]?.length, 0);
+  firstResume.reject(new Error("timeout"));
+  await flush();
+  assert.equal(a.errorCode(110), -32000);
+  b.rpc(119, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(119), -32006);
+  concurrentResume.resolve({
+    method: "session.resume",
+    value: { liveSessionId: "live-a", storedSessionId: "stored-race", running: false, status: "idle" },
+  });
+  await flush();
+  assert.equal(a.hasError(118), false);
+  b.rpc(120, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(120), -32006);
+  a.rpc(121, "session.close", { session_id: "live-a" });
+  await flush();
+
+  b.rpc(112, "session.resume", { session_id: "stored-race", profile: "coder" });
+  b.rpc(113, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(b.hasError(112), false);
+  assert.equal(b.hasError(113), false);
+  a.rpc(114, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(a.errorCode(114), -32006);
+
+  b.rpc(115, "session.close", { session_id: "live-b" });
+  await flush();
+  a.rpc(116, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(a.hasError(116), false);
+  a.rpc(124, "session.close", { session_id: "live-a" });
+  await flush();
+  b.rpc(125, "session.resume", { session_id: "stored-race", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(125), -32006);
+
+  b.rpc(117, "session.resume", { session_id: "stored-other", profile: "coder" });
+  await flush();
+  assert.equal(b.errorCode(117), -32006);
+  assert.deepEqual(b.closed, { code: 1013, reason: "Session ownership conflict" });
+
+  a.rpc(122, "session.resume", { session_id: "stored-closing", profile: "cleaner" });
+  await flush();
+  a.close(1000, "test disconnect");
+  closingResume.resolve({
+    method: "session.resume",
+    value: { liveSessionId: "live-closing", storedSessionId: "stored-closing", running: false, status: "idle" },
+  });
+  await flush();
+  const c = new FakeWebSocket();
+  handleOfficeChatConnection(c as unknown as WebSocket, dependencies);
+  await flush();
+  c.rpc(123, "session.resume", { session_id: "stored-closing", profile: "cleaner" });
+  await flush();
+  assert.equal(c.hasError(123), false);
 });
 
 test("approval and clarification claims are exclusive and recover only after timely upstream failure", async () => {
@@ -527,8 +728,11 @@ function runtimeWithConnections(factory: (onEvent: (event: HermesChatEvent) => v
 function runtimeWithConnect(connect: (onEvent: (event: HermesChatEvent) => void) => Promise<ReturnType<typeof connection>>): HermesRuntimeSource {
   return { chat: () => ({ connect, fetchHistory: async () => { throw new Error("unused"); } }) } as unknown as HermesRuntimeSource;
 }
-function connection(request: (request: HermesChatRequest) => Promise<{ method: HermesChatRequest["method"]; value: Record<string, string> }> = async (input) => ({ method: input.method, value: { status: "ok" } })) {
-  return { closed: false, request, close: async () => undefined };
+function connection(
+  request: (request: HermesChatRequest) => Promise<{ method: HermesChatRequest["method"]; value: Record<string, boolean | number | string | null> }> = async (input) => ({ method: input.method, value: { status: "ok" } }),
+  close: (() => Promise<void>) | undefined = undefined,
+) {
+  return { closed: false, request, close: close ?? (async () => undefined) };
 }
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void } {
   let resolve!: (value: T) => void;

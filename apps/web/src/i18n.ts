@@ -353,6 +353,7 @@ const englishRuntimeMessages: Record<string, string> = {
   "Hermes設定へ接続できません。runtimeを確認してください。": "Unable to reach Hermes settings. Check the runtime.",
   "Hermes Profile一覧を一時的に取得できません。再取得を待っています。": "The Hermes Profile inventory is temporarily unavailable. Waiting to retry.",
   "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。": "Some Hermes history entries could not be read and were omitted.",
+  "このセッションは別の端末で使用中です。別の端末で閉じてから再接続してください。": "This session is in use on another device. Close it there, then reconnect.",
 };
 
 /** Translates status and error copy produced by the transport/store layer. */

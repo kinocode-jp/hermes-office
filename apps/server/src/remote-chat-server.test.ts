@@ -26,6 +26,10 @@ test("remote operator can resume, interrupt, and read visible single-tenant sess
         close: async () => undefined,
         request: async (request: HermesChatRequest) => {
           captured.push(request);
+          if (request.method === "session.resume") {
+            const storedSessionId = String(request.params?.session_id);
+            return { method: request.method, value: { liveSessionId: storedSessionId, storedSessionId, running: false, status: "idle" } };
+          }
           return { method: request.method, value: { status: "ok" } };
         },
       }),

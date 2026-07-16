@@ -8,6 +8,7 @@ import { isKanbanHttpPath, isKanbanMutation, routeKanbanHttp } from "./kanban-ht
 import { isSettingsHttpPath, isSettingsMutation, routeSettingsHttp } from "./settings-http.js";
 import { DeviceAuthBodyError, readDeviceAuthBody } from "./device-auth-http.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
+import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
 import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
 import { routeInventoryHttp } from "./inventory-http.js";
 import { StaticWebAssets, type StaticWebAsset } from "./static-web.js";
@@ -96,6 +97,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const chatSocketPrincipals = new WeakMap<WebSocket, string>();
   const chatSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
   const chatDeviceLimiter = new ChatDeviceRateLimiter();
+  const chatSessionCoordinator = new ChatSessionCoordinator();
   publishAudit = (record) => {
     const publicRecord = {
       occurredAt: record.occurredAt,
@@ -480,7 +482,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     const officeSession = chatSocketSessions.get(client);
     if (officeSession === undefined) { client.close(1008, "Office session unavailable"); return; }
     handleOfficeChatConnection(client, {
-      auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter,
+      auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter, sessionCoordinator: chatSessionCoordinator,
     });
   });
 
