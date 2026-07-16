@@ -150,7 +150,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .monitor { position: absolute; left: 21px; top: -23px; width: 35px; height: 25px; border: 4px solid #0a111c; background: #172a36; box-shadow: 0 4px 0 #0a111c; }
 .monitor-lines { position: absolute; inset: 4px; background: repeating-linear-gradient(to bottom, var(--agent-color) 0 1px, transparent 1px 4px); opacity: .75; }
 .desk-lamp { position: absolute; left: 104px; top: 23px; width: 9px; height: 9px; background: var(--agent-color); box-shadow: 0 0 20px 8px color-mix(in srgb, var(--agent-color) 26%, transparent); z-index: 3; }
-.character-portrait { display: block; overflow: hidden; background-color: #eef4f6; background-image: url("/characters/creature-avatar-sheet-v2.webp"); background-repeat: no-repeat; background-size: 400% 300%; }
+.character-portrait { display: block; overflow: hidden; background-color: #f8f5ed; background-image: url("/characters/creature-avatar-sheet-pixel-v3.webp"); background-repeat: no-repeat; background-size: 400% 300%; }
+.character-portrait:not([data-character-index="custom"]) { image-rendering: pixelated; }
 .character-portrait--pod { position: absolute; left: 2px; top: 16px; width: 58px; height: 58px; border: 1px solid rgba(243,232,209,.24); box-shadow: 5px 6px 0 rgba(5,10,18,.38); z-index: 2; }
 .character-portrait--pod::after, .character-portrait--panel::after { content: ""; position: absolute; inset: 0; border: 1px solid rgba(255,255,255,.08); background: linear-gradient(145deg, rgba(255,255,255,.09), transparent 38%, rgba(5,10,18,.06)); pointer-events: none; }
 .pod-label { position: absolute; left: 2px; top: 84px; display: flex; align-items: baseline; gap: 5px; max-width: 128px; }
