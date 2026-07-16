@@ -3,7 +3,12 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { WebSocket } from "ws";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
-import { HermesChatTransportError, type HermesChatEvent, type HermesChatRequest, type HermesChatResult } from "./hermes-chat.js";
+import {
+  HermesChatTransportError,
+  type HermesChatEvent,
+  type HermesChatRequest,
+  type HermesChatResult,
+} from "./hermes-chat.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
 import { ChatSessionCoordinator, type ChatSessionLeaseSnapshot, type ChatSessionOwner } from "./chat-session-coordinator.js";
 import { ChatUpstreamHub } from "./chat-upstream-hub.js";

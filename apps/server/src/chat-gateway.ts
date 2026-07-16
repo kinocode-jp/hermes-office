@@ -15,6 +15,7 @@ const APPROVAL_TTL_MS = 5 * 60_000;
 const MAX_BUFFERED_BYTES = 256 * 1024;
 const MAX_APPROVAL_QUEUE = 8;
 const MAX_APPROVAL_SESSIONS = 128;
+const OWNED_LIVE_METHODS = new Set<HermesChatMethod>(["prompt.submit", "session.steer", "session.interrupt"]);
 
 export interface ChatGatewayLimits {
   maxInFlight: number;
@@ -50,6 +51,7 @@ export interface ChatGatewayDependencies {
 
 type PendingResponseState = "pending" | "claimed" | "consumed";
 interface PendingResponse {
+  sessionId: string;
   createdAt: number;
   createdOrder: number;
   expiresAt: number;
@@ -189,12 +191,19 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
     let claim: PendingClaim | undefined;
     let sessionClaim: ChatSessionClaim | undefined;
+    let ownedRequestLiveId: string | undefined;
     try {
       const access = auth.authorizeSession(officeSession, chatOperation(frame.method));
       if (!access.allowed) { sendRpcError(send, frame.id, -32003, "Operation is not permitted for this device."); return; }
       const targetId = chatTargetId(frame.method, frame.params);
+      const targetOwner = targetId === undefined ? undefined : sessionCoordinator.ownerForLive(targetId);
+      if (OWNED_LIVE_METHODS.has(frame.method) && targetOwner !== sessionOwner) {
+        sendSessionInUse(send, frame.id);
+        return;
+      }
+      if (OWNED_LIVE_METHODS.has(frame.method)) ownedRequestLiveId = targetId;
       if (frame.method !== "session.resume" && frame.method !== "approval.respond"
-        && targetId !== undefined && sessionCoordinator.isOwnedByAnother(sessionOwner, targetId)) {
+        && !OWNED_LIVE_METHODS.has(frame.method) && targetId !== undefined && targetOwner !== undefined && targetOwner !== sessionOwner) {
         sendSessionInUse(send, frame.id);
         return;
       }
@@ -207,7 +216,9 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         const approvalId = typeof frame.params?.approval_id === "string" ? frame.params.approval_id : "";
         const queue = targetId === undefined ? undefined : pendingApprovals.get(targetId);
         const pending = queue?.[0];
-        if (pending === undefined || pending.createdAt === undefined || pending.createdOrder === undefined || pending.expiresAt === undefined || pending.id !== approvalId || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
+        const ownsTarget = targetId !== undefined && targetOwner === sessionOwner;
+        if (!ownsTarget && targetId !== undefined) pendingApprovals.delete(targetId);
+        if (!ownsTarget || pending === undefined || pending.createdAt === undefined || pending.createdOrder === undefined || pending.expiresAt === undefined || pending.id !== approvalId || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
           if (targetId !== undefined && pending?.id === approvalId && pending.expiresAt !== undefined && pending.expiresAt <= receivedAt) {
             const promoted = expireApproval(pendingApprovals, targetId, pending);
             if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
@@ -217,17 +228,21 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         }
         pending.state = "claimed";
         claim = { kind: "approval", key: targetId!, entry: pending };
+        ownedRequestLiveId = targetId;
       }
       if (frame.method === "clarify.respond") {
         const requestId = typeof frame.params?.request_id === "string" ? frame.params.request_id : "";
         const pending = pendingClarifications.get(requestId);
-        if (pending === undefined || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt) {
+        const ownsTarget = pending !== undefined && sessionCoordinator.ownerForLive(pending.sessionId) === sessionOwner;
+        if (pending !== undefined && !ownsTarget) pendingClarifications.delete(requestId);
+        if (!ownsTarget || pending === undefined || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt) {
           if (pending?.expiresAt !== undefined && pending.expiresAt <= receivedAt) pendingClarifications.delete(requestId);
           sendRpcError(send, frame.id, -32004, "Pending clarification was not found.");
           return;
         }
         pending.state = "claimed";
         claim = { kind: "clarification", key: requestId, entry: pending };
+        ownedRequestLiveId = pending.sessionId;
       }
       if (frame.method === "session.create") {
         sessionClaim = sessionCoordinator.claimCreate(sessionOwner, typeof frame.params?.profile === "string" ? frame.params.profile : undefined);
@@ -243,6 +258,11 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       if (closed) { sessionCoordinator.releaseFailedClaim(sessionClaim); return; }
       const result = frame.method === "session.close" && typeof frame.params?.session_id === "string"
         ? await chatHub.closeOwnedSession(sessionOwner, frame.params.session_id)
+        : ownedRequestLiveId !== undefined
+          ? await chatHub.requestOwnedSession(
+            sessionOwner, ownedRequestLiveId,
+            { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
+          )
         : await chatHub.request(
           sessionOwner,
           { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
@@ -333,12 +353,15 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       if (queue.length === 1) sendWire(serializeOfficeChatEvent(activateApproval(approval, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       return;
     }
-    if (event.type === "clarify.request" && typeof event.payload.requestId === "string") {
+    if (event.type === "clarify.request" && event.sessionId !== undefined && typeof event.payload.requestId === "string") {
       const createdAt = now();
       const createdOrder = ++chronology;
       const existing = pendingClarifications.get(event.payload.requestId);
       if (existing?.state !== "claimed") {
-        pendingClarifications.set(event.payload.requestId, { createdAt, createdOrder, expiresAt: createdAt + limits.approvalTtlMs, state: "pending" });
+        pendingClarifications.set(event.payload.requestId, {
+          sessionId: event.sessionId, createdAt, createdOrder,
+          expiresAt: createdAt + limits.approvalTtlMs, state: "pending",
+        });
       }
       trimOldest(pendingClarifications, 128);
     }

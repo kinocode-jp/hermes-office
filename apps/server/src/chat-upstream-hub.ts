@@ -17,6 +17,10 @@ const MAX_UNBOUND_SESSIONS = 64;
 const MAX_UNBOUND_EVENTS = 128;
 const MAX_EVENTS_PER_SESSION = 32;
 const MAX_UNBOUND_BYTES = 256 * 1024;
+const OWNED_LIVE_METHODS = new Set<HermesChatRequest["method"]>(["prompt.submit", "session.steer", "session.interrupt"]);
+const OWNED_SESSION_REQUEST_METHODS = new Set<HermesChatRequest["method"]>([
+  ...OWNED_LIVE_METHODS, "approval.respond", "clarify.respond",
+]);
 
 export interface ChatHubSubscriber {
   onEvent(event: HermesChatEvent): void;
@@ -74,17 +78,49 @@ export class ChatUpstreamHub {
     if (request.method === "session.close") {
       throw new Error("Explicit session close requires Office ownership.");
     }
-    if (!this.#subscribers.has(owner) && this.#coordinator.ownedLiveSessionIds(owner).length === 0) {
-      throw new Error("Chat owner is detached.");
+    if (!this.#subscribers.has(owner)) throw new Error("Chat owner is detached.");
+    if (OWNED_LIVE_METHODS.has(request.method)) {
+      const sessionId = typeof request.params?.session_id === "string" ? request.params.session_id : undefined;
+      if (sessionId === undefined || this.#coordinator.ownerForLive(sessionId) !== owner) {
+        throw new Error("Hermes live session is not owned by this Office connection.");
+      }
+      return await this.#requestUnchecked(
+        request, internal,
+        () => this.#subscribers.has(owner) && this.#coordinator.ownerForLive(sessionId) === owner,
+      );
     }
-    return await this.#requestUnchecked(request, internal);
+    return await this.#requestUnchecked(request, internal, () => this.#subscribers.has(owner));
+  }
+
+  async requestOwnedSession(
+    owner: ChatSessionOwner,
+    liveSessionId: string,
+    request: HermesChatRequest,
+  ): Promise<HermesChatResult> {
+    if (this.#stopping) throw new Error("Chat hub is stopping.");
+    if (!OWNED_SESSION_REQUEST_METHODS.has(request.method)) {
+      throw new Error("Hermes method is not allowed on the owned-session request path.");
+    }
+    if (request.method !== "clarify.respond" && request.params?.session_id !== liveSessionId) {
+      throw new Error("Hermes request target does not match its owned live session.");
+    }
+    if (!this.#subscribers.has(owner)) throw new Error("Chat owner is detached.");
+    if (this.#coordinator.ownerForLive(liveSessionId) !== owner) {
+      throw new Error("Hermes live session is not owned by this Office connection.");
+    }
+    return await this.#requestUnchecked(
+      request, undefined,
+      () => this.#subscribers.has(owner) && this.#coordinator.ownerForLive(liveSessionId) === owner,
+    );
   }
 
   async #requestUnchecked(
     request: HermesChatRequest,
     internal?: HermesChatInternalRequestOptions,
+    authorize?: () => boolean,
   ): Promise<HermesChatResult> {
     const connection = await this.#ensureConnection();
+    if (authorize !== undefined && !authorize()) throw new Error("Hermes live session ownership changed.");
     const generation = this.#generation;
     try {
       const result = await connection.request(request, internal);

@@ -520,6 +520,7 @@ test("queue, in-flight, socket rate, and shared device rate limits are determini
     maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }), limits: { socketRateCapacity: 100 },
   });
   await flush();
+  await bindSessions(activeClient, "s-1");
   for (let index = 0; index < 5; index += 1) activeClient.rpc(index, "session.interrupt", { session_id: "s-1" });
   await flush();
   assert.equal(started, 4);
