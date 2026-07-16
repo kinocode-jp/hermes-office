@@ -99,10 +99,12 @@ function isInventoryPage(value: unknown, kind: InventoryKind): value is Inventor
   const page = value as Partial<InventoryPage>;
   const pagination = page.pagination as Partial<OfficeInventoryPagination> | undefined;
   return page.kind === kind && Array.isArray(page.profiles) && Array.isArray(page.sessions)
-    && typeof pagination?.returned === "number" && Number.isSafeInteger(pagination.returned)
-    && typeof pagination.available === "number" && Number.isSafeInteger(pagination.available)
+    && typeof pagination?.returned === "number" && pagination.returned >= 0 && pagination.returned <= 100 && Number.isSafeInteger(pagination.returned)
+    && typeof pagination.available === "number" && pagination.available >= pagination.returned && Number.isSafeInteger(pagination.available)
     && typeof pagination?.hasMore === "boolean" && typeof pagination.truncated === "boolean"
-    && typeof pagination.partialFailures === "number" && Number.isSafeInteger(pagination.partialFailures)
+    && typeof pagination.partialFailures === "number" && pagination.partialFailures >= 0 && Number.isSafeInteger(pagination.partialFailures)
+    && (pagination.total === undefined || (typeof pagination.total === "number" && pagination.total >= pagination.available && Number.isSafeInteger(pagination.total)))
+    && (pagination.partialFailures === 0 || pagination.truncated)
     && (!pagination.hasMore || (typeof pagination.nextCursor === "string" && pagination.nextCursor.length <= 256));
 }
 

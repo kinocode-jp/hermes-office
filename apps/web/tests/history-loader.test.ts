@@ -4,8 +4,8 @@ import { HistoryAccumulator } from "../src/history-loader.ts";
 
 test("normal history pages accumulate completely", () => {
   const history = new HistoryAccumulator({ maxPages: 4, maxMessages: 10, maxBytes: 10_000 });
-  assert.equal(history.append(page([message(0), message(1)], true)), true);
-  assert.equal(history.append(page([message(2)], false)), false);
+  assert.equal(history.append(page([message(2)], true)), true);
+  assert.equal(history.append(page([message(0), message(1)], false)), false);
   assert.deepEqual(history.messages.map((item) => item.id), ["m0", "m1", "m2"]);
   assert.deepEqual(history.result(), { truncated: false, partial: false, loadedPages: 2, loadedMessages: 3, loadedBytes: history.result().loadedBytes });
 });
@@ -48,7 +48,7 @@ test("a later upstream failure preserves already loaded history as partial", () 
 });
 
 function page(messages: ReturnType<typeof message>[], hasMore: boolean) {
-  return { messages, hasMore, truncated: false, partial: false };
+  return { messages, direction: "older" as const, hasMore, truncated: false, partial: false };
 }
 
 function message(index: number, body = `message-${index}`) {

@@ -10,6 +10,7 @@ export type HistoryLimitReason = "page_limit" | "message_limit" | "byte_limit" |
 export type ClientHistoryLimits = { maxPages: number; maxMessages: number; maxBytes: number };
 export type BoundedHistoryPage = {
   messages: ChatMessage[];
+  direction: "older" | "newer";
   hasMore: boolean;
   truncated: boolean;
   partial: boolean;
@@ -43,13 +44,18 @@ export class HistoryAccumulator {
 
   append(page: BoundedHistoryPage): boolean {
     this.#pages += 1;
-    for (const message of page.messages) {
-      if (this.messages.length >= this.#limits.maxMessages) { this.#reason = "message_limit"; break; }
+    const accepted: ChatMessage[] = [];
+    const candidates = page.direction === "older" ? [...page.messages].reverse() : page.messages;
+    for (const message of candidates) {
+      if (this.messages.length + accepted.length >= this.#limits.maxMessages) { this.#reason = "message_limit"; break; }
       const bytes = encoder.encode(JSON.stringify(message)).byteLength + 1;
       if (this.#bytes + bytes > this.#limits.maxBytes) { this.#reason = "byte_limit"; break; }
-      this.messages.push(message);
+      if (page.direction === "older") accepted.unshift(message);
+      else accepted.push(message);
       this.#bytes += bytes;
     }
+    if (page.direction === "older") this.messages.unshift(...accepted);
+    else this.messages.push(...accepted);
     this.#serverPartial ||= page.partial;
     if (page.truncated) this.#reason ??= normalizeReason(page.truncationReason);
     if (page.hasMore && this.#reason === undefined) {

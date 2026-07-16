@@ -46,7 +46,7 @@ test("delayed resume and history results are discarded after release", async () 
   history.resolve({
     sessionId: "stored-1",
     messages: [{ index: 0, role: "assistant", text: "must be discarded" }],
-    pagination: { hasMore: false, returned: 1 },
+    pagination: { direction: "older", hasMore: false, returned: 1 },
   });
   await flush();
   await flush();
@@ -82,7 +82,7 @@ test("profile-scoped client IDs isolate resume, history, and events for equal st
   const historyPaths: string[] = [];
   const harness = await createHarness(async <T>(path: string) => {
     historyPaths.push(path);
-    return { sessionId: "shared-id", messages: [], pagination: { hasMore: false, returned: 0 } } as T;
+    return { sessionId: "shared-id", messages: [], pagination: { direction: "older", hasMore: false, returned: 0 } } as T;
   });
   const firstId = storedSessionClientId("p1", "shared-id");
   const secondId = storedSessionClientId("p2", "shared-id");
@@ -106,21 +106,44 @@ test("profile-scoped client IDs isolate resume, history, and events for equal st
   harness.api.stop();
 });
 
-test("automatic history loading stops at the cumulative message boundary", async () => {
+test("more than 500 saved messages retain the latest ordered window and report older omission", async () => {
   let pages = 0;
   const harness = await createHarness(async <T>() => {
     const page = pages++;
+    const start = 501 - ((page + 1) * 25);
+    const terminal = page === 19;
     return {
       sessionId: "large-stored",
-      messages: Array.from({ length: 25 }, (_, index) => ({ index: page * 25 + index, role: "assistant", text: `m-${page}-${index}` })),
-      pagination: { hasMore: true, nextCursor: `cursor-${page + 1}`, returned: 25, truncated: false, partial: false },
+      messages: Array.from({ length: 25 }, (_, index) => ({ index: start + index, role: "assistant", text: `m-${start + index}` })),
+      pagination: { direction: "older", hasMore: !terminal, ...(terminal ? {} : { nextCursor: `cursor-${page + 1}` }), returned: 25, truncated: terminal, partial: terminal, ...(terminal ? { truncationReason: "message_limit" } : {}) },
     } as T;
   });
   harness.api.ensureSession({ clientSessionId: "large-client", profileId: "coder", storedSessionId: "large-stored" });
   await waitFor(() => harness.historyResults.length === 1);
   assert.equal(pages, 20);
   assert.deepEqual(harness.historyResults[0], { clientSessionId: "large-client", messages: 500, result: { truncated: true, partial: true, reason: "message_limit" } });
+  assert.equal(harness.historyBodies[0]?.[0], "m-1");
+  assert.equal(harness.historyBodies[0]?.at(-1), "m-500");
   harness.api.stop();
+});
+
+test("499 and exactly 500 saved messages finish without a false partial result", async () => {
+  for (const total of [499, 500]) {
+    let offset = total;
+    const harness = await createHarness(async <T>() => {
+      const start = Math.max(0, offset - 25);
+      const messages = Array.from({ length: offset - start }, (_, index) => ({ index: start + index, role: "assistant", text: `m-${start + index}` }));
+      offset = start;
+      return { sessionId: `stored-${total}`, messages, pagination: { direction: "older", hasMore: offset > 0, ...(offset > 0 ? { nextCursor: `cursor-${offset}` } : {}), returned: messages.length, truncated: false, partial: false } } as T;
+    });
+    harness.api.ensureSession({ clientSessionId: `client-${total}`, profileId: "coder", storedSessionId: `stored-${total}` });
+    await waitFor(() => harness.historyResults.length === 1);
+    assert.deepEqual(harness.historyResults[0]?.result, { truncated: false, partial: false });
+    assert.equal(harness.historyBodies[0]?.length, total);
+    assert.equal(harness.historyBodies[0]?.[0], "m-0");
+    assert.equal(harness.historyBodies[0]?.at(-1), `m-${total - 1}`);
+    harness.api.stop();
+  }
 });
 
 test("a later history page failure delivers prior pages as partial history", async () => {
@@ -131,12 +154,13 @@ test("a later history page failure delivers prior pages as partial history", asy
     return {
       sessionId: "partial-stored",
       messages: Array.from({ length: 2 }, (_, index) => ({ index: (pages - 1) * 2 + index, role: "assistant", text: `m-${pages}-${index}` })),
-      pagination: { hasMore: true, nextCursor: `cursor-${pages}`, returned: 2, truncated: false, partial: false },
+      pagination: { direction: "older", hasMore: true, nextCursor: `cursor-${pages}`, returned: 2, truncated: false, partial: false },
     } as T;
   });
   harness.api.ensureSession({ clientSessionId: "partial-client", profileId: "coder", storedSessionId: "partial-stored" });
   await waitFor(() => harness.historyResults.length === 1);
   assert.deepEqual(harness.historyResults[0], { clientSessionId: "partial-client", messages: 4, result: { truncated: true, partial: true, reason: "upstream_error" } });
+  assert.deepEqual(harness.historyBodies[0], ["m-2-0", "m-2-1", "m-1-0", "m-1-1"]);
   harness.api.stop();
 });
 
@@ -144,12 +168,13 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   const socket = new FakeWebSocket();
   const ready: Array<{ clientSessionId: string; liveSessionId: string }> = [];
   const histories: string[] = [];
+  const historyBodies: string[][] = [];
   const historyResults: Array<{ clientSessionId: string; messages: number; result: Pick<ChatHistoryResult, "truncated" | "partial" | "reason"> }> = [];
   const events: string[] = [];
   let sequence = 0;
   const callbacks: ChatApiCallbacks = {
     onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {}, onSessionError() {}, onHistoryError() {},
-    onHistory(clientSessionId, messages, _storedSessionId, result) { histories.push(clientSessionId); if (result) historyResults.push({ clientSessionId, messages: messages.length, result: { truncated: result.truncated, partial: result.partial, ...(result.reason ? { reason: result.reason } : {}) } }); },
+    onHistory(clientSessionId, messages, _storedSessionId, result) { histories.push(clientSessionId); historyBodies.push(messages.map(({ body }) => body)); if (result) historyResults.push({ clientSessionId, messages: messages.length, result: { truncated: result.truncated, partial: result.partial, ...(result.reason ? { reason: result.reason } : {}) } }); },
     onSessionReady(clientSessionId, liveSessionId) { ready.push({ clientSessionId, liveSessionId }); },
     onEvent(clientSessionId) { events.push(clientSessionId); },
   };
@@ -162,7 +187,7 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   await flush();
   socket.open();
   await flush();
-  return { api, socket, ready, histories, historyResults, events };
+  return { api, socket, ready, histories, historyBodies, historyResults, events };
 }
 
 type RpcFrame = { id: string; method: string; params: Record<string, string> };

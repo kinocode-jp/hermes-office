@@ -1,11 +1,11 @@
 import { computed, signal } from "@preact/signals";
+import { officeInventoryReliability } from "@hermes-office/protocol";
 import { initialSessions, profiles } from "./demo-data";
 import type { ChatGatewayEvent, ChatHistoryResult, ChatTarget } from "./chat-api";
 import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
-
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
 export const tasks = signal<WorkTask[]>([]);
@@ -194,10 +194,12 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
     loadExplicitDemoState();
     return;
   }
-  if (snapshot.capabilities.runtime.state !== "ready" || snapshot.profiles.length === 0) {
+  if (snapshot.capabilities.runtime.state !== "ready") {
     clearRuntimeState();
     return;
   }
+  if (snapshot.profiles.length === 0 && officeInventoryReliability(snapshot.inventory.profiles) !== "complete") return;
+  if (snapshot.profiles.length === 0) { clearRuntimeState(); return; }
 
   const previousProfiles = new Map(profileList.value.map((profile) => [profile.id, profile]));
   const sessionCounts = new Map<string, number>();

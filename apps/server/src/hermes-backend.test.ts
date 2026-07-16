@@ -133,6 +133,86 @@ test("an upstream failure after the first page retains a clearly truncated usabl
   }
 });
 
+test("profile failures, recovery, and authoritative empty inventory remain distinguishable", async () => {
+  let mode: "healthy" | "500" | "timeout" | "invalid" | "empty" = "healthy";
+  const fixture = await startHermesFixture((request, response, url) => {
+    if (url.pathname === "/api/profiles") {
+      if (mode === "500") { response.writeHead(500); response.end(); return; }
+      if (mode === "timeout") return;
+      if (mode === "invalid") return writeJson(response, { profiles: { invalid: true } });
+      return writeJson(response, { profiles: mode === "empty" ? [] : [profileRow(0)] });
+    }
+    if (url.pathname === "/api/profiles/sessions") {
+      return writeJson(response, { sessions: mode === "empty" ? [] : [sessionRow(0)], total: mode === "empty" ? 0 : 1, errors: [] });
+    }
+    return defaultFixtureRoute(request, response, url);
+  }, 500);
+  try {
+    assert.equal((await fixture.backend.start()).state, "ready");
+    assert.deepEqual((await fixture.backend.snapshot()).profiles.map((profile) => profile.id), ["profile-0"]);
+    for (const failure of ["500", "timeout", "invalid"] as const) {
+      mode = failure;
+      const degraded = await fixture.backend.snapshot();
+      assert.deepEqual(degraded.profiles, []);
+      assert.equal(degraded.inventory.profiles.truncated, true);
+      assert.equal(degraded.inventory.profiles.partialFailures, 1);
+      assert.equal(degraded.inventory.profiles.available, 0);
+      assert.equal(degraded.inventory.profiles.total, undefined);
+      assert.equal(degraded.capabilities.runtime.state, "ready");
+    }
+    mode = "healthy";
+    assert.deepEqual((await fixture.backend.snapshot()).profiles.map((profile) => profile.id), ["profile-0"]);
+    mode = "empty";
+    const empty = await fixture.backend.snapshot();
+    assert.deepEqual(empty.profiles, []);
+    assert.deepEqual(empty.sessions, []);
+    assert.equal(empty.inventory.profiles.truncated, false);
+    assert.equal(empty.inventory.profiles.partialFailures, 0);
+    assert.equal(empty.inventory.profiles.total, 0);
+  } finally {
+    await fixture.backend.close();
+    await fixture.close();
+  }
+});
+
+test("session failures preserve a partial contract independently from healthy profiles", async () => {
+  let mode: "healthy" | "500" | "timeout" | "invalid" | "empty" = "healthy";
+  const fixture = await startHermesFixture((request, response, url) => {
+    if (url.pathname === "/api/profiles") return writeJson(response, { profiles: [profileRow(0)] });
+    if (url.pathname === "/api/profiles/sessions") {
+      if (mode === "500") { response.writeHead(500); response.end(); return; }
+      if (mode === "timeout") return;
+      if (mode === "invalid") return writeJson(response, { sessions: { invalid: true }, total: 1, errors: [] });
+      return writeJson(response, { sessions: mode === "empty" ? [] : [sessionRow(0)], total: mode === "empty" ? 0 : 1, errors: [] });
+    }
+    return defaultFixtureRoute(request, response, url);
+  }, 500);
+  try {
+    assert.equal((await fixture.backend.start()).state, "ready");
+    assert.deepEqual((await fixture.backend.snapshot()).sessions.map((session) => session.id), ["session-0"]);
+    for (const failure of ["500", "timeout", "invalid"] as const) {
+      mode = failure;
+      const degraded = await fixture.backend.snapshot();
+      assert.deepEqual(degraded.profiles.map((profile) => profile.id), ["profile-0"]);
+      assert.deepEqual(degraded.sessions, []);
+      assert.equal(degraded.inventory.sessions.truncated, true);
+      assert.equal(degraded.inventory.sessions.partialFailures, 1);
+      assert.equal(degraded.inventory.sessions.available, 0);
+    }
+    mode = "healthy";
+    assert.deepEqual((await fixture.backend.snapshot()).sessions.map((session) => session.id), ["session-0"]);
+    mode = "empty";
+    const empty = await fixture.backend.snapshot();
+    assert.deepEqual(empty.sessions, []);
+    assert.equal(empty.inventory.sessions.truncated, false);
+    assert.equal(empty.inventory.sessions.partialFailures, 0);
+    assert.equal(empty.inventory.sessions.total, 0);
+  } finally {
+    await fixture.backend.close();
+    await fixture.close();
+  }
+});
+
 for (const scenario of ["404", "500", "timeout", "mapping"] as const) {
   test(`a Kanban ${scenario} failure preserves healthy profile and session inventory`, async () => {
     let boardRequests = 0;

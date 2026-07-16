@@ -15,6 +15,7 @@ test("Office Server seeds only session.create with trusted global context", asyn
     close: async () => undefined,
     kanban: () => { throw new Error("unused"); },
     chat: () => ({
+      inspectHistory: async ({ sessionId }: { sessionId: string }) => ({ sessionId, total: 0 }),
       fetchHistory: async () => { throw new Error("unused"); },
       connect: async () => ({
         closed: false,

@@ -5,6 +5,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_FRAME_BYTES = 256 * 1024;
 const DEFAULT_MAX_HISTORY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_TEXT_BYTES = 128 * 1024;
+const MAX_HISTORY_OFFSET = 100_000_000;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -67,6 +68,11 @@ export interface HermesHistoryRequest {
   offset?: number;
 }
 
+export interface HermesHistorySummary {
+  sessionId: string;
+  total: number;
+}
+
 export type HermesHistoryRole = "assistant" | "system" | "tool" | "user";
 
 export interface HermesHistoryMessageDto {
@@ -91,6 +97,7 @@ export interface HermesHistoryDto {
 
 export interface HermesChatTransport {
   connect(onEvent: (event: HermesChatEvent) => void): Promise<HermesChatConnection>;
+  inspectHistory(request: Pick<HermesHistoryRequest, "sessionId" | "profile">): Promise<HermesHistorySummary>;
   fetchHistory(request: HermesHistoryRequest): Promise<HermesHistoryDto>;
 }
 
@@ -122,6 +129,7 @@ export function createHermesChatTransport(
   const config = normalizeOptions(options);
   return {
     connect: async (onEvent) => await openConnection(config, onEvent),
+    inspectHistory: async (request) => await inspectHistory(config, request),
     fetchHistory: async (request) => await fetchHistory(config, request),
   };
 }
@@ -272,6 +280,37 @@ async function openConnection(
   };
 }
 
+async function inspectHistory(
+  config: NormalizedOptions,
+  request: Pick<HermesHistoryRequest, "sessionId" | "profile">,
+): Promise<HermesHistorySummary> {
+  const first = await fetchHistory(config, { ...request, limit: 1, offset: 0 });
+  const target = new URL(`/api/sessions/${encodeURIComponent(first.sessionId)}`, config.baseUrl);
+  target.searchParams.set("profile", requiredProfile(request.profile));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  timer.unref();
+  try {
+    const response = await fetch(target, {
+      headers: { Accept: "application/json", "X-Hermes-Session-Token": config.sessionToken },
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw publicError("backend_rejected", response.status === 404 ? "Chat history was not found." : "Hermes rejected the history request.");
+    const raw = JSON.parse(await readBoundedText(response, config.maxHistoryBytes)) as unknown;
+    if (!isRecord(raw) || !Number.isSafeInteger(raw.message_count) || Number(raw.message_count) < 0 || Number(raw.message_count) > MAX_HISTORY_OFFSET) {
+      throw publicError("backend_rejected", "Hermes returned invalid chat history metadata.");
+    }
+    return { sessionId: first.sessionId, total: Number(raw.message_count) };
+  } catch (error) {
+    if (error instanceof HermesChatTransportError) throw error;
+    if (isAbortError(error)) throw publicError("timed_out", "Chat history request timed out.");
+    throw publicError("backend_rejected", "Unable to inspect chat history.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchHistory(
   config: NormalizedOptions,
   request: HermesHistoryRequest,
@@ -279,7 +318,7 @@ async function fetchHistory(
   const sessionId = requiredId(request.sessionId, "sessionId");
   const profile = requiredProfile(request.profile);
   const limit = boundedInteger(request.limit, 200, 1, 500);
-  const offset = boundedInteger(request.offset, 0, 0, 1_000_000);
+  const offset = boundedInteger(request.offset, 0, 0, MAX_HISTORY_OFFSET);
   const target = new URL(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, config.baseUrl);
   target.searchParams.set("profile", profile);
   target.searchParams.set("limit", String(limit));
@@ -401,7 +440,8 @@ function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | u
 function normalizeHistory(raw: unknown, requestedId: string, profile: string, limit: number, offset: number, maxTextBytes: number): HermesHistoryDto {
   if (!isRecord(raw) || !Array.isArray(raw.messages)) throw publicError("backend_rejected", "Hermes returned invalid chat history.");
   const resolvedId = safeId(raw.session_id) ?? requestedId;
-  const messages = raw.messages.slice(0, limit).flatMap((item, index): HermesHistoryMessageDto[] => {
+  const entries = raw.messages.slice(0, limit);
+  const messages = entries.flatMap((item, index): HermesHistoryMessageDto[] => {
     if (!isRecord(item) || !isRole(item.role)) return [];
     const timestamp = normalizeTimestamp(item.timestamp);
     const toolName = safeShortText(item.tool_name, 120);
@@ -412,7 +452,7 @@ function normalizeHistory(raw: unknown, requestedId: string, profile: string, li
     const redacted = text !== original;
     return [{ index: offset + index, role: item.role, text, ...(redacted ? { redacted: true } : {}), ...(timestamp === undefined ? {} : { timestamp }) }];
   });
-  return { sessionId: resolvedId, profile, messages, pagination: { limit, offset, returned: messages.length } };
+  return { sessionId: resolvedId, profile, messages, pagination: { limit, offset, returned: entries.length } };
 }
 
 function normalizeOptions(options: HermesChatTransportOptions): NormalizedOptions {

@@ -3,7 +3,9 @@ import type { HermesChatTransport, HermesHistoryDto, HermesHistoryMessageDto } f
 
 const DEFAULT_PAGE_LIMIT = 25;
 const MAX_PAGE_LIMIT = 50;
+const MAX_HISTORY_OFFSET = 100_000_000;
 const CURSOR_SECRET = randomBytes(32);
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export const DEFAULT_HISTORY_AGGREGATE_LIMITS: HistoryAggregateLimits = {
   maxPages: 40,
@@ -13,7 +15,15 @@ export const DEFAULT_HISTORY_AGGREGATE_LIMITS: HistoryAggregateLimits = {
 
 export type HistoryTruncationReason = "page_limit" | "message_limit" | "byte_limit";
 export type HistoryAggregateLimits = { maxPages: number; maxMessages: number; maxBytes: number };
-type HistoryCursorState = { offset: number; pages: number; messages: number; bytes: number };
+type HistoryCursorState = {
+  sessionId: string;
+  start: number;
+  end: number;
+  offset: number;
+  pages: number;
+  messages: number;
+  bytes: number;
+};
 
 export interface OfficeHistoryPage extends Omit<HermesHistoryDto, "pagination"> {
   pagination: {
@@ -22,22 +32,24 @@ export interface OfficeHistoryPage extends Omit<HermesHistoryDto, "pagination"> 
     returned: number;
     hasMore: boolean;
     nextCursor?: string;
+    direction: "older";
     pageLimitedByBytes: boolean;
     truncated: boolean;
     partial: boolean;
     truncationReason?: HistoryTruncationReason;
     cumulative: { pages: number; messages: number; bytes: number };
     limits: HistoryAggregateLimits;
+    window: { start: number; end: number; omittedBefore: boolean };
   };
 }
 
 export class HistoryHttpInputError extends Error {}
 
-/** Fetches one response-bounded page while enforcing signed cumulative limits. */
+/** Loads a signed, bounded tail window from newest to oldest. */
 export async function fetchOfficeHistoryPage(
   chat: HermesChatTransport,
   requestUrl: URL,
-  sessionId: string,
+  requestedSessionId: string,
   maxResponseBytes: number,
   limits: HistoryAggregateLimits = DEFAULT_HISTORY_AGGREGATE_LIMITS,
 ): Promise<OfficeHistoryPage> {
@@ -45,49 +57,86 @@ export async function fetchOfficeHistoryPage(
   validateLimits(limits);
   const profile = requestUrl.searchParams.get("profile") ?? "default";
   const limit = parseLimit(requestUrl.searchParams.get("limit"));
-  const cursor = decodeCursor(requestUrl.searchParams.get("cursor"), limits);
-  const history = await chat.fetchHistory({ sessionId, profile, limit, offset: cursor.offset });
-  return fitPage(history, limit, cursor, maxResponseBytes, limits);
+  const encodedCursor = requestUrl.searchParams.get("cursor");
+  const cursor = encodedCursor === null
+    ? await initialCursor(chat, requestedSessionId, profile, limits)
+    : decodeCursor(encodedCursor, requestedSessionId, profile, limits);
+  const fetchOffset = Math.max(cursor.start, cursor.offset - limit);
+  const fetchLimit = cursor.offset - fetchOffset;
+  const history = fetchLimit === 0
+    ? emptyHistory(cursor.sessionId, profile, fetchOffset)
+    : await chat.fetchHistory({ sessionId: cursor.sessionId, profile, limit: fetchLimit, offset: fetchOffset });
+  if (history.pagination.offset !== fetchOffset || history.pagination.returned !== fetchLimit) {
+    throw new Error("Hermes history changed while its tail window was loading.");
+  }
+  return fitPage(history, limit, cursor, requestedSessionId, profile, maxResponseBytes, limits);
+}
+
+async function initialCursor(
+  chat: HermesChatTransport,
+  requestedSessionId: string,
+  profile: string,
+  limits: HistoryAggregateLimits,
+): Promise<HistoryCursorState> {
+  const summary = await chat.inspectHistory({ sessionId: requestedSessionId, profile });
+  if (!ID_PATTERN.test(summary.sessionId) || !Number.isSafeInteger(summary.total) || summary.total < 0 || summary.total > MAX_HISTORY_OFFSET) {
+    throw new Error("Hermes returned invalid history metadata.");
+  }
+  return {
+    sessionId: summary.sessionId,
+    start: Math.max(0, summary.total - limits.maxMessages),
+    end: summary.total,
+    offset: summary.total,
+    pages: 0,
+    messages: 0,
+    bytes: 0,
+  };
 }
 
 function fitPage(
   history: HermesHistoryDto,
   limit: number,
   cursor: HistoryCursorState,
+  requestedSessionId: string,
+  profile: string,
   maxResponseBytes: number,
   limits: HistoryAggregateLimits,
 ): OfficeHistoryPage {
   const messages: HermesHistoryMessageDto[] = [];
   let addedBytes = 0;
   let truncationReason: HistoryTruncationReason | undefined;
-  const upstreamMayHaveMore = history.pagination.returned >= limit;
-  for (const message of history.messages) {
+  for (let index = history.messages.length - 1; index >= 0; index -= 1) {
+    const message = history.messages[index]!;
     if (cursor.messages + messages.length >= limits.maxMessages) { truncationReason = "message_limit"; break; }
     const messageBytes = Buffer.byteLength(JSON.stringify(message)) + 1;
     if (cursor.bytes + addedBytes + messageBytes > limits.maxBytes) { truncationReason = "byte_limit"; break; }
-    const candidateMessages = messages.concat(message);
+    const candidateMessages = [message, ...messages];
     const candidateBytes = addedBytes + messageBytes;
-    const candidateHasMore = candidateMessages.length < history.messages.length || upstreamMayHaveMore;
-    const candidate = makePage(history, candidateMessages, limit, cursor, candidateBytes, candidateHasMore, false, undefined, limits);
+    const candidateOffset = message.index;
+    const candidateHasMore = candidateOffset > cursor.start;
+    const candidateReason = candidateHasMore ? undefined : terminalOmissionReason(cursor);
+    const candidate = makePage(history, candidateMessages, limit, cursor, candidateOffset, candidateBytes, candidateHasMore, false, candidateReason, requestedSessionId, profile, limits);
     if (Buffer.byteLength(JSON.stringify(candidate)) > maxResponseBytes) break;
-    messages.push(message);
+    messages.unshift(message);
     addedBytes = candidateBytes;
   }
 
   const pageLimitedByBytes = messages.length < history.messages.length && truncationReason === undefined;
-  const moreAvailable = messages.length < history.messages.length || upstreamMayHaveMore;
+  const nextOffset = messages[0]?.index ?? cursor.offset;
+  const moreAvailable = nextOffset > cursor.start;
   const cumulative = { pages: cursor.pages + 1, messages: cursor.messages + messages.length, bytes: cursor.bytes + addedBytes };
   if (moreAvailable && truncationReason === undefined) {
     if (cumulative.pages >= limits.maxPages) truncationReason = "page_limit";
     else if (cumulative.messages >= limits.maxMessages) truncationReason = "message_limit";
     else if (cumulative.bytes >= limits.maxBytes) truncationReason = "byte_limit";
   }
-  const truncated = moreAvailable && truncationReason !== undefined;
+  if (!moreAvailable && truncationReason === undefined) truncationReason = terminalOmissionReason(cursor);
+  const truncated = truncationReason !== undefined;
   const hasMore = moreAvailable && !truncated;
-  if (messages.length === 0 && (hasMore || (truncated && cursor.messages === 0))) {
+  if (messages.length === 0 && (cursor.offset > cursor.start || (truncated && cursor.messages === 0))) {
     throw new Error("A single history message exceeds the Office response or aggregate budget.");
   }
-  const page = makePage(history, messages, limit, cursor, addedBytes, hasMore, pageLimitedByBytes, truncated ? truncationReason : undefined, limits);
+  const page = makePage(history, messages, limit, cursor, nextOffset, addedBytes, hasMore, pageLimitedByBytes, truncated ? truncationReason : undefined, requestedSessionId, profile, limits);
   if (Buffer.byteLength(JSON.stringify(page)) > maxResponseBytes) throw new Error("History metadata exceeds the Office response budget.");
   return page;
 }
@@ -97,33 +146,45 @@ function makePage(
   messages: HermesHistoryMessageDto[],
   limit: number,
   cursor: HistoryCursorState,
+  nextOffset: number,
   addedBytes: number,
   hasMore: boolean,
   pageLimitedByBytes: boolean,
   truncationReason: HistoryTruncationReason | undefined,
+  requestedSessionId: string,
+  profile: string,
   limits: HistoryAggregateLimits,
 ): OfficeHistoryPage {
-  const nextOffset = messages.length === 0 ? cursor.offset : Math.max(cursor.offset + messages.length, messages.at(-1)!.index + 1);
   const cumulative = { pages: cursor.pages + 1, messages: cursor.messages + messages.length, bytes: cursor.bytes + addedBytes };
   const truncated = truncationReason !== undefined;
   return {
-    sessionId: history.sessionId,
+    sessionId: cursor.sessionId,
     profile: history.profile,
     messages,
     pagination: {
       limit,
-      offset: cursor.offset,
+      offset: history.pagination.offset,
       returned: messages.length,
       hasMore,
-      ...(hasMore ? { nextCursor: encodeCursor({ offset: nextOffset, ...cumulative }) } : {}),
+      ...(hasMore ? { nextCursor: encodeCursor({ ...cursor, offset: nextOffset, ...cumulative }, requestedSessionId, profile) } : {}),
+      direction: "older",
       pageLimitedByBytes,
       truncated,
       partial: truncated && cumulative.messages > 0,
       ...(truncationReason === undefined ? {} : { truncationReason }),
       cumulative,
       limits,
+      window: { start: cursor.start, end: cursor.end, omittedBefore: cursor.start > 0 },
     },
   };
+}
+
+function terminalOmissionReason(cursor: HistoryCursorState): HistoryTruncationReason | undefined {
+  return cursor.start > 0 ? "message_limit" : undefined;
+}
+
+function emptyHistory(sessionId: string, profile: string, offset: number): HermesHistoryDto {
+  return { sessionId, profile, messages: [], pagination: { limit: 0, offset, returned: 0 } };
 }
 
 function validateQuery(url: URL): void {
@@ -142,29 +203,36 @@ function parseLimit(value: string | null): number {
   return parsed;
 }
 
-function encodeCursor(state: HistoryCursorState): string {
-  const payload = `v2:${state.offset}:${state.pages}:${state.messages}:${state.bytes}`;
-  const signature = createHmac("sha256", CURSOR_SECRET).update(payload).digest("base64url");
+function encodeCursor(state: HistoryCursorState, requestedSessionId: string, profile: string): string {
+  const resolvedId = Buffer.from(state.sessionId, "utf8").toString("base64url");
+  const payload = `v3:${resolvedId}:${state.start}:${state.end}:${state.offset}:${state.pages}:${state.messages}:${state.bytes}`;
+  const signature = signCursor(payload, requestedSessionId, profile).toString("base64url");
   return Buffer.from(`${payload}:${signature}`, "utf8").toString("base64url");
 }
 
-function decodeCursor(value: string | null, limits: HistoryAggregateLimits): HistoryCursorState {
-  if (value === null) return { offset: 0, pages: 0, messages: 0, bytes: 0 };
-  if (value.length > 256) throw new HistoryHttpInputError("History cursor is invalid.");
+function decodeCursor(value: string, requestedSessionId: string, profile: string, limits: HistoryAggregateLimits): HistoryCursorState {
+  if (value.length > 512) throw new HistoryHttpInputError("History cursor is invalid.");
   let decoded: string;
   try { decoded = Buffer.from(value, "base64url").toString("utf8"); }
   catch { throw new HistoryHttpInputError("History cursor is invalid."); }
-  const match = /^v2:(0|[1-9][0-9]{0,6}):(0|[1-9][0-9]{0,2}):(0|[1-9][0-9]{0,5}):(0|[1-9][0-9]{0,8}):([A-Za-z0-9_-]{43})$/.exec(decoded);
+  const match = /^v3:([A-Za-z0-9_-]{2,171}):(0|[1-9][0-9]{0,8}):(0|[1-9][0-9]{0,8}):(0|[1-9][0-9]{0,8}):(0|[1-9][0-9]{0,2}):(0|[1-9][0-9]{0,5}):(0|[1-9][0-9]{0,8}):([A-Za-z0-9_-]{43})$/.exec(decoded);
   if (match === null) throw new HistoryHttpInputError("History cursor is invalid.");
   const payload = decoded.slice(0, decoded.lastIndexOf(":"));
-  const expected = createHmac("sha256", CURSOR_SECRET).update(payload).digest();
-  const actual = Buffer.from(match[5]!, "base64url");
+  const expected = signCursor(payload, requestedSessionId, profile);
+  const actual = Buffer.from(match[8]!, "base64url");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HistoryHttpInputError("History cursor is invalid.");
-  const state = { offset: Number(match[1]), pages: Number(match[2]), messages: Number(match[3]), bytes: Number(match[4]) };
-  if (!Object.values(state).every(Number.isSafeInteger) || state.offset > 1_000_000 || state.pages >= limits.maxPages || state.messages >= limits.maxMessages || state.bytes >= limits.maxBytes) {
+  const sessionId = Buffer.from(match[1]!, "base64url").toString("utf8");
+  const state = { sessionId, start: Number(match[2]), end: Number(match[3]), offset: Number(match[4]), pages: Number(match[5]), messages: Number(match[6]), bytes: Number(match[7]) };
+  if (!ID_PATTERN.test(sessionId) || !Object.values(state).slice(1).every(Number.isSafeInteger)
+    || state.start > state.offset || state.offset > state.end || state.end > MAX_HISTORY_OFFSET || state.end - state.start > limits.maxMessages
+    || state.pages >= limits.maxPages || state.messages >= limits.maxMessages || state.bytes >= limits.maxBytes) {
     throw new HistoryHttpInputError("History cursor is outside the allowed continuation range.");
   }
   return state;
+}
+
+function signCursor(payload: string, requestedSessionId: string, profile: string): Buffer {
+  return createHmac("sha256", CURSOR_SECRET).update(requestedSessionId).update("\0").update(profile).update("\0").update(payload).digest();
 }
 
 function validateLimits(limits: HistoryAggregateLimits): void {

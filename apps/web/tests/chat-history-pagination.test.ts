@@ -9,7 +9,7 @@ test("history page metadata and stable cross-page message indexes are normalized
       { index: 25, role: "user", text: "next user message" },
       { index: 26, role: "assistant", text: "next assistant message" },
     ],
-    pagination: { hasMore: true, nextCursor: "djE6Mjc", returned: 2 },
+    pagination: { direction: "older", hasMore: true, nextCursor: "djE6Mjc", returned: 2 },
   }, "stored-requested");
 
   assert.equal(page.resolvedStoredSessionId, "stored-resolved");
@@ -26,14 +26,14 @@ test("history page metadata and stable cross-page message indexes are normalized
 test("server truncation metadata is preserved without requesting another page", () => {
   const page = normalizeHistoryPage({
     messages: [{ index: 499, role: "assistant", text: "bounded result" }],
-    pagination: { hasMore: false, returned: 1, truncated: true, partial: true, truncationReason: "message_limit" },
+    pagination: { direction: "older", hasMore: false, returned: 1, truncated: true, partial: true, truncationReason: "message_limit" },
   }, "stored-1");
   assert.deepEqual({ truncated: page.truncated, partial: page.partial, reason: page.truncationReason }, { truncated: true, partial: true, reason: "message_limit" });
 });
 
 test("a continuation flag without a cursor is rejected", () => {
   assert.throws(
-    () => normalizeHistoryPage({ messages: [], pagination: { hasMore: true } }, "stored-1"),
+    () => normalizeHistoryPage({ messages: [], pagination: { direction: "older", hasMore: true } }, "stored-1"),
     /履歴ページ情報/,
   );
 });

@@ -435,6 +435,7 @@ function targetsMatch(current: ChatTarget, incoming: ChatTarget): boolean {
 
 export function normalizeHistoryPage(value: unknown, storedSessionId: string): {
   messages: ChatMessage[];
+  direction: "older";
   resolvedStoredSessionId?: string;
   hasMore: boolean;
   nextCursor?: string;
@@ -466,13 +467,15 @@ export function normalizeHistoryPage(value: unknown, storedSessionId: string): {
   const pagination = asRecord(record?.pagination);
   const hasMore = pagination?.hasMore === true;
   const truncated = pagination?.truncated === true;
-  const nextCursor = typeof pagination?.nextCursor === "string" && pagination.nextCursor.length <= 256
+  const nextCursor = typeof pagination?.nextCursor === "string" && pagination.nextCursor.length <= 512
     ? pagination.nextCursor
     : undefined;
-  if ((hasMore && nextCursor === undefined) || (hasMore && truncated)) throw new Error("Office Serverの履歴ページ情報に互換性がありません。");
+  const direction = pagination?.direction;
+  if ((hasMore && nextCursor === undefined) || (hasMore && truncated) || direction !== "older") throw new Error("Office Serverの履歴ページ情報に互換性がありません。");
   const truncationReason = typeof pagination?.truncationReason === "string" ? pagination.truncationReason : undefined;
   return {
     messages,
+    direction: "older",
     ...(resolvedStoredSessionId ? { resolvedStoredSessionId } : {}),
     hasMore,
     ...(nextCursor ? { nextCursor } : {}),

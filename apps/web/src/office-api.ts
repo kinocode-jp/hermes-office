@@ -357,6 +357,8 @@ function isInventoryPagination(value: unknown): boolean {
     && typeof page.available === "number" && page.available >= page.returned && Number.isSafeInteger(page.available)
     && typeof page.hasMore === "boolean" && typeof page.truncated === "boolean"
     && typeof page.partialFailures === "number" && page.partialFailures >= 0 && Number.isSafeInteger(page.partialFailures)
+    && (page.total === undefined || (typeof page.total === "number" && page.total >= page.available && Number.isSafeInteger(page.total)))
+    && (page.partialFailures === 0 || page.truncated === true)
     && (!page.hasMore || (typeof page.nextCursor === "string" && page.nextCursor.length <= 256));
 }
 

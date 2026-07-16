@@ -253,6 +253,21 @@ export interface OfficeInventoryPagination {
   nextCursor?: string;
 }
 
+export type OfficeInventoryReliability = "complete" | "partial" | "unavailable";
+
+/**
+ * Controls whether a client may treat missing inventory rows as confirmed
+ * deletions. An unavailable zero-row read must retain last-known-good state;
+ * a complete zero-row read is an authoritative empty inventory.
+ */
+export function officeInventoryReliability(
+  page: Pick<OfficeInventoryPagination, "returned" | "available" | "truncated" | "partialFailures">,
+): OfficeInventoryReliability {
+  if (page.returned === 0 && page.available === 0 && page.partialFailures > 0) return "unavailable";
+  if (page.truncated || page.partialFailures > 0) return "partial";
+  return "complete";
+}
+
 export interface OfficeInventoryMetadata {
   profiles: OfficeInventoryPagination;
   sessions: OfficeInventoryPagination;

@@ -29,11 +29,12 @@ independent audit, certification, or warranty.
   WebSocket frames, outbound responses, and event buffers are bounded. HTTP
   responses use a separate bounded budget from request bodies; large chat
   histories and profile/session inventories use byte-bounded pages and opaque
-  continuation cursors. History cursors carry signed cumulative page, message,
-  and UTF-8 wire-byte totals; both server and client stop at 40 pages, 500
-  messages, or 8 MiB and expose a partial/truncated state. Inventory collection
-  also has an overall deadline and row/page ceilings; incomplete upstream reads
-  are marked truncated. Slow chat
+  continuation cursors. History cursors are signed, session/profile-bound, and
+  carry the fixed tail window plus cumulative page, message, and UTF-8 wire-byte
+  totals. Both server and client page newest-to-older and stop at 40 pages, 500
+  messages, or 8 MiB, preserving the newest saved turns in a partial result.
+  Inventory collection also has an overall deadline and row/page ceilings;
+  incomplete upstream reads are marked truncated. Slow chat
   clients are disconnected with a retryable close code and resynchronize from
   durable history after reconnecting.
 - Static web serving rejects traversal and symlink escape and sets a restrictive

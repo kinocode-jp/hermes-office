@@ -150,11 +150,20 @@ List responses intentionally omit heavyweight `system_prompt` and `model_config`
 unless `full=1`. Office should keep that default and page messages (maximum 500
 per request) rather than loading every transcript at startup.
 
+Hermes stores messages in insertion order and applies a zero-based `offset`.
+Its messages response does not declare a total, so Office performs one bounded
+message probe to resolve the resume descendant and reads that session's
+`message_count`. It then fixes a tail window and pages from newest to older;
+each returned page and the final assembled transcript remain in insertion order.
+This ensures every safety stop retains the newest saved turns, and a session
+with exactly 500 messages is complete rather than falsely marked partial.
+
 Office history continuation is cumulatively bounded as well as response-bounded.
-Signed cursors carry the page, delivered-message, and UTF-8 wire-byte totals;
-the server and Web client independently stop at 40 pages, 500 messages, or
-8 MiB. Reaching a limit or losing a later page preserves the already loaded
-messages as an explicit partial result instead of attempting an unbounded render.
+Signed, session/profile-bound cursors carry the resolved session, fixed window,
+page count, delivered-message count, and UTF-8 wire-byte total. The server and
+Web client independently stop at 40 pages, 500 messages, or 8 MiB. Reaching a
+limit or losing a later, older page preserves the newest already-loaded messages
+as an explicit partial result instead of attempting an unbounded render.
 
 `GET /api/profiles` is not paginated by Hermes. Office reads its single bounded
 response, then exposes both profile and session inventories as 100-row Office
@@ -255,6 +264,10 @@ administration.
    route/method inventories against upstream `main`.
 6. If an endpoint disappears or changes semantics, fail the affected feature
    closed while preserving chat and read-only status where safe.
+7. Inventory metadata is authoritative only when `partialFailures` is zero and
+   `truncated` is false. A zero-row partial/unavailable read retains the
+   client's last-known-good Profile, session and open-chat state; only a
+   complete zero-row read confirms deletion or a genuinely empty runtime.
 
 ## Known uncertainties
 

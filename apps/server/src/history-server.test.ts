@@ -21,6 +21,7 @@ test("Office history endpoint serves large histories as bounded cursor pages", a
     close: async () => undefined,
     chat: () => ({
       connect: async () => { throw new Error("unused"); },
+      inspectHistory: async ({ sessionId }) => ({ sessionId, total: messages.length }),
       fetchHistory: async (request) => {
         requests.push({
           ...(request.limit === undefined ? {} : { limit: request.limit }),
@@ -61,8 +62,8 @@ test("Office history endpoint serves large histories as bounded cursor pages", a
   });
   const secondPage = await second.json() as { messages: Array<{ index: number }> };
   assert.equal(second.status, 200);
-  assert.equal(secondPage.messages[0]?.index, 25);
-  assert.deepEqual(requests.slice(0, 2), [{ limit: 25, offset: 0 }, { limit: 25, offset: 25 }]);
+  assert.equal(secondPage.messages[0]?.index, 10);
+  assert.deepEqual(requests.slice(0, 2), [{ limit: 25, offset: 35 }, { limit: 25, offset: 10 }]);
 
   const invalid = await fetch(`${base}/api/v1/sessions/stored-1/messages?limit=500`, {
     headers: { Origin: ORIGIN, Cookie: cookie },

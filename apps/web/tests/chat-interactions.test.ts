@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatSession, OfficeSnapshot } from "../src/domain.ts";
 import { approvalChoicesForAccess } from "../src/components/chat-pane.tsx";
-import { applyChatGatewayEvent, officeSnapshot, reduceChatGatewayEvent, registerChatRuntime, respondToApproval, sessions } from "../src/store.ts";
+import { applyChatGatewayEvent, applyChatHistory, officeSnapshot, reduceChatGatewayEvent, registerChatRuntime, respondToApproval, sessions } from "../src/store.ts";
 
 const session: ChatSession = {
   id: "client-1",
@@ -13,6 +13,17 @@ const session: ChatSession = {
   connectionState: "ready",
   remoteKind: "stored"
 };
+
+test("resumed history keeps its ordered latest window before newer live messages", () => {
+  sessions.value = [{ ...session, messages: [{ id: "live-501", from: "agent", body: "live", at: "12:03", status: "complete" }] }];
+  applyChatHistory(session.id, [
+    { id: "saved-499", from: "user", body: "saved user", at: "12:01", status: "complete" },
+    { id: "saved-500", from: "agent", body: "saved agent", at: "12:02", status: "complete" },
+  ], "resolved-session", { truncated: true, partial: true, loadedPages: 20, loadedMessages: 500, loadedBytes: 4_000, reason: "message_limit" });
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["saved-499", "saved-500", "live-501"]);
+  assert.equal(sessions.value[0]?.storedSessionId, "resolved-session");
+  assert.equal(sessions.value[0]?.historyPartial, true);
+});
 
 test("clarification requests become durable waiting interactions", () => {
   const next = reduceChatGatewayEvent(session, {

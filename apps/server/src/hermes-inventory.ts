@@ -59,12 +59,12 @@ async function collectProfiles(
 ): Promise<CollectionState> {
   try {
     const result = await boundedRequest(request, "/api/profiles", deadline, budget);
-    const source = recordArray(result, "profiles");
-    const rows = dedupeRecords(source.slice(0, MAX_PROFILE_ROWS), (row) => readString(row, "name"));
-    const incomplete = source.length > MAX_PROFILE_ROWS || rows.length < Math.min(source.length, MAX_PROFILE_ROWS);
+    const source = requiredRecordArray(result, "profiles");
+    const rows = dedupeRecords(source.records.slice(0, MAX_PROFILE_ROWS), (row) => readString(row, "name"));
+    const incomplete = source.invalid || source.records.length > MAX_PROFILE_ROWS || rows.length < Math.min(source.records.length, MAX_PROFILE_ROWS);
     return {
       rows,
-      total: source.length,
+      total: source.wireLength,
       truncated: incomplete,
       partialFailures: incomplete ? 1 : 0,
     };
@@ -100,10 +100,22 @@ async function collectSessions(
       requestFailures += 1;
       break;
     }
-    const pageRows = recordArray(value, "sessions");
+    let pageSource: { records: Record<string, unknown>[]; wireLength: number; invalid: boolean };
+    try {
+      pageSource = requiredRecordArray(value, "sessions");
+    } catch {
+      truncated = true;
+      requestFailures += 1;
+      break;
+    }
+    const pageRows = pageSource.records;
+    if (pageSource.invalid) { truncated = true; requestFailures += 1; }
     const reportedTotal = readNonNegativeInteger(value, "total");
     if (reportedTotal !== undefined) total = Math.max(total ?? 0, reportedTotal);
-    for (const failure of recordArray(value, "errors")) {
+    let failures: Record<string, unknown>[] = [];
+    try { failures = optionalRecordArray(value, "errors"); }
+    catch { truncated = true; requestFailures += 1; }
+    for (const failure of failures) {
       failedProfiles.add(readString(failure, "profile") ?? "unknown");
     }
     for (const row of pageRows) {
@@ -117,12 +129,12 @@ async function collectSessions(
       if (rows.length === MAX_SESSION_ROWS) break;
     }
 
-    if (pageRows.length === 0) {
+    if (pageSource.wireLength === 0) {
       if ((total ?? offset) > offset) { truncated = true; requestFailures += 1; }
       break;
     }
-    offset += pageRows.length;
-    const upstreamHasMore = total === undefined ? pageRows.length >= UPSTREAM_PAGE_SIZE : offset < total;
+    offset += pageSource.wireLength;
+    const upstreamHasMore = total === undefined ? pageSource.wireLength >= UPSTREAM_PAGE_SIZE : offset < total;
     if (!upstreamHasMore) break;
     if (page === MAX_SESSION_PAGES - 1 || rows.length === MAX_SESSION_ROWS) truncated = true;
   }
@@ -297,7 +309,18 @@ function mapSessions(rows: Record<string, unknown>[]): ChatSessionSummary[] {
 
 function activity(gateway: boolean, active: number): AgentActivity { return active > 0 ? "thinking" : gateway ? "idle" : "offline"; }
 function epochToIso(value: number | undefined): string { return new Date((value ?? Date.now() / 1_000) * 1_000).toISOString(); }
-function recordArray(value: unknown, key: string): Record<string, unknown>[] { const rows = isRecord(value) ? value[key] : undefined; return Array.isArray(rows) ? rows.filter(isRecord) : []; }
+function requiredRecordArray(value: unknown, key: string): { records: Record<string, unknown>[]; wireLength: number; invalid: boolean } {
+  const rows = isRecord(value) ? value[key] : undefined;
+  if (!Array.isArray(rows)) throw new Error(`Hermes inventory ${key} contract is invalid.`);
+  const records = rows.filter(isRecord);
+  return { records, wireLength: rows.length, invalid: records.length !== rows.length };
+}
+function optionalRecordArray(value: unknown, key: string): Record<string, unknown>[] {
+  const rows = isRecord(value) ? value[key] : undefined;
+  if (rows === undefined) return [];
+  if (!Array.isArray(rows) || rows.some((row) => !isRecord(row))) throw new Error(`Hermes inventory ${key} contract is invalid.`);
+  return rows;
+}
 function readString(value: unknown, key: string): string | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "string" ? item : undefined; }
 function readNumber(value: unknown, key: string): number | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "number" && Number.isFinite(item) ? item : undefined; }
 function readNonNegativeInteger(value: unknown, key: string): number | undefined { const item = readNumber(value, key); return item !== undefined && Number.isSafeInteger(item) && item >= 0 ? item : undefined; }

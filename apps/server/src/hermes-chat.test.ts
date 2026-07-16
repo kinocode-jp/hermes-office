@@ -13,11 +13,16 @@ import {
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
 test("fetchHistory authenticates internally and returns a bounded secret-safe DTO", async (t) => {
-  let observedUrl = "";
+  const observedUrls: string[] = [];
   let observedToken = "";
   const server = createServer((request, response) => {
-    observedUrl = request.url ?? "";
+    const observedUrl = request.url ?? "";
+    observedUrls.push(observedUrl);
     observedToken = String(request.headers["x-hermes-session-token"] ?? "");
+    if (!observedUrl.includes("/messages?")) {
+      writeJson(response, { id: "resolved-42", message_count: 501, system_prompt: "must never escape" });
+      return;
+    }
     writeJson(response, {
       session_id: "resolved-42",
       messages: [
@@ -35,6 +40,7 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
   t.after(() => server.close());
 
   const transport = createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN });
+  const summary = await transport.inspectHistory({ sessionId: "session-42", profile: "coder" });
   const history = await transport.fetchHistory({
     sessionId: "session-42",
     profile: "coder",
@@ -43,9 +49,10 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
   });
 
   assert.equal(observedToken, TOKEN);
-  assert.match(observedUrl, /^\/api\/sessions\/session-42\/messages\?/);
-  assert.match(observedUrl, /profile=coder/);
-  assert.match(observedUrl, /limit=4/);
+  assert.deepEqual(summary, { sessionId: "resolved-42", total: 501 });
+  assert.ok(observedUrls.some((url) => /^\/api\/sessions\/session-42\/messages\?/.test(url) && url.includes("limit=1") && url.includes("offset=0")));
+  assert.ok(observedUrls.some((url) => /^\/api\/sessions\/resolved-42\?/.test(url) && url.includes("profile=coder")));
+  assert.ok(observedUrls.some((url) => /^\/api\/sessions\/session-42\/messages\?/.test(url) && url.includes("limit=4") && url.includes("offset=2")));
   assert.deepEqual(history.pagination, { limit: 4, offset: 2, returned: 4 });
   assert.equal(history.sessionId, "resolved-42");
   assert.deepEqual(history.messages.map((message) => message.role), ["system", "user", "assistant", "tool"]);
