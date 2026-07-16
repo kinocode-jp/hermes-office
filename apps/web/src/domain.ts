@@ -132,6 +132,16 @@ export type OfficeSnapshotProfile = {
   activeSessionCount: number;
 };
 
+export type OfficeInventoryPagination = {
+  returned: number;
+  available: number;
+  total?: number;
+  hasMore: boolean;
+  truncated: boolean;
+  partialFailures: number;
+  nextCursor?: string;
+};
+
 export type OfficeSnapshot = {
   generatedAt: string;
   sequence: number;
@@ -150,5 +160,6 @@ export type OfficeSnapshot = {
   };
   profiles: OfficeSnapshotProfile[];
   sessions: Array<{ id: string; profileId: string; title: string; activity: string }>;
+  inventory: { profiles: OfficeInventoryPagination; sessions: OfficeInventoryPagination };
   boards: Array<{ id: string; name: string; cardCount: number }>;
 };

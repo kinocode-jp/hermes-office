@@ -220,6 +220,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
       inheritedSkills: previous?.inheritedSkills ?? []
     };
   });
+  if (snapshot.inventory.profiles.hasMore || snapshot.inventory.profiles.truncated) profileList.value = [...profileList.value, ...[...previousProfiles.values()].filter((profile) => !snapshot.profiles.some((live) => live.id === profile.id))];
 
   const previousSessions = sessions.value;
   const snapshotSessions = snapshot.sessions.map((live): ChatSession => {
@@ -239,8 +240,9 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
       readOnly: previous?.connectionState !== "ready"
     };
   });
+  const retainedStored = snapshot.inventory.sessions.hasMore || snapshot.inventory.sessions.truncated ? previousSessions.filter((session) => session.remoteKind === "stored" && !snapshot.sessions.some((live) => live.id === (session.storedSessionId ?? session.id) && live.profileId === session.profileId)) : [];
   const unpersistedDrafts = previousSessions.filter((session) => session.remoteKind === "draft" && !session.storedSessionId);
-  sessions.value = [...snapshotSessions, ...unpersistedDrafts];
+  sessions.value = [...snapshotSessions, ...retainedStored, ...unpersistedDrafts];
 
   const liveSessionIds = new Set(sessions.value.map((session) => session.id));
   const previouslyOpen = openSessionIds.value;
@@ -531,7 +533,8 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     const approvalId = stringValue(payload.approvalId) ?? stringValue(payload.approval_id);
     const command = stringValue(payload.command);
     const description = stringValue(payload.description);
-    const allowPermanent = payload.allowPermanent === true || payload.allow_permanent === true;
+    const allowPermanent = (payload.allowPermanent === true || payload.allow_permanent === true)
+      && officeSnapshot.value?.capabilities.access.allowedOperations.includes("chat.approval.permanent") === true;
     const choices = approvalChoices(payload.choices, allowPermanent);
     if (!approvalId || choices.length === 0) return session;
     return withPendingInteraction(session, {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
 import { locale, localizeRuntimeMessage, t } from "../i18n";
-import { activeSessionId, closeSession, interruptSession, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage } from "../store";
+import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage } from "../store";
 
 export function ChatPane({ session, profile }: { session: ChatSession; profile: Profile }) {
   const [draft, setDraft] = useState("");
@@ -115,6 +115,9 @@ function ChatInteraction({ sessionId, interaction, connected }: {
   useEffect(() => setAnswer(""), [interaction.id]);
 
   if (interaction.kind === "approval") {
+    const canApprovePermanently = interaction.allowPermanent
+      && officeSnapshot.value?.capabilities.access.allowedOperations.includes("chat.approval.permanent") === true;
+    const choices = approvalChoicesForAccess(interaction, canApprovePermanently);
     return (
       <section class="chat-interaction approval-interaction" aria-label={t("chat.approvalAria")}>
         <span class="interaction-kicker">{t("chat.approvalRequired")}</span>
@@ -123,12 +126,12 @@ function ChatInteraction({ sessionId, interaction, connected }: {
         {interaction.error && <p class="interaction-error" role="alert">{localizeRuntimeMessage(interaction.error)}</p>}
         {!connected && <p class="interaction-note">{t("chat.approvalOffline")}</p>}
         <div class="interaction-actions">
-          {interaction.choices.map((choice) => (
+          {choices.map((choice) => (
             <button
               key={choice}
               type="button"
               class={choice === "deny" ? "is-deny" : choice === "always" ? "is-permanent" : ""}
-              disabled={disabled || (choice === "always" && !interaction.allowPermanent)}
+              disabled={disabled || (choice === "always" && !canApprovePermanently)}
               onClick={() => void respondToApproval(sessionId, choice)}
             >
               {approvalLabel(choice)}
@@ -169,6 +172,13 @@ function ChatInteraction({ sessionId, interaction, connected }: {
       {interaction.submitting && <span class="interaction-progress">{t("chat.submitting")}</span>}
     </section>
   );
+}
+
+export function approvalChoicesForAccess(
+  interaction: Extract<ChatPendingInteraction, { kind: "approval" }>,
+  canApprovePermanently: boolean,
+): ApprovalChoice[] {
+  return interaction.choices.filter((choice) => choice !== "always" || canApprovePermanently);
 }
 
 function approvalLabel(choice: ApprovalChoice): string {

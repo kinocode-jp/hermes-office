@@ -7,9 +7,11 @@ function snapshot(access: unknown): unknown {
     generatedAt: "2026-07-16T00:00:00.000Z",
     sequence: 1,
     capabilities: { protocolVersion: 1, serverVersion: "0.2.0", runtime: { state: "ready" }, access, features: ["chat", "profiles"] },
-    profiles: [], sessions: [], boards: [],
+    profiles: [], sessions: [], inventory: emptyInventory(), boards: [],
   };
 }
+
+function emptyInventory() { const page = { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 }; return { profiles: page, sessions: page }; }
 
 test("snapshot validator requires bounded effective access capabilities", () => {
   assert.equal(isOfficeSnapshot(snapshot({

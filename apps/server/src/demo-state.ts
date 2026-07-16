@@ -82,6 +82,10 @@ export function createDemoSnapshot(now = new Date()): OfficeSnapshot {
         lastMessagePreview: "Connect Hermes to begin a live session.",
       },
     ],
+    inventory: {
+      profiles: { returned: 2, available: 2, total: 2, hasMore: false, truncated: false, partialFailures: 0 },
+      sessions: { returned: 1, available: 1, total: 1, hasMore: false, truncated: false, partialFailures: 0 },
+    },
     boards: [
       {
         id: "board-main",

@@ -237,7 +237,32 @@ export interface OfficeSnapshot {
   globalSettings: GlobalSettings;
   profiles: readonly ProfileSummary[];
   sessions: readonly ChatSessionSummary[];
+  inventory: OfficeInventoryMetadata;
   boards: readonly KanbanBoardSummary[];
+}
+
+export type OfficeInventoryKind = "profiles" | "sessions";
+
+export interface OfficeInventoryPagination {
+  returned: number;
+  available: number;
+  total?: number;
+  hasMore: boolean;
+  truncated: boolean;
+  partialFailures: number;
+  nextCursor?: string;
+}
+
+export interface OfficeInventoryMetadata {
+  profiles: OfficeInventoryPagination;
+  sessions: OfficeInventoryPagination;
+}
+
+export interface OfficeInventoryPage {
+  kind: OfficeInventoryKind;
+  profiles: readonly ProfileSummary[];
+  sessions: readonly ChatSessionSummary[];
+  pagination: OfficeInventoryPagination;
 }
 
 export interface SkillSummary {

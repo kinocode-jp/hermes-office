@@ -7,6 +7,7 @@ import { connectOfficeApi } from "./office-api";
 import { isLocalOfficeClient } from "./auth-state";
 import { notifyAccessAuditChanged, shouldRefreshAccessAudit } from "./audit-api";
 import { initializeI18n } from "./i18n";
+import { initializeInventory } from "./inventory";
 import {
   applyChatGatewayEvent,
   applyChatHistory,
@@ -62,6 +63,7 @@ const officeApi = connectOfficeApi({
   onConnecting: setOfficeConnecting,
   onSnapshot(snapshot, serverUrl) {
     applyOfficeSnapshot(snapshot, serverUrl);
+    initializeInventory(snapshot, serverUrl);
     setOfficeAuthenticated(serverUrl);
     startAuthenticatedServices();
     if (snapshot.capabilities.runtime.state === "ready") void refreshKanbanBoard();

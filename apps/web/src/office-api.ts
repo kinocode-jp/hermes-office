@@ -334,11 +334,23 @@ export function isOfficeSnapshot(value: unknown): value is OfficeSnapshot {
     && Array.isArray(candidate.profiles)
     && Array.isArray(candidate.sessions)
     && Array.isArray(candidate.boards)
+    && isInventoryPagination(candidate.inventory?.profiles)
+    && isInventoryPagination(candidate.inventory?.sessions)
     && typeof candidate.capabilities?.protocolVersion === "number"
     && typeof candidate.capabilities.runtime?.state === "string"
     && Array.isArray(candidate.capabilities.features)
     && candidate.capabilities.features.every((feature) => ["chat", "profiles", "skills", "memory", "kanban", "global-inheritance", "demo"].includes(feature))
     && isOfficeAccess(candidate.capabilities.access);
+}
+
+function isInventoryPagination(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const page = value as Record<string, unknown>;
+  return typeof page.returned === "number" && page.returned >= 0 && page.returned <= 100 && Number.isSafeInteger(page.returned)
+    && typeof page.available === "number" && page.available >= page.returned && Number.isSafeInteger(page.available)
+    && typeof page.hasMore === "boolean" && typeof page.truncated === "boolean"
+    && typeof page.partialFailures === "number" && page.partialFailures >= 0 && Number.isSafeInteger(page.partialFailures)
+    && (!page.hasMore || (typeof page.nextCursor === "string" && page.nextCursor.length <= 256));
 }
 
 function isOfficeAccess(value: unknown): boolean {

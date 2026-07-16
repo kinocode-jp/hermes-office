@@ -17,6 +17,7 @@ import { AvatarPicker } from "./avatar-picker";
 import { InfoTip } from "./info-tip";
 import { useState } from "preact/hooks";
 import { t, type TranslationKey } from "../i18n";
+import { loadMoreSessions, sessionInventoryState } from "../inventory";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
   { id: "chat", label: "profile.chat" },
@@ -58,6 +59,7 @@ function openLiveSettings(tab: Exclude<InspectorTab, "chat">): void {
 
 function ChatList() {
   const profile = selectedProfile.value;
+  const inventory = sessionInventoryState.value;
   if (!profile) return null;
   return (
     <div class="panel-section">
@@ -70,6 +72,9 @@ function ChatList() {
           </button>
         ))}
       </div>
+      {inventory.hasMore && <button class="secondary-button inventory-more" disabled={inventory.loading} onClick={() => void loadMoreSessions()}>{inventory.loading ? t("inventory.loading") : t("inventory.showMore")}</button>}
+      {inventory.truncated && !inventory.hasMore && <small class="inventory-note">{t("inventory.truncated")}</small>}
+      {inventory.error && <small class="inventory-note inventory-note--error">{inventory.error}</small>}
     </div>
   );
 }

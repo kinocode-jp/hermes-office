@@ -22,9 +22,12 @@ function snapshot(allowedOperations: Operation[], tier: "operator" | "manager" |
     },
     profiles: [],
     sessions: [],
+    inventory: { profiles: emptyPage(), sessions: emptyPage() },
     boards: [],
   };
 }
+
+function emptyPage() { return { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 }; }
 
 test("settings mutations fail closed for a remote operator snapshot", () => {
   const access = settingsMutationAccess(snapshot(

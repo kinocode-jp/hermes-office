@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChatSession } from "../src/domain.ts";
-import { applyChatGatewayEvent, reduceChatGatewayEvent, registerChatRuntime, respondToApproval, sessions } from "../src/store.ts";
+import type { ChatSession, OfficeSnapshot } from "../src/domain.ts";
+import { approvalChoicesForAccess } from "../src/components/chat-pane.tsx";
+import { applyChatGatewayEvent, officeSnapshot, reduceChatGatewayEvent, registerChatRuntime, respondToApproval, sessions } from "../src/store.ts";
 
 const session: ChatSession = {
   id: "client-1",
@@ -40,6 +41,29 @@ test("permanent approval is removed unless the gateway explicitly permits it", (
 
   assert.equal(next.pendingInteraction?.kind, "approval");
   assert.deepEqual(next.pendingInteraction?.choices, ["once", "deny"]);
+  assert.equal(next.pendingInteraction?.kind === "approval" && next.pendingInteraction.allowPermanent, false);
+});
+
+test("local owner capability preserves an explicitly allowed permanent approval", () => {
+  officeSnapshot.value = snapshotWithOperations(["state.read", "chat.approval.permanent"]);
+  try {
+    const next = reduceChatGatewayEvent(session, {
+      type: "approval.request", liveSessionId: "live-1",
+      payload: { approvalId: "approval-owner", choices: ["once", "always"], allowPermanent: true },
+    });
+    assert.equal(next.pendingInteraction?.kind, "approval");
+    assert.deepEqual(next.pendingInteraction?.choices, ["once", "always"]);
+    assert.equal(next.pendingInteraction?.kind === "approval" && next.pendingInteraction.allowPermanent, true);
+  } finally { officeSnapshot.value = undefined; }
+});
+
+test("approval UI hides permanent choice without current capability", () => {
+  const interaction = {
+    id: "approval:ui", kind: "approval" as const, approvalId: "ui", choices: ["once", "always", "deny"] as const,
+    allowPermanent: true, submitting: false,
+  };
+  assert.deepEqual(approvalChoicesForAccess({ ...interaction, choices: [...interaction.choices] }, false), ["once", "deny"]);
+  assert.deepEqual(approvalChoicesForAccess({ ...interaction, choices: [...interaction.choices] }, true), ["once", "always", "deny"]);
 });
 
 test("an older approval completion cannot clear a newly promoted approval", async () => {
@@ -109,3 +133,16 @@ test("private sudo and secret events are never promoted to public interactions",
   assert.equal(reduceChatGatewayEvent(session, { type: "sudo.request", liveSessionId: "live-1" }), session);
   assert.equal(reduceChatGatewayEvent(session, { type: "secret.request", liveSessionId: "live-1" }), session);
 });
+
+function snapshotWithOperations(allowedOperations: OfficeSnapshot["capabilities"]["access"]["allowedOperations"]): OfficeSnapshot {
+  return {
+    generatedAt: "2026-07-16T00:00:00.000Z", sequence: 1,
+    capabilities: {
+      protocolVersion: 1, serverVersion: "0.1.0", runtime: { state: "ready" }, features: ["chat"],
+      access: { deviceId: "local-browser", tier: "owner", exposure: "loopback", authentication: "local-cookie", allowedOperations },
+    },
+    profiles: [], sessions: [], inventory: { profiles: emptyPage(), sessions: emptyPage() }, boards: [],
+  };
+}
+
+function emptyPage() { return { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 }; }

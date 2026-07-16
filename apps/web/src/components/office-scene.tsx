@@ -14,6 +14,7 @@ import {
   type SimCharacter
 } from "../office/sim";
 import { assignTask, selectProfile, selectedProfileId, sessions, tasks } from "../store";
+import { loadMoreProfiles, profileInventoryState } from "../inventory";
 import { CharacterPortrait } from "./character-portrait";
 import { InfoTip } from "./info-tip";
 import { StatusPill } from "./status-pill";
@@ -252,6 +253,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
     () => generateWorld(officeLayout.value, officeSize.value, Math.max(1, profiles.length)),
     [officeLayout.value, officeSize.value, profiles.length]
   );
+  const inventory = profileInventoryState.value;
 
   return (
     <section class="office-wrap" aria-labelledby="office-title" data-view={officeView.value}>
@@ -285,6 +287,9 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
 
       {officeView.value === "scene" && <OfficeStage profiles={profiles} world={world} />}
       <OfficeList profiles={profiles} />
+      {inventory.hasMore && <button class="secondary-button inventory-more" disabled={inventory.loading} onClick={() => void loadMoreProfiles()}>{inventory.loading ? t("inventory.loading") : t("inventory.showMore")}</button>}
+      {inventory.truncated && !inventory.hasMore && <small class="inventory-note">{t("inventory.truncated")}</small>}
+      {inventory.error && <small class="inventory-note inventory-note--error">{inventory.error}</small>}
     </section>
   );
 }

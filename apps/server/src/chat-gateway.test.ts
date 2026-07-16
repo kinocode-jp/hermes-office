@@ -120,7 +120,14 @@ test("approval and clarification remain exact-socket, one-shot, expiring, and di
   a.rpc(3, "approval.respond", { session_id: "s-1", choice: "once" });
   callbacks[0]!({ type: "approval.request", sessionId: "s-invalid", payload: { choices: ["once"], allowPermanent: false } });
   a.rpc(4, "approval.respond", { session_id: "s-invalid", choice: "deny" });
-  callbacks[0]!({ type: "approval.request", sessionId: "s-permanent", payload: { choices: ["always"], allowPermanent: true } });
+  const remotePermanent: HermesChatEvent = { type: "approval.request", sessionId: "s-permanent", payload: { choices: ["once", "always"], allowPermanent: true } };
+  callbacks[0]!(remotePermanent);
+  const remotePermanentWire = a.events().find((event) => event.sessionId === "s-permanent");
+  assert.ok(remotePermanentWire);
+  assert.deepEqual(remotePermanentWire.payload?.choices, ["once"]);
+  assert.equal(remotePermanentWire.payload?.allowPermanent, false);
+  assert.deepEqual(remotePermanent.payload.choices, ["once", "always"]);
+  assert.equal(remotePermanent.payload.allowPermanent, true);
   a.rpc(5, "approval.respond", { session_id: "s-permanent", choice: "always" });
   callbacks[0]!({ type: "approval.request", sessionId: "s-expired", payload: { choices: ["once"], allowPermanent: false } });
   now += 51;
@@ -158,6 +165,10 @@ test("approval and clarification remain exact-socket, one-shot, expiring, and di
   });
   await flush();
   localPublish({ type: "approval.request", sessionId: "s-local", payload: { choices: ["always"], allowPermanent: true } });
+  const localPermanentWire = localClient.events().find((event) => event.sessionId === "s-local");
+  assert.ok(localPermanentWire);
+  assert.deepEqual(localPermanentWire.payload?.choices, ["always"]);
+  assert.equal(localPermanentWire.payload?.allowPermanent, true);
   localClient.rpc(11, "approval.respond", { session_id: "s-local", choice: "always" });
   await flush();
   assert.deepEqual(localRequests.map((request) => request.method), ["approval.respond"]);
@@ -499,12 +510,17 @@ class FakeWebSocket extends EventEmitter {
     this.emit("message", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params: enriched })), false);
   }
   approvalId(sessionId: string): string {
-    const events = this.frames().filter((frame) => frame.method === "event").map((frame) => frame.params as { sessionId?: string; type?: string; payload?: { approvalId?: string } });
-    return [...events].reverse().find((event) => event.type === "approval.request" && event.sessionId === sessionId)?.payload?.approvalId ?? "";
+    return [...this.events()].reverse().find((event) => event.type === "approval.request" && event.sessionId === sessionId)?.payload?.approvalId ?? "";
   }
   errorCode(id: number): number | undefined { return (this.frames().find((frame) => frame.id === id)?.error as { code?: number } | undefined)?.code; }
   hasError(id: number): boolean { return this.errorCode(id) !== undefined; }
   frames(): Array<Record<string, unknown>> { return this.sent.map((body) => JSON.parse(body) as Record<string, unknown>); }
+  events(): Array<{ sessionId?: string; type?: string; payload?: { approvalId?: string; choices?: string[]; allowPermanent?: boolean } }> {
+    return this.frames().flatMap((frame) => {
+      if (frame.method !== "event" || typeof frame.params !== "object" || frame.params === null || Array.isArray(frame.params)) return [];
+      return [frame.params as { sessionId?: string; type?: string; payload?: { approvalId?: string; choices?: string[]; allowPermanent?: boolean } }];
+    });
+  }
 }
 
 function runtimeWithConnections(factory: (onEvent: (event: HermesChatEvent) => void) => ReturnType<typeof connection>): HermesRuntimeSource { return runtimeWithConnect(async (onEvent) => factory(onEvent)); }

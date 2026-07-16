@@ -9,6 +9,7 @@ import { isSettingsHttpPath, isSettingsMutation, routeSettingsHttp } from "./set
 import { DeviceAuthBodyError, readDeviceAuthBody } from "./device-auth-http.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
 import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
+import { routeInventoryHttp } from "./inventory-http.js";
 import { StaticWebAssets, type StaticWebAsset } from "./static-web.js";
 import {
   OFFICE_PROTOCOL_VERSION,
@@ -364,6 +365,12 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       const devices = deviceAccess.allowed ? auth.listDevices(deviceAccess.session) : undefined;
       if (devices === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
       else writeJson(response, 200, devices, maxResponseJsonBytes);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/v1/inventory") {
+      const result = await routeInventoryHttp(runtimeSource, requestUrl);
+      writeJson(response, result.status, result.body, maxResponseJsonBytes);
       return;
     }
 

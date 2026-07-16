@@ -28,7 +28,9 @@ independent audit, certification, or warranty.
 - HTTP methods, content types, JSON shapes, identifiers, request bodies,
   WebSocket frames, outbound responses, and event buffers are bounded. HTTP
   responses use a separate bounded budget from request bodies; large chat
-  histories use byte-bounded pages and opaque continuation cursors. Slow chat
+  histories and profile/session inventories use byte-bounded pages and opaque
+  continuation cursors. Inventory collection also has an overall deadline and
+  row/page ceilings; incomplete upstream reads are marked truncated. Slow chat
   clients are disconnected with a retryable close code and resynchronize from
   durable history after reconnecting.
 - Static web serving rejects traversal and symlink escape and sets a restrictive

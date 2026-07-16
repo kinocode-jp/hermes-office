@@ -191,6 +191,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tag-list.inherited > span { border-color: var(--amber); background: rgba(242,184,75,.06); }
 .tag-list i { color: var(--muted); font-style: normal; font-size: 8px; text-transform: uppercase; }
 .secondary-button { min-height: 38px; border: 1px solid var(--line); background: transparent; cursor: pointer; }
+.inventory-more { width: 100%; margin-top: 8px; }
+.inventory-note { display: block; margin-top: 8px; color: var(--amber); font: 600 9px/1.4 ui-monospace, monospace; }
+.inventory-note--error { color: var(--coral); }
 .memory-meter { height: 6px; background: rgba(243,232,209,.08); }
 .memory-meter span { display: block; height: 100%; background: var(--aqua); }
 .memory-card { padding: 12px; border: 1px solid var(--line); background: rgba(243,232,209,.025); }

@@ -94,6 +94,7 @@ export class ChatDeviceRateLimiter {
 
 export function handleOfficeChatConnection(client: WebSocket, dependencies: ChatGatewayDependencies): void {
   const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter } = dependencies;
+  const canApprovePermanently = auth.effectiveAccess(officeSession).allowedOperations.includes("chat.approval.permanent");
   const now = dependencies.now ?? Date.now;
   const limits = {
     ...DEFAULT_LIMITS,
@@ -243,8 +244,9 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
 
   void chatTransport.connect((event) => {
     if (event.type === "approval.request" && event.sessionId !== undefined) {
-      const choices = Array.isArray(event.payload.choices)
-        ? event.payload.choices.filter((choice): choice is string => typeof choice === "string")
+      const normalizedEvent = normalizeApprovalEvent(event, canApprovePermanently);
+      const choices = Array.isArray(normalizedEvent.payload.choices)
+        ? normalizedEvent.payload.choices.filter((choice): choice is string => typeof choice === "string")
         : [];
       const queue = pendingApprovals.get(event.sessionId) ?? [];
       if ((queue.length === 0 && pendingApprovals.size >= MAX_APPROVAL_SESSIONS) || queue.length >= limits.maxApprovalQueue) {
@@ -254,7 +256,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       }
       const approval: PendingApproval = {
         id: `approval_${randomBytes(16).toString("base64url")}`,
-        choices: new Set(choices), event, state: "pending",
+        choices: new Set(choices), event: normalizedEvent, state: "pending",
       };
       queue.push(approval);
       pendingApprovals.set(event.sessionId, queue);
@@ -370,6 +372,15 @@ function activateApproval(approval: PendingApproval, createdAt: number, createdO
   approval.expiresAt = createdAt + ttlMs;
   approval.state = "pending";
   return officeApprovalEvent(approval);
+}
+
+function normalizeApprovalEvent(event: HermesChatEvent, canApprovePermanently: boolean): HermesChatEvent {
+  const upstreamAllowsPermanent = event.payload.allowPermanent === true || event.payload.allow_permanent === true;
+  const allowPermanent = canApprovePermanently && upstreamAllowsPermanent;
+  const choices = Array.isArray(event.payload.choices)
+    ? event.payload.choices.filter((choice): choice is string => typeof choice === "string" && (choice !== "always" || allowPermanent))
+    : [];
+  return { ...event, payload: { ...event.payload, choices, allowPermanent, allow_permanent: allowPermanent } };
 }
 
 function trimOldest<T>(collection: Map<string, T> | Set<string>, maximum: number): void {

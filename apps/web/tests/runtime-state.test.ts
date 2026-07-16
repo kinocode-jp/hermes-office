@@ -34,9 +34,12 @@ function snapshot(options: {
     },
     profiles: options.profiles ?? [{ id: "live-profile", name: "Live Profile", activity: "idle", activeSessionCount: 0 }],
     sessions: [],
+    inventory: { profiles: emptyPage(), sessions: emptyPage() },
     boards: []
   };
 }
+
+function emptyPage() { return { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 }; }
 
 test("demo fixtures load only when the server explicitly advertises demo mode", () => {
   assert.deepEqual(profileList.value, []);

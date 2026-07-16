@@ -136,6 +136,11 @@ global configuration layer. See [Profiles](https://hermes-agent.nousresearch.com
 
 - `GET /api/profiles/sessions` is the preferred cross-profile, read-only list.
   It reads profile databases directly and does not start one backend per profile.
+  Office follows its `limit`/`offset`/`total` contract in 100-row requests, with
+  an overall deadline, response-byte budget, and row/page ceiling. Duplicate
+  rows keep their first observed order. Hermes `errors`, an incomplete page, or
+  a safety ceiling produce an explicit truncated inventory instead of a silent
+  complete-looking list.
 - `GET /api/sessions` is profile-scoped and supports pagination/filtering.
 - `GET /api/sessions/{id}` and `/messages` load detail/history.
 - `PATCH /api/sessions/{id}` renames or archives.
@@ -144,6 +149,11 @@ global configuration layer. See [Profiles](https://hermes-agent.nousresearch.com
 List responses intentionally omit heavyweight `system_prompt` and `model_config`
 unless `full=1`. Office should keep that default and page messages (maximum 500
 per request) rather than loading every transcript at startup.
+
+`GET /api/profiles` is not paginated by Hermes. Office reads its single bounded
+response, then exposes both profile and session inventories as 100-row Office
+pages with opaque continuation cursors. Snapshot metadata includes `hasMore`,
+`truncated`, the cached/known totals, and partial-failure counts.
 
 ### Skills
 

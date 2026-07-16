@@ -37,6 +37,13 @@ export type ChatApiConnection = {
   stop(): void;
 };
 
+export type ChatApiDependencies = {
+  serverUrl?: string;
+  createWebSocket?: (url: string) => Promise<WebSocket>;
+  fetchJson?: typeof officeFetchJson;
+  randomId?: () => string;
+};
+
 type JsonRpcResult = {
   session_id?: unknown;
   stored_session_id?: unknown;
@@ -49,8 +56,11 @@ type JsonRpcResult = {
 type PendingRequest = {
   resolve(value: unknown): void;
   reject(reason: Error): void;
-  timeout: number;
+  timeout: ReturnType<typeof setTimeout>;
 };
+
+type ActiveTarget = { generation: number; target: ChatTarget };
+type LiveTarget = { clientSessionId: string; generation: number };
 
 const RPC_TIMEOUT_MS = 15_000;
 const HISTORY_TIMEOUT_MS = 10_000;
@@ -58,23 +68,27 @@ const RECONNECT_MAX_MS = 8_000;
 const HISTORY_PAGE_LIMIT = 25;
 const MAX_HISTORY_PAGES = 2_000;
 
-export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
-  const serverUrl = officeServerUrl();
-  const targets = new Map<string, ChatTarget>();
-  const liveToClient = new Map<string, string>();
+export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatApiDependencies = {}): ChatApiConnection {
+  const serverUrl = dependencies.serverUrl ?? officeServerUrl();
+  const createWebSocket = dependencies.createWebSocket ?? createAuthenticatedOfficeWebSocket;
+  const fetchJson = dependencies.fetchJson ?? officeFetchJson;
+  const randomId = dependencies.randomId ?? (() => crypto.randomUUID());
+  const targets = new Map<string, ActiveTarget>();
+  const liveToClient = new Map<string, LiveTarget>();
   const pending = new Map<string, PendingRequest>();
-  const opening = new Set<string>();
-  const historyLoads = new Set<string>();
-  const loadedHistories = new Set<string>();
+  const opening = new Map<string, symbol>();
+  const historyLoads = new Map<string, symbol>();
+  const loadedHistories = new Map<string, ActiveTarget>();
+  let nextGeneration = 0;
   let socket: WebSocket | undefined;
   let socketOpening = false;
   let stopped = false;
   let reconnectAttempt = 0;
-  let reconnectTimer: number | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
   const rejectPending = (message: string) => {
     for (const request of pending.values()) {
-      window.clearTimeout(request.timeout);
+      globalThis.clearTimeout(request.timeout);
       request.reject(new Error(message));
     }
     pending.clear();
@@ -84,7 +98,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     if (stopped || reconnectTimer !== undefined) return;
     const delay = Math.min(RECONNECT_MAX_MS, 800 * (2 ** reconnectAttempt));
     reconnectAttempt += 1;
-    reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = globalThis.setTimeout(() => {
       reconnectTimer = undefined;
       void openSocket();
     }, delay);
@@ -122,15 +136,16 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
         ? params.session_id
         : typeof params?.sessionId === "string" ? params.sessionId : "";
       const type = typeof params?.type === "string" ? params.type : "";
-      const clientSessionId = liveToClient.get(liveSessionId);
-      if (!clientSessionId || !type) return;
+      const liveTarget = liveToClient.get(liveSessionId);
+      const active = liveTarget === undefined ? undefined : targets.get(liveTarget.clientSessionId);
+      if (!liveTarget || active?.generation !== liveTarget.generation || !type) return;
+      const clientSessionId = liveTarget.clientSessionId;
       const payload = asRecord(params?.payload);
       const storedSessionId = typeof payload?.stored_session_id === "string"
         ? payload.stored_session_id
         : typeof payload?.storedSessionId === "string" ? payload.storedSessionId : undefined;
       if (storedSessionId) {
-        const target = targets.get(clientSessionId);
-        if (target) targets.set(clientSessionId, { ...target, storedSessionId });
+        active.target = { ...active.target, storedSessionId };
         callbacks.onSessionReady(clientSessionId, liveSessionId, storedSessionId);
       }
       callbacks.onEvent(clientSessionId, {
@@ -144,7 +159,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     const id = typeof frame.id === "string" || typeof frame.id === "number" ? String(frame.id) : "";
     const request = pending.get(id);
     if (!request) return;
-    window.clearTimeout(request.timeout);
+    globalThis.clearTimeout(request.timeout);
     pending.delete(id);
     const error = asRecord(frame.error);
     if (error) {
@@ -160,7 +175,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     callbacks.onSocketState("connecting");
     let nextSocket: WebSocket;
     try {
-      nextSocket = await createAuthenticatedOfficeWebSocket(chatWebSocketUrl(serverUrl));
+      nextSocket = await createWebSocket(chatWebSocketUrl(serverUrl));
     } catch (error) {
       socketOpening = false;
       callbacks.onSocketState("error", errorText(error));
@@ -192,9 +207,9 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
 
   const rpc = (method: string, params: Record<string, string>): Promise<unknown> => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Chat接続は準備中です。"));
-    const id = crypto.randomUUID();
+    const id = randomId();
     return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
+      const timeout = globalThis.setTimeout(() => {
         pending.delete(id);
         reject(new Error(`${method}がタイムアウトしました。`));
       }, RPC_TIMEOUT_MS);
@@ -203,14 +218,17 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
     });
   };
 
-  const openRemoteSession = async (target: ChatTarget) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN || opening.has(target.clientSessionId)) return;
-    const existingLiveSessionId = liveSessionIdFor(target.clientSessionId, liveToClient);
+  const openRemoteSession = async (active: ActiveTarget) => {
+    const target = active.target;
+    const operation = Symbol("open");
+    const requestSocket = socket;
+    if (!requestSocket || requestSocket.readyState !== WebSocket.OPEN || !isCurrentTarget(active) || opening.has(target.clientSessionId)) return;
+    const existingLiveSessionId = liveSessionIdFor(active, liveToClient);
     if (existingLiveSessionId) {
       callbacks.onSessionReady(target.clientSessionId, existingLiveSessionId, target.storedSessionId);
       return;
     }
-    opening.add(target.clientSessionId);
+    opening.set(target.clientSessionId, operation);
     callbacks.onSessionConnecting(target.clientSessionId);
     try {
       const raw = target.storedSessionId
@@ -222,34 +240,40 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
         ? result.session_id
         : typeof result?.liveSessionId === "string" ? result.liveSessionId : undefined;
       if (!liveSessionId) throw new Error("HermesがLive Session IDを返しませんでした。");
+      if (!isCurrentTarget(active) || socket !== requestSocket) {
+        bestEffortClose(liveSessionId);
+        return;
+      }
       const storedSessionId = typeof result?.stored_session_id === "string"
         ? result.stored_session_id
         : typeof result?.storedSessionId === "string" ? result.storedSessionId
           : typeof result?.resumed === "string" ? result.resumed
             : typeof result?.resumedSessionId === "string" ? result.resumedSessionId : target.storedSessionId;
-      const updatedTarget: ChatTarget = {
+      active.target = {
         clientSessionId: target.clientSessionId,
         profileId: target.profileId,
         ...(storedSessionId ? { storedSessionId } : {})
       };
-      targets.set(target.clientSessionId, updatedTarget);
-      liveToClient.set(liveSessionId, target.clientSessionId);
+      liveToClient.set(liveSessionId, { clientSessionId: target.clientSessionId, generation: active.generation });
       callbacks.onSessionReady(target.clientSessionId, liveSessionId, storedSessionId);
     } catch (error) {
-      callbacks.onSessionError(target.clientSessionId, errorText(error));
+      if (isCurrentTarget(active) && socket === requestSocket) callbacks.onSessionError(target.clientSessionId, errorText(error));
     } finally {
-      opening.delete(target.clientSessionId);
+      if (opening.get(target.clientSessionId) === operation) opening.delete(target.clientSessionId);
     }
   };
 
-  const loadHistory = async (target: ChatTarget) => {
-    if (loadedHistories.has(target.clientSessionId) || historyLoads.has(target.clientSessionId)) return;
+  const loadHistory = async (active: ActiveTarget) => {
+    const target = active.target;
+    const operation = Symbol("history");
+    if (!isCurrentTarget(active) || loadedHistories.get(target.clientSessionId) === active || historyLoads.has(target.clientSessionId)) return;
     if (!target.storedSessionId) {
-      loadedHistories.add(target.clientSessionId);
+      if (!isCurrentTarget(active)) return;
+      loadedHistories.set(target.clientSessionId, active);
       callbacks.onHistory(target.clientSessionId, []);
       return;
     }
-    historyLoads.add(target.clientSessionId);
+    historyLoads.set(target.clientSessionId, operation);
     callbacks.onHistoryLoading(target.clientSessionId);
     try {
       const messages: ChatMessage[] = [];
@@ -258,11 +282,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
       for (let pageNumber = 0; pageNumber < MAX_HISTORY_PAGES; pageNumber += 1) {
         const query = new URLSearchParams({ profile: target.profileId, limit: String(HISTORY_PAGE_LIMIT) });
         if (cursor !== undefined) query.set("cursor", cursor);
-        const body = await officeFetchJson<unknown>(
+        const body = await fetchJson<unknown>(
           `/api/v1/sessions/${encodeURIComponent(target.storedSessionId)}/messages?${query.toString()}`,
           { timeoutMs: HISTORY_TIMEOUT_MS },
           serverUrl
         );
+        if (!isCurrentTarget(active)) return;
         const page = normalizeHistoryPage(body, target.storedSessionId);
         messages.push(...page.messages);
         resolvedStoredSessionId = page.resolvedStoredSessionId ?? resolvedStoredSessionId;
@@ -272,15 +297,34 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
         }
         cursor = page.nextCursor;
       }
-      if (resolvedStoredSessionId) {
-        targets.set(target.clientSessionId, { ...target, storedSessionId: resolvedStoredSessionId });
-      }
-      loadedHistories.add(target.clientSessionId);
+      if (!isCurrentTarget(active)) return;
+      if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
+      loadedHistories.set(target.clientSessionId, active);
       callbacks.onHistory(target.clientSessionId, messages, resolvedStoredSessionId);
     } catch (error) {
-      callbacks.onHistoryError(target.clientSessionId, errorText(error));
+      if (isCurrentTarget(active)) callbacks.onHistoryError(target.clientSessionId, errorText(error));
     } finally {
-      historyLoads.delete(target.clientSessionId);
+      if (historyLoads.get(target.clientSessionId) === operation) historyLoads.delete(target.clientSessionId);
+    }
+  };
+
+  const isCurrentTarget = (active: ActiveTarget): boolean => targets.get(active.target.clientSessionId) === active;
+
+  const bestEffortClose = (liveSessionId: string): void => {
+    if (socket?.readyState === WebSocket.OPEN) void rpc("session.close", { session_id: liveSessionId }).catch(() => undefined);
+  };
+
+  const deactivateTarget = (active: ActiveTarget): void => {
+    const clientSessionId = active.target.clientSessionId;
+    if (!isCurrentTarget(active)) return;
+    targets.delete(clientSessionId);
+    opening.delete(clientSessionId);
+    historyLoads.delete(clientSessionId);
+    loadedHistories.delete(clientSessionId);
+    for (const [liveSessionId, mapped] of liveToClient) {
+      if (mapped.clientSessionId !== clientSessionId || mapped.generation !== active.generation) continue;
+      liveToClient.delete(liveSessionId);
+      bestEffortClose(liveSessionId);
     }
   };
 
@@ -288,20 +332,25 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
 
   return {
     ensureSession(target) {
-      targets.set(target.clientSessionId, target);
-      void loadHistory(target);
-      void openRemoteSession(target);
+      const existing = targets.get(target.clientSessionId);
+      if (existing !== undefined && targetsMatch(existing.target, target)) {
+        void loadHistory(existing);
+        void openRemoteSession(existing);
+        return;
+      }
+      if (existing !== undefined) deactivateTarget(existing);
+      const active: ActiveTarget = { generation: ++nextGeneration, target: { ...target } };
+      targets.set(target.clientSessionId, active);
+      void loadHistory(active);
+      void openRemoteSession(active);
     },
     releaseSession(clientSessionId) {
-      targets.delete(clientSessionId);
-      opening.delete(clientSessionId);
-      const liveSessionId = liveSessionIdFor(clientSessionId, liveToClient);
-      if (!liveSessionId) return;
-      liveToClient.delete(liveSessionId);
-      if (socket?.readyState === WebSocket.OPEN) void rpc("session.close", { session_id: liveSessionId }).catch(() => undefined);
+      const active = targets.get(clientSessionId);
+      if (active !== undefined) deactivateTarget(active);
     },
     submitPrompt(clientSessionId, text) {
-      const liveSessionId = liveSessionIdFor(clientSessionId, liveToClient);
+      const active = targets.get(clientSessionId);
+      const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
       if (!liveSessionId) {
         callbacks.onSessionError(clientSessionId, "Live Sessionが未接続です。");
         return;
@@ -311,35 +360,41 @@ export function connectChatApi(callbacks: ChatApiCallbacks): ChatApiConnection {
       });
     },
     interrupt(clientSessionId) {
-      const liveSessionId = liveSessionIdFor(clientSessionId, liveToClient);
+      const active = targets.get(clientSessionId);
+      const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
       if (!liveSessionId) return;
       void rpc("session.interrupt", { session_id: liveSessionId }).catch((error) => {
         callbacks.onSessionError(clientSessionId, errorText(error));
       });
     },
     async respondClarify(clientSessionId, requestId, answer) {
-      const liveSessionId = liveSessionIdFor(clientSessionId, liveToClient);
+      const active = targets.get(clientSessionId);
+      const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
       if (!liveSessionId) throw new Error("Live Sessionが未接続です。");
       await rpc("clarify.respond", { request_id: requestId, answer });
     },
     async respondApproval(clientSessionId, approvalId, choice) {
-      const liveSessionId = liveSessionIdFor(clientSessionId, liveToClient);
+      const active = targets.get(clientSessionId);
+      const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
       if (!liveSessionId) throw new Error("Live Sessionが未接続です。");
       await rpc("approval.respond", { session_id: liveSessionId, approval_id: approvalId, choice });
     },
     retry() {
       stopped = false;
-      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
       rejectPending("Chat接続を再試行します。");
+      opening.clear();
+      liveToClient.clear();
       socket?.close();
       socket = undefined;
       void openSocket();
     },
     stop() {
       stopped = true;
-      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
+      for (const active of [...targets.values()]) deactivateTarget(active);
       rejectPending("Chat client stopped.");
       socket?.close(1000, "Client stopped");
       socket = undefined;
@@ -360,8 +415,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-function liveSessionIdFor(clientSessionId: string, liveToClient: Map<string, string>): string | undefined {
-  return [...liveToClient.entries()].find(([, clientId]) => clientId === clientSessionId)?.[0];
+function liveSessionIdFor(active: ActiveTarget, liveToClient: Map<string, LiveTarget>): string | undefined {
+  return [...liveToClient.entries()].find(([, target]) => (
+    target.clientSessionId === active.target.clientSessionId && target.generation === active.generation
+  ))?.[0];
+}
+
+function targetsMatch(current: ChatTarget, incoming: ChatTarget): boolean {
+  return current.clientSessionId === incoming.clientSessionId
+    && current.profileId === incoming.profileId
+    && (incoming.storedSessionId === undefined || current.storedSessionId === incoming.storedSessionId);
 }
 
 export function normalizeHistoryPage(value: unknown, storedSessionId: string): {

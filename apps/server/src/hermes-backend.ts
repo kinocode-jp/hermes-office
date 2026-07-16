@@ -4,16 +4,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type {
-  AgentActivity,
-  ChatSessionSummary,
   KanbanBoardSummary,
+  OfficeInventoryKind,
+  OfficeInventoryPage,
+  OfficeInventoryMetadata,
   OfficeSnapshot,
-  ProfileSummary,
   RuntimeStatus,
 } from "@hermes-office/protocol";
 import { OFFICE_PROTOCOL_VERSION } from "./demo-state.js";
 import { createHermesChatTransport, type HermesChatTransport } from "./hermes-chat.js";
 import { createHermesChildEnvironment, discardHermesChildOutput } from "./hermes-child-environment.js";
+import { collectHermesInventory, HermesInventoryCache, type HermesJsonResult } from "./hermes-inventory.js";
 import { createHermesKanbanHttpRequester, HermesKanbanAdapter } from "./hermes-kanban.js";
 import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import { HermesProfileBackendPool } from "./hermes-profile-pool.js";
@@ -42,6 +43,7 @@ export interface HermesBackendOptions {
 export interface HermesRuntimeSource {
   status(): RuntimeStatus;
   snapshot(): Promise<OfficeSnapshot>;
+  inventoryPage?(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage>;
   close(): Promise<void>;
   chat(options?: { maxEventBytes?: number }): HermesChatTransport;
   kanban(): HermesKanbanAdapter;
@@ -61,6 +63,7 @@ export class HermesBackend implements HermesRuntimeSource {
   #sequence = 0;
   readonly #profilePool: HermesProfileBackendPool;
   readonly #globalSettings: OfficeGlobalSettingsStore;
+  readonly #inventory = new HermesInventoryCache();
   #globalInheritance?: GlobalInheritanceCoordinator;
 
   constructor(options: HermesBackendOptions = {}) {
@@ -184,16 +187,14 @@ export class HermesBackend implements HermesRuntimeSource {
     if (this.#state.state !== "ready") return emptySnapshot(this.status(), ++this.#sequence);
 
     try {
-      const [profileWire, sessionWire, boardWire] = await Promise.all([
-        this.#requestJson("/api/profiles"),
-        this.#requestJson("/api/profiles/sessions?limit=100&offset=0"),
+      const [inventory, boardWire] = await Promise.all([
+        collectHermesInventory(async (path, timeoutMs) => await this.#requestJsonResult(path, true, timeoutMs)),
         this.#requestJson("/api/plugins/kanban/board"),
       ]);
-      const profiles = mapProfiles(profileWire, sessionWire);
-      const sessions = mapSessions(sessionWire);
+      const firstPage = this.#inventory.replace(inventory);
       const boards = mapBoards(boardWire);
       this.#state = { ...this.#state, state: "ready", compatibilityMessage: "Hermes runtimeに接続済み" };
-      return makeSnapshot(this.status(), ++this.#sequence, profiles, sessions, boards);
+      return makeSnapshot(this.status(), ++this.#sequence, firstPage.profiles, firstPage.sessions, firstPage.metadata, boards);
     } catch {
       // A transient snapshot failure must not disable chat/settings for the
       // rest of the process lifetime. Keep the established transport usable;
@@ -201,6 +202,11 @@ export class HermesBackend implements HermesRuntimeSource {
       const degraded = { ...this.#state, compatibilityMessage: "Hermesの状態を再取得しています。" };
       return emptySnapshot(degraded, ++this.#sequence);
     }
+  }
+
+  async inventoryPage(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    return this.#inventory.page(kind, cursor, limit);
   }
 
   async close(): Promise<void> {
@@ -234,6 +240,10 @@ export class HermesBackend implements HermesRuntimeSource {
   }
 
   async #requestJson(path: string, authenticated = true): Promise<unknown> {
+    return (await this.#requestJsonResult(path, authenticated)).value;
+  }
+
+  async #requestJsonResult(path: string, authenticated = true, timeoutLimitMs?: number): Promise<HermesJsonResult> {
     const baseUrl = this.#baseUrl;
     if (baseUrl === undefined) throw new Error("Hermes backend is not configured.");
     const target = new URL(path, baseUrl);
@@ -241,7 +251,9 @@ export class HermesBackend implements HermesRuntimeSource {
       throw new Error("Refusing Hermes request outside the configured API origin.");
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), bounded(this.#options.requestTimeoutMs, REQUEST_TIMEOUT_MS, 250, 15_000));
+    const configuredTimeout = bounded(this.#options.requestTimeoutMs, REQUEST_TIMEOUT_MS, 250, 15_000);
+    const timeoutMs = timeoutLimitMs === undefined ? configuredTimeout : Math.max(1, Math.min(configuredTimeout, Math.trunc(timeoutLimitMs)));
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     timeout.unref();
     try {
       const response = await fetch(target, {
@@ -254,7 +266,7 @@ export class HermesBackend implements HermesRuntimeSource {
       });
       if (!response.ok) throw new IncompatibleHermesError(`Hermes returned ${response.status}.`);
       const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
-      return JSON.parse(text) as unknown;
+      return { value: JSON.parse(text) as unknown, bytes: Buffer.byteLength(text) };
     } finally {
       clearTimeout(timeout);
     }
@@ -341,50 +353,13 @@ function requiredToken(value: string | undefined): string {
   return value;
 }
 
-function mapProfiles(value: unknown, sessionsValue: unknown): ProfileSummary[] {
-  const rows = recordArray(value, "profiles").slice(0, 100);
-  const sessions = recordArray(sessionsValue, "sessions");
-  return rows.flatMap((row): ProfileSummary[] => {
-    const name = readString(row, "name");
-    if (name === undefined) return [];
-    const active = sessions.filter((item) => item.profile === name && item.is_active === true).length;
-    return [{
-      id: name,
-      name,
-      avatarKey: name,
-      activity: activity(row.gateway_running === true, active),
-      activeSessionCount: active,
-      inheritedSkillCount: 0,
-      ownSkillCount: readNumber(row, "skill_count") ?? 0,
-      revision: 1,
-    }];
-  });
-}
-
-function mapSessions(value: unknown): ChatSessionSummary[] {
-  return recordArray(value, "sessions").slice(0, 100).flatMap((row): ChatSessionSummary[] => {
-    const id = readString(row, "id");
-    const profile = readString(row, "profile");
-    if (id === undefined || profile === undefined) return [];
-    return [{
-      id,
-      profileId: profile,
-      title: readString(row, "title") || "Untitled session",
-      activity: row.is_active === true ? "thinking" : "idle",
-      createdAt: epochToIso(readNumber(row, "started_at")),
-      updatedAt: epochToIso(readNumber(row, "last_active") ?? readNumber(row, "ended_at")),
-      ...(readString(row, "preview") === undefined ? {} : { lastMessagePreview: readString(row, "preview")!.slice(0, 240) }),
-    }];
-  });
-}
-
 function mapBoards(value: unknown): KanbanBoardSummary[] {
   const columns = recordArray(value, "columns");
   const count = columns.reduce((sum, column) => sum + (Array.isArray(column.tasks) ? column.tasks.length : 0), 0);
   return [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: count, revision: readNumber(value, "latest_event_id") ?? 0 }];
 }
 
-function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: ProfileSummary[], sessions: ChatSessionSummary[], boards: KanbanBoardSummary[]): OfficeSnapshot {
+function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: OfficeSnapshot["profiles"], sessions: OfficeSnapshot["sessions"], inventory: OfficeInventoryMetadata, boards: KanbanBoardSummary[]): OfficeSnapshot {
   return {
     generatedAt: new Date().toISOString(), sequence,
     capabilities: {
@@ -393,16 +368,15 @@ function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: Profil
       features: ["chat", "profiles", "skills", "memory", "kanban", "global-inheritance"],
     },
     globalSettings: { sharedContextEnabled: true, sharedSkillsEnabled: true, revision: 1 },
-    profiles, sessions, boards,
+    profiles, sessions, inventory, boards,
   };
 }
 
 function emptySnapshot(runtime: RuntimeStatus, sequence: number): OfficeSnapshot {
-  return makeSnapshot(runtime, sequence, [], [], [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: 0, revision: 0 }]);
+  const empty = { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0 };
+  return makeSnapshot(runtime, sequence, [], [], { profiles: empty, sessions: empty }, [{ id: "hermes-kanban", name: "Hermes Kanban", cardCount: 0, revision: 0 }]);
 }
 
-function activity(gateway: boolean, active: number): AgentActivity { return active > 0 ? "thinking" : gateway ? "idle" : "offline"; }
-function epochToIso(value: number | undefined): string { return new Date((value ?? Date.now() / 1_000) * 1_000).toISOString(); }
 function recordArray(value: unknown, key: string): Record<string, unknown>[] { const rows = isRecord(value) ? value[key] : undefined; return Array.isArray(rows) ? rows.filter(isRecord) : []; }
 function readString(value: unknown, key: string): string | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "string" ? item : undefined; }
 function readNumber(value: unknown, key: string): number | undefined { const item = isRecord(value) ? value[key] : undefined; return typeof item === "number" && Number.isFinite(item) ? item : undefined; }
