@@ -21,6 +21,7 @@ test("Office history endpoint serves large histories as bounded cursor pages", a
     close: async () => undefined,
     chat: () => ({
       connect: async () => { throw new Error("unused"); },
+      resolveSessionTip: async ({ sessionId }) => ({ requestedSessionId: sessionId, sessionId, path: [sessionId] }),
       inspectHistory: async ({ sessionId }) => ({ sessionId, total: messages.length }),
       fetchHistory: async (request) => {
         requests.push({

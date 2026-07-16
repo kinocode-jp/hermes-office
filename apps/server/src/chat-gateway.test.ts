@@ -255,8 +255,8 @@ test("two chat sockets cannot split a streaming or pending durable session owner
 
   b.rpc(104, "session.resume", { session_id: "stored-shared", profile: "reviewer" });
   await flush();
-  assert.equal(b.hasError(104), false);
-  assert.equal(requests[1]?.filter(({ method }) => method === "session.resume").length, 1);
+  assert.equal(b.errorCode(104), -32006);
+  assert.equal(requests[1]?.filter(({ method }) => method === "session.resume").length, 0);
 
   a.emit("close");
   await flush();
@@ -268,7 +268,7 @@ test("two chat sockets cannot split a streaming or pending durable session owner
   b.rpc(107, "session.resume", { session_id: "stored-shared", profile: "coder" });
   await flush();
   assert.equal(b.hasError(107), false);
-  assert.equal(requests[1]?.filter(({ method }) => method === "session.resume").length, 2);
+  assert.equal(requests[1]?.filter(({ method }) => method === "session.resume").length, 1);
 });
 
 test("ownership claims are atomic, retryable after failure or close, and reject result alias conflicts", async () => {
@@ -357,7 +357,8 @@ test("ownership claims are atomic, retryable after failure or close, and reject 
   b.rpc(117, "session.resume", { session_id: "stored-other", profile: "coder" });
   await flush();
   assert.equal(b.errorCode(117), -32006);
-  assert.deepEqual(b.closed, { code: 1013, reason: "Session ownership conflict" });
+  assert.equal(requests[1]?.some((request) => request.params?.session_id === "stored-other"), false);
+  assert.equal(b.closed, undefined);
 
   a.rpc(122, "session.resume", { session_id: "stored-closing", profile: "cleaner" });
   await flush();
@@ -726,7 +727,11 @@ class FakeWebSocket extends EventEmitter {
 
 function runtimeWithConnections(factory: (onEvent: (event: HermesChatEvent) => void) => ReturnType<typeof connection>): HermesRuntimeSource { return runtimeWithConnect(async (onEvent) => factory(onEvent)); }
 function runtimeWithConnect(connect: (onEvent: (event: HermesChatEvent) => void) => Promise<ReturnType<typeof connection>>): HermesRuntimeSource {
-  return { chat: () => ({ connect, fetchHistory: async () => { throw new Error("unused"); } }) } as unknown as HermesRuntimeSource;
+  return { chat: () => ({
+    connect,
+    resolveSessionTip: async ({ sessionId }: { sessionId: string }) => ({ requestedSessionId: sessionId, sessionId, path: [sessionId] }),
+    fetchHistory: async () => { throw new Error("unused"); },
+  }) } as unknown as HermesRuntimeSource;
 }
 function connection(
   request: (request: HermesChatRequest) => Promise<{ method: HermesChatRequest["method"]; value: Record<string, boolean | number | string | null> }> = async (input) => ({ method: input.method, value: { status: "ok" } }),

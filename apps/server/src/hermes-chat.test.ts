@@ -12,6 +12,84 @@ import {
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
+test("resolveSessionTip authenticates a read-only exact-ID lookup and returns the full canonical path", async (t) => {
+  let observedUrl = "";
+  let observedToken = "";
+  const server = createServer((request, response) => {
+    observedUrl = request.url ?? "";
+    observedToken = String(request.headers["x-hermes-session-token"] ?? "");
+    writeJson(response, {
+      requested_session_id: "ancestor-1",
+      session_id: "rotated-tip-3",
+      path: ["ancestor-1", "tip-2", "rotated-tip-3"],
+      changed: true,
+    });
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+
+  const identity = await createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN }).resolveSessionTip({
+    sessionId: "ancestor-1",
+    profile: "coder",
+  });
+
+  assert.equal(observedToken, TOKEN);
+  assert.equal(observedUrl, "/api/sessions/ancestor-1/latest-descendant?profile=coder");
+  assert.deepEqual(identity, {
+    requestedSessionId: "ancestor-1",
+    sessionId: "rotated-tip-3",
+    path: ["ancestor-1", "tip-2", "rotated-tip-3"],
+  });
+});
+
+test("resolveSessionTip rejects aliases and malformed canonical paths", async (t) => {
+  const server = createServer((request, response) => {
+    const id = request.url?.split("/")[3];
+    if (id === "title-alias") {
+      writeJson(response, { requested_session_id: "full-session-id", session_id: "full-session-id", path: ["full-session-id"] });
+      return;
+    }
+    if (id === "broken-path") {
+      writeJson(response, { requested_session_id: "broken-path", session_id: "tip-2", path: ["broken-path"] });
+      return;
+    }
+    writeJson(response, { requested_session_id: "duplicate-path", session_id: "duplicate-path", path: ["duplicate-path", "duplicate-path"] });
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+  const transport = createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN });
+
+  for (const sessionId of ["title-alias", "broken-path", "duplicate-path"]) {
+    await assert.rejects(
+      transport.resolveSessionTip({ sessionId, profile: "coder" }),
+      (error: unknown) => error instanceof HermesChatTransportError
+        && error.code === "backend_rejected"
+        && error.message === "Hermes returned an invalid canonical session identity.",
+    );
+  }
+});
+
+test("resolveSessionTip fails closed on partial and timed-out lookups", async (t) => {
+  const partial = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end('{"requested_session_id":"partial-id"');
+  });
+  const partialOrigin = await listen(partial);
+  t.after(() => partial.close());
+  await assert.rejects(
+    createHermesChatTransport({ baseUrl: partialOrigin, sessionToken: TOKEN }).resolveSessionTip({ sessionId: "partial-id", profile: "coder" }),
+    (error: unknown) => error instanceof HermesChatTransportError && error.code === "backend_rejected",
+  );
+
+  const timedOut = createServer(() => undefined);
+  const timeoutOrigin = await listen(timedOut);
+  t.after(() => timedOut.close());
+  await assert.rejects(
+    createHermesChatTransport({ baseUrl: timeoutOrigin, sessionToken: TOKEN, timeoutMs: 250 }).resolveSessionTip({ sessionId: "slow-id", profile: "coder" }),
+    (error: unknown) => error instanceof HermesChatTransportError && error.code === "timed_out",
+  );
+});
+
 test("fetchHistory authenticates internally and returns a bounded secret-safe DTO", async (t) => {
   const observedUrls: string[] = [];
   let observedToken = "";

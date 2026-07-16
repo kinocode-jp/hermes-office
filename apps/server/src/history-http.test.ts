@@ -155,6 +155,7 @@ test("malformed rows outside the latest 500 window do not taint it and a later c
 function historyFixture(source: HermesHistoryMessageDto[], requests: Array<{ limit?: number; offset?: number }> = []): HermesChatTransport {
   return {
     connect: async () => { throw new Error("unused"); },
+    resolveSessionTip: async ({ sessionId }) => ({ requestedSessionId: sessionId, sessionId, path: [sessionId] }),
     inspectHistory: async ({ sessionId }) => ({ sessionId, total: source.length }),
     fetchHistory: async (request) => {
       requests.push({ ...(request.limit === undefined ? {} : { limit: request.limit }), ...(request.offset === undefined ? {} : { offset: request.offset }) });
@@ -172,6 +173,7 @@ function malformedHistoryFixture(
 ): HermesChatTransport {
   return {
     connect: async () => { throw new Error("unused"); },
+    resolveSessionTip: async ({ sessionId }) => ({ requestedSessionId: sessionId, sessionId, path: [sessionId] }),
     inspectHistory: async ({ sessionId }) => ({ sessionId, total: source.length }),
     fetchHistory: async (request) => {
       const limit = request.limit ?? 25;

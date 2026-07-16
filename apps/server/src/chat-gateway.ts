@@ -166,6 +166,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
     let claim: PendingClaim | undefined;
     let sessionClaim: ChatSessionClaim | undefined;
+    let canonicalResumeId: string | undefined;
     try {
       const access = auth.authorizeSession(officeSession, chatOperation(frame.method));
       if (!access.allowed) { sendRpcError(send, frame.id, -32003, "Operation is not permitted for this device."); return; }
@@ -209,15 +210,19 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         sessionClaim = sessionCoordinator.claimCreate(sessionOwner, typeof frame.params?.profile === "string" ? frame.params.profile : undefined);
       }
       if (frame.method === "session.resume" && typeof frame.params?.session_id === "string") {
-        sessionClaim = sessionCoordinator.claimResume(sessionOwner, typeof frame.params.profile === "string" ? frame.params.profile : undefined, frame.params.session_id);
+        const profile = typeof frame.params.profile === "string" ? frame.params.profile : "default";
+        const identity = await chatTransport.resolveSessionTip({ sessionId: frame.params.session_id, profile });
+        if (closed) return;
+        sessionClaim = sessionCoordinator.claimResume(sessionOwner, profile, identity);
         if (sessionClaim === undefined) { sendSessionInUse(send, frame.id); return; }
+        canonicalResumeId = identity.sessionId;
       }
       const seed = frame.method === "session.create"
         ? await runtimeSource.globalInheritance?.().sessionCreateContext()
         : undefined;
       if (closed) return;
       const result = await upstream!.request(
-        { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
+        { method: frame.method, ...upstreamRequestParams(frame.method, frame.params, canonicalResumeId) },
         seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
       );
       if (closed) return;
@@ -292,6 +297,12 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     if (event.sessionId !== undefined && sessionCoordinator.isLiveOwnedByAnother(sessionOwner, event.sessionId)) {
       client.close(1013, "Session ownership conflict");
       return;
+    }
+    if (event.type === "session.info" && event.sessionId !== undefined && typeof event.payload.storedSessionId === "string") {
+      if (sessionCoordinator.bindLiveSessionAlias(sessionOwner, event.sessionId, event.payload.storedSessionId) === "conflict") {
+        client.close(1013, "Session ownership conflict");
+        return;
+      }
     }
     if (event.type === "approval.request" && event.sessionId !== undefined) {
       const normalizedEvent = normalizeApprovalEvent(event, canApprovePermanently);
@@ -417,9 +428,17 @@ function expireApproval(approvals: Map<string, PendingApproval[]>, key: string, 
   return queue[0]!;
 }
 
-function upstreamRequestParams(method: HermesChatMethod, params: Record<string, unknown> | undefined): { params?: Record<string, unknown> } {
+function upstreamRequestParams(
+  method: HermesChatMethod,
+  params: Record<string, unknown> | undefined,
+  canonicalResumeId?: string,
+): { params?: Record<string, unknown> } {
   if (params === undefined) return {};
-  if (method === "session.create" || method === "session.resume") return { params: { ...params, close_on_disconnect: true } };
+  if (method === "session.create" || method === "session.resume") return { params: {
+    ...params,
+    ...(method === "session.resume" && canonicalResumeId !== undefined ? { session_id: canonicalResumeId } : {}),
+    close_on_disconnect: true,
+  } };
   if (method !== "approval.respond") return { params };
   return { params: {
     ...(typeof params.session_id === "string" ? { session_id: params.session_id } : {}),

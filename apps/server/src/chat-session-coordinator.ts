@@ -1,5 +1,11 @@
 const DEFAULT_PROFILE = "default";
 
+export type CanonicalChatSession = {
+  requestedSessionId: string;
+  sessionId: string;
+  path: readonly string[];
+};
+
 export type ChatSessionOwner = object;
 
 export type ChatSessionClaim = {
@@ -29,18 +35,28 @@ export class ChatSessionCoordinator {
     return this.#claim(lease);
   }
 
-  claimResume(owner: ChatSessionOwner, profile: string | undefined, durableId: string): ChatSessionClaim | undefined {
+  claimResume(owner: ChatSessionOwner, profile: string | undefined, identity: CanonicalChatSession): ChatSessionClaim | undefined {
     const normalized = normalizedProfile(profile);
-    const key = durableKey(normalized, durableId);
-    const existing = this.#durable.get(key);
-    if (existing !== undefined) {
-      return existing.owner === owner
-        ? this.#claim(existing)
-        : undefined;
+    // Hermes can rotate a stored identity after the read-only descendant probe,
+    // and its live lookup is process-global rather than profile-scoped. An
+    // unknown tip therefore cannot be proven distinct while another downstream
+    // transport owns any lease. One Office WebSocket still multiplexes all of
+    // its panes, so same-owner resumes remain available.
+    if ([...this.#owners.keys()].some((candidate) => candidate !== owner)) return undefined;
+    const aliases = new Set([identity.requestedSessionId, identity.sessionId, ...identity.path]);
+    const existing = new Set([...aliases].flatMap((alias) => {
+      const lease = this.#durable.get(alias);
+      return lease === undefined ? [] : [lease];
+    }));
+    if (existing.size > 1) return undefined;
+    const current = [...existing][0];
+    if (current !== undefined) {
+      if (current.owner !== owner || current.profile !== normalized) return undefined;
+      this.#bindDurableAliases(current, aliases);
+      return this.#claim(current);
     }
     const lease = this.#newLease(owner, normalized);
-    lease.durableIds.add(durableId);
-    this.#durable.set(key, lease);
+    this.#bindDurableAliases(lease, aliases);
     return this.#claim(lease);
   }
 
@@ -51,17 +67,24 @@ export class ChatSessionCoordinator {
   ): "bound" | "conflict" | "invalid" {
     const lease = this.#leaseFor(claim);
     if (lease === undefined || identities.liveSessionId === undefined || (requireStoredIdentity && identities.storedSessionId === undefined)) return "invalid";
-    const durable = identities.storedSessionId === undefined ? [] : [durableKey(lease.profile, identities.storedSessionId)];
+    const durable = identities.storedSessionId === undefined ? [] : [identities.storedSessionId];
     const live = [identities.liveSessionId];
     if (durable.some((key) => conflicting(this.#durable.get(key), lease)) || live.some((key) => conflicting(this.#live.get(key), lease))) return "conflict";
     if (identities.storedSessionId !== undefined) {
-      lease.durableIds.add(identities.storedSessionId);
-      this.#durable.set(durable[0]!, lease);
+      this.#bindDurableAliases(lease, [identities.storedSessionId]);
     }
     lease.liveIds.add(identities.liveSessionId);
     this.#live.set(identities.liveSessionId, lease);
     lease.pending.delete(claim.attempt);
     lease.bound = true;
+    return "bound";
+  }
+
+  bindLiveSessionAlias(owner: ChatSessionOwner, liveSessionId: string, durableId: string): "bound" | "conflict" | "unknown" {
+    const lease = this.#live.get(liveSessionId);
+    if (lease?.owner !== owner) return "unknown";
+    if (conflicting(this.#durable.get(durableId), lease)) return "conflict";
+    this.#bindDurableAliases(lease, [durableId]);
     return "bound";
   }
 
@@ -110,6 +133,13 @@ export class ChatSessionCoordinator {
     return { token: lease.token, attempt, owner: lease.owner };
   }
 
+  #bindDurableAliases(lease: Lease, aliases: Iterable<string>): void {
+    for (const alias of aliases) {
+      lease.durableIds.add(alias);
+      this.#durable.set(alias, lease);
+    }
+  }
+
   #leaseFor(claim: ChatSessionClaim): Lease | undefined {
     const lease = this.#leases.get(claim.token);
     return lease?.owner === claim.owner ? lease : undefined;
@@ -117,7 +147,7 @@ export class ChatSessionCoordinator {
 
   #releaseLease(lease: Lease | undefined): void {
     if (lease === undefined || !this.#leases.delete(lease.token)) return;
-    for (const durableId of lease.durableIds) this.#durable.delete(durableKey(lease.profile, durableId));
+    for (const durableId of lease.durableIds) if (this.#durable.get(durableId) === lease) this.#durable.delete(durableId);
     for (const liveId of lease.liveIds) if (this.#live.get(liveId) === lease) this.#live.delete(liveId);
     const owned = this.#owners.get(lease.owner);
     owned?.delete(lease.token);
@@ -131,8 +161,4 @@ function conflicting(current: Lease | undefined, expected: Lease): boolean {
 
 function normalizedProfile(profile: string | undefined): string {
   return profile ?? DEFAULT_PROFILE;
-}
-
-function durableKey(profile: string, durableId: string): string {
-  return `${profile}\u0000${durableId}`;
 }

@@ -17,6 +17,7 @@ test("remote operator can resume, interrupt, and read visible single-tenant sess
     close: async () => undefined,
     kanban: () => { throw new Error("unused"); },
     chat: () => ({
+      resolveSessionTip: async ({ sessionId }: { sessionId: string }) => ({ requestedSessionId: sessionId, sessionId, path: [sessionId] }),
       inspectHistory: async ({ sessionId }: { sessionId: string }) => ({ sessionId, total: 0 }),
       fetchHistory: async ({ sessionId, profile }: { sessionId: string; profile: string }) => ({
         sessionId, profile, messages: [], pagination: { limit: 200, offset: 0, returned: 0, normalizedReturned: 0, dropped: 0 },
