@@ -116,7 +116,7 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
       const frame = JSON.parse(data.toString()) as Record<string, unknown>;
       received.push(frame);
       const params = frame.params as Record<string, unknown>;
-      websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { session_id: "live-1", stored_session_id: "stored-1", message_count: 0, cwd: "/private/path", token: "hidden", echoed: params } }));
+      websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { session_id: "live-1", stored_session_id: "stored-1", message_count: 0, running: false, status: "idle", cwd: "/private/path", token: "hidden", echoed: params } }));
     });
   });
   const origin = await listen(http);
@@ -133,14 +133,16 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
     { method: "session.create", params: { profile: "coder", title: "Seeded chat" } },
     { sessionCreateSystemSeed: "Office shared context" },
   );
+  await connection.request({ method: "session.resume", params: { session_id: "stored-1", profile: "coder" } });
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.equal(observedToken, TOKEN);
-  assert.equal(received.length, 2);
+  assert.equal(received.length, 3);
   assert.equal(received[0]?.method, "session.create");
   assert.deepEqual(received[0]?.params, { profile: "coder", title: "New chat", close_on_disconnect: true, source: "desktop" });
   assert.deepEqual(received[1]?.params, { profile: "coder", title: "Seeded chat", close_on_disconnect: true, source: "desktop", messages: [{ role: "system", content: "Office shared context" }] });
-  assert.deepEqual(result.value, { liveSessionId: "live-1", storedSessionId: "stored-1", messageCount: 0 });
+  assert.deepEqual(received[2]?.params, { session_id: "stored-1", profile: "coder", close_on_disconnect: true, source: "desktop" });
+  assert.deepEqual(result.value, { liveSessionId: "live-1", storedSessionId: "stored-1", messageCount: 0, running: false, status: "idle" });
   assert.equal(JSON.stringify(result).includes("private/path"), false);
   assert.equal(events.length, 2);
   assert.deepEqual(events[0], { type: "status.update", sessionId: "live-1", payload: { kind: "process", message: "Preparing follow-up" } });

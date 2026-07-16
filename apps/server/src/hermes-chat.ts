@@ -405,6 +405,8 @@ function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<stri
       storedSessionId: safeId(value.stored_session_id),
       resumedSessionId: safeId(value.resumed),
       messageCount: finiteNumber(value.message_count),
+      running: typeof value.running === "boolean" ? value.running : undefined,
+      status: safeShortText(value.status, 80),
     });
   }
   if (method === "session.close") return { closed: value.closed === true };

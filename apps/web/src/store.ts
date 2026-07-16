@@ -7,6 +7,7 @@ import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
+import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
@@ -491,47 +492,19 @@ export function setChatHistoryError(sessionId: string, message: string): void {
 }
 
 export function setChatSessionConnecting(sessionId: string): void {
-  updateChatSession(sessionId, (session) => ({
-    ...session,
-    connectionState: "connecting",
-    liveSessionId: undefined,
-    readOnly: true,
-    errorMessage: undefined
-  }));
+  updateChatSession(sessionId, reconcileChatSessionConnecting);
 }
 
-export function setChatSessionReady(sessionId: string, liveSessionId: string, storedSessionId?: string): void {
-  updateChatSession(sessionId, (session) => ({
-    ...session,
-    ...(storedSessionId ? { storedSessionId } : {}),
-    liveSessionId,
-    connectionState: "ready",
-    remoteKind: storedSessionId ? "stored" : session.remoteKind,
-    readOnly: false,
-    errorMessage: session.historyState === "error" ? session.errorMessage : undefined
-  }));
+export function setChatSessionReady(sessionId: string, liveSessionId: string, storedSessionId?: string, runtime?: ChatSessionReadyRuntime): void {
+  updateChatSession(sessionId, (session) => reconcileChatSessionReady(session, liveSessionId, storedSessionId, runtime));
 }
 
 export function setChatSessionDisconnected(sessionId: string): void {
-  updateChatSession(sessionId, (session) => ({
-    ...session,
-    liveSessionId: undefined,
-    connectionState: "disconnected",
-    readOnly: true
-  }));
+  updateChatSession(sessionId, reconcileChatSessionDisconnected);
 }
 
 export function setChatSessionError(sessionId: string, message: string): void {
-  updateChatSession(sessionId, (session) => ({
-    ...session,
-    connectionState: "error",
-    readOnly: true,
-    errorMessage: message,
-    status: "ready",
-    streamingMessageId: undefined,
-    pendingInteraction: undefined,
-    messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
-  }));
+  updateChatSession(sessionId, (session) => reconcileChatSessionError(session, message));
 }
 
 export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent): void {
@@ -611,6 +584,10 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
   }
   if (event.type === "status.update") {
     return mergeGatewayStatusUpdate(session, payload);
+  }
+  if (event.type === "session.info") {
+    if (payload.running === true) return session.status === "streaming" ? session : { ...session, status: "streaming" };
+    return payload.running === false ? session : mergeGatewayStatusUpdate(session, payload);
   }
   if (event.type.startsWith("tool.")) {
     const toolId = stringValue(payload.toolId) ?? stringValue(payload.tool_id) ?? `tool-${event.liveSessionId}`;

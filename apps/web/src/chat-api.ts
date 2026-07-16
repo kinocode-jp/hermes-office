@@ -32,11 +32,13 @@ export type ChatApiCallbacks = {
   onHistory(clientSessionId: string, messages: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void;
   onHistoryError(clientSessionId: string, message: string): void;
   onSessionConnecting(clientSessionId: string): void;
-  onSessionReady(clientSessionId: string, liveSessionId: string, storedSessionId?: string): void;
+  onSessionReady(clientSessionId: string, liveSessionId: string, storedSessionId?: string, runtime?: ChatSessionRuntime): void;
   onSessionDisconnected(clientSessionId: string): void;
   onSessionError(clientSessionId: string, message: string): void;
   onEvent(clientSessionId: string, event: ChatGatewayEvent): void;
 };
+
+export type ChatSessionRuntime = { running?: boolean; status?: string };
 
 export type ChatApiConnection = {
   ensureSession(target: ChatTarget): void;
@@ -67,6 +69,8 @@ type JsonRpcResult = {
   liveSessionId?: unknown;
   storedSessionId?: unknown;
   resumedSessionId?: unknown;
+  running?: unknown;
+  status?: unknown;
 };
 
 type PendingRequest = {
@@ -197,7 +201,8 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     );
   };
 
-  const handleMessage = (data: unknown) => {
+  const handleMessage = (data: unknown, sourceSocket: WebSocket) => {
+    if (socket !== sourceSocket) return;
     if (typeof data !== "string") return;
     let frame: Record<string, unknown>;
     try {
@@ -295,7 +300,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         void openRemoteSession(target);
       }
     });
-    nextSocket.addEventListener("message", (event) => handleMessage(event.data));
+    nextSocket.addEventListener("message", (event) => handleMessage(event.data, nextSocket));
     nextSocket.addEventListener("close", (event) => {
       if (socket === nextSocket) handleClose(event);
     });
@@ -358,7 +363,11 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         ...(storedSessionId ? { storedSessionId } : {})
       };
       liveToClient.set(liveSessionId, { clientSessionId: target.clientSessionId, generation: active.generation });
-      callbacks.onSessionReady(target.clientSessionId, liveSessionId, storedSessionId);
+      const runtime: ChatSessionRuntime = {
+        ...(typeof result?.running === "boolean" ? { running: result.running } : {}),
+        ...(typeof result?.status === "string" ? { status: result.status } : {})
+      };
+      callbacks.onSessionReady(target.clientSessionId, liveSessionId, storedSessionId, runtime);
     } catch (error) {
       if (isCurrentTarget(active) && socket === requestSocket) callbacks.onSessionError(target.clientSessionId, errorText(error));
     } finally {
