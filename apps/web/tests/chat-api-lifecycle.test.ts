@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatApiCallbacks, ChatTarget } from "../src/chat-api";
 import { connectChatApi } from "../src/chat-api";
+import { storedSessionClientId } from "../src/session-identity.ts";
 
 test("delayed create from a four-pane eviction is closed and cannot resurrect the target", async () => {
   const harness = await createHarness();
@@ -74,6 +75,34 @@ test("failed close keeps the tombstone and a same-id reopen gets a new generatio
 
   assert.deepEqual(harness.ready.map((item) => item.liveSessionId), ["live-old", "live-new"]);
   assert.equal(harness.events.length, 0);
+  harness.api.stop();
+});
+
+test("profile-scoped client IDs isolate resume, history, and events for equal stored IDs", async () => {
+  const historyPaths: string[] = [];
+  const harness = await createHarness(async <T>(path: string) => {
+    historyPaths.push(path);
+    return { sessionId: "shared-id", messages: [], pagination: { hasMore: false, returned: 0 } } as T;
+  });
+  const firstId = storedSessionClientId("p1", "shared-id");
+  const secondId = storedSessionClientId("p2", "shared-id");
+  harness.api.ensureSession({ clientSessionId: firstId, profileId: "p1", storedSessionId: "shared-id" });
+  harness.api.ensureSession({ clientSessionId: secondId, profileId: "p2", storedSessionId: "shared-id" });
+  await flush();
+
+  const resumes = harness.socket.sent.filter((frame) => frame.method === "session.resume");
+  assert.deepEqual(resumes.map((frame) => frame.params), [
+    { session_id: "shared-id", profile: "p1" },
+    { session_id: "shared-id", profile: "p2" },
+  ]);
+  assert.ok(historyPaths.some((path) => path.includes("profile=p1")));
+  assert.ok(historyPaths.some((path) => path.includes("profile=p2")));
+  harness.socket.respond(resumes[0]!.id, { session_id: "live-p1", stored_session_id: "shared-id" });
+  harness.socket.respond(resumes[1]!.id, { session_id: "live-p2", stored_session_id: "shared-id" });
+  await flush();
+  harness.socket.event("live-p1", "message.complete");
+  harness.socket.event("live-p2", "message.complete");
+  assert.deepEqual(harness.events, [firstId, secondId]);
   harness.api.stop();
 });
 

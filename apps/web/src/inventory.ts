@@ -1,7 +1,8 @@
 import { signal } from "@preact/signals";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, Profile } from "./domain";
-import { officeFetchJson } from "./office-api";
-import { profileList, sessions } from "./store";
+import { isOfficeSnapshot, OfficeHttpError, officeFetchJson } from "./office-api";
+import { storedSessionClientId } from "./session-identity";
+import { applyOfficeSnapshot, profileList, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
 type InventoryPage = {
@@ -26,7 +27,7 @@ export function initializeInventory(snapshot: OfficeSnapshot, serverUrl: string)
 export async function loadMoreProfiles(): Promise<void> { await loadMore("profiles"); }
 export async function loadMoreSessions(): Promise<void> { await loadMore("sessions"); }
 
-async function loadMore(kind: InventoryKind): Promise<void> {
+async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promise<void> {
   const stateSignal = kind === "profiles" ? profileInventoryState : sessionInventoryState;
   const current = stateSignal.value;
   if (current.loading || !current.hasMore || current.nextCursor === undefined || inventoryServerUrl === "") return;
@@ -37,8 +38,27 @@ async function loadMore(kind: InventoryKind): Promise<void> {
     if (!isInventoryPage(page, kind)) throw new Error("Office Serverの一覧ページに互換性がありません。");
     mergeInventoryPage(page);
     stateSignal.value = { ...page.pagination, loading: false };
-  } catch (error) {
-    stateSignal.value = { ...current, loading: false, error: error instanceof Error ? error.message : "一覧を取得できませんでした。" };
+  } catch (caught) {
+    let error = caught;
+    if (error instanceof OfficeHttpError && error.status === 409 && !retriedAfterRefresh) {
+      try {
+        const snapshot = await officeFetchJson<unknown>("/api/v1/snapshot", {}, inventoryServerUrl);
+        if (!isOfficeSnapshot(snapshot)) throw new Error("Office Serverの一覧snapshotに互換性がありません。");
+        applyOfficeSnapshot(snapshot, inventoryServerUrl);
+        initializeInventory(snapshot, inventoryServerUrl);
+        await loadMore(kind, true);
+        return;
+      } catch (refreshError) {
+        error = refreshError;
+      }
+    }
+    const message = error instanceof Error ? error.message : "一覧を取得できませんでした。";
+    if (caught instanceof OfficeHttpError && caught.status === 409) {
+      const { nextCursor: _staleCursor, ...withoutCursor } = current;
+      stateSignal.value = { ...withoutCursor, hasMore: false, loading: false, error: message };
+    } else {
+      stateSignal.value = { ...current, loading: false, error: message };
+    }
   }
 }
 
@@ -65,8 +85,7 @@ function mergeSessions(rows: OfficeSnapshot["sessions"]): void {
     const key = `${live.profileId}\0${live.id}`;
     if (existing.has(key)) return [];
     existing.add(key);
-    const idCollision = sessions.value.some((session) => session.id === live.id && session.profileId !== live.profileId);
-    return [{ id: idCollision ? `stored:${encodeURIComponent(live.profileId)}:${live.id}` : live.id, storedSessionId: live.id, profileId: live.profileId, title: live.title, status: live.activity === "thinking" || live.activity === "using-tool" ? "streaming" : live.activity === "waiting-for-user" ? "waiting" : "ready", messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true }];
+    return [{ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status: live.activity === "thinking" || live.activity === "using-tool" ? "streaming" : live.activity === "waiting-for-user" ? "waiting" : "ready", messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true }];
   });
   if (additions.length === 0) return;
   sessions.value = [...sessions.value, ...additions];

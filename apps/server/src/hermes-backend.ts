@@ -14,7 +14,7 @@ import type {
 import { OFFICE_PROTOCOL_VERSION } from "./demo-state.js";
 import { createHermesChatTransport, type HermesChatTransport } from "./hermes-chat.js";
 import { createHermesChildEnvironment, discardHermesChildOutput } from "./hermes-child-environment.js";
-import { collectHermesInventory, HermesInventoryCache, type HermesJsonResult } from "./hermes-inventory.js";
+import { collectHermesInventory, HermesInventoryCache, type CollectedHermesInventory, type HermesJsonResult } from "./hermes-inventory.js";
 import { createHermesKanbanHttpRequester, HermesKanbanAdapter } from "./hermes-kanban.js";
 import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import { HermesProfileBackendPool } from "./hermes-profile-pool.js";
@@ -64,6 +64,7 @@ export class HermesBackend implements HermesRuntimeSource {
   readonly #profilePool: HermesProfileBackendPool;
   readonly #globalSettings: OfficeGlobalSettingsStore;
   readonly #inventory = new HermesInventoryCache();
+  #snapshotRefresh: Promise<{ inventory: CollectedHermesInventory; boardWire: unknown }> | undefined;
   #globalInheritance?: GlobalInheritanceCoordinator;
 
   constructor(options: HermesBackendOptions = {}) {
@@ -187,10 +188,7 @@ export class HermesBackend implements HermesRuntimeSource {
     if (this.#state.state !== "ready") return emptySnapshot(this.status(), ++this.#sequence);
 
     try {
-      const [inventory, boardWire] = await Promise.all([
-        collectHermesInventory(async (path, timeoutMs) => await this.#requestJsonResult(path, true, timeoutMs)),
-        this.#requestJson("/api/plugins/kanban/board"),
-      ]);
+      const { inventory, boardWire } = await this.#collectSnapshotData();
       const firstPage = this.#inventory.replace(inventory);
       const boards = mapBoards(boardWire);
       this.#state = { ...this.#state, state: "ready", compatibilityMessage: "Hermes runtimeに接続済み" };
@@ -207,6 +205,21 @@ export class HermesBackend implements HermesRuntimeSource {
   async inventoryPage(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage> {
     if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
     return this.#inventory.page(kind, cursor, limit);
+  }
+
+  async #collectSnapshotData(): Promise<{ inventory: CollectedHermesInventory; boardWire: unknown }> {
+    const current = this.#snapshotRefresh;
+    if (current !== undefined) return await current;
+    const refresh = Promise.all([
+      collectHermesInventory(async (path, timeoutMs) => await this.#requestJsonResult(path, true, timeoutMs)),
+      this.#requestJson("/api/plugins/kanban/board"),
+    ]).then(([inventory, boardWire]) => ({ inventory, boardWire }));
+    this.#snapshotRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.#snapshotRefresh === refresh) this.#snapshotRefresh = undefined;
+    }
   }
 
   async close(): Promise<void> {

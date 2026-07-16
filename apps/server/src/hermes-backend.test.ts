@@ -39,6 +39,45 @@ test("inventory reaches the 101st session and profile through bounded continuati
   }
 });
 
+test("concurrent snapshots share one inventory collection and both cursors remain usable", async () => {
+  const rows = Array.from({ length: 101 }, (_, index) => sessionRow(index));
+  let profileRequests = 0;
+  let sessionRequests = 0;
+  let boardRequests = 0;
+  const fixture = await startHermesFixture((request, response, url) => {
+    if (url.pathname === "/api/profiles") {
+      profileRequests += 1;
+      setTimeout(() => writeJson(response, { profiles: [profileRow(0)] }), 20);
+      return;
+    }
+    if (url.pathname === "/api/profiles/sessions") {
+      sessionRequests += 1;
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      setTimeout(() => writeJson(response, { sessions: rows.slice(offset, offset + 100), total: rows.length, errors: [] }), 20);
+      return;
+    }
+    if (url.pathname === "/api/plugins/kanban/board") {
+      boardRequests += 1;
+      setTimeout(() => writeJson(response, { columns: [], latest_event_id: 0 }), 60);
+      return;
+    }
+    return defaultFixtureRoute(request, response, url);
+  });
+  try {
+    assert.equal((await fixture.backend.start()).state, "ready");
+    const [first, second] = await Promise.all([fixture.backend.snapshot(), fixture.backend.snapshot()]);
+    assert.equal(profileRequests, 1);
+    assert.equal(sessionRequests, 2);
+    assert.equal(boardRequests, 1);
+    assert.equal(first.inventory.sessions.nextCursor, second.inventory.sessions.nextCursor);
+    assert.deepEqual((await fixture.backend.inventoryPage("sessions", first.inventory.sessions.nextCursor!, 100)).sessions.map((item) => item.id), ["session-100"]);
+    assert.deepEqual((await fixture.backend.inventoryPage("sessions", second.inventory.sessions.nextCursor!, 100)).sessions.map((item) => item.id), ["session-100"]);
+  } finally {
+    await fixture.backend.close();
+    await fixture.close();
+  }
+});
+
 test("inventory preserves first-seen order, removes overlapping page duplicates, and reports the missing row", async () => {
   const first = Array.from({ length: 100 }, (_, index) => sessionRow(index));
   const offsets: number[] = [];

@@ -4,6 +4,7 @@ import type { ChatGatewayEvent, ChatTarget } from "./chat-api";
 import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
+import { findStoredSession, storedSessionClientId } from "./session-identity";
 
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
@@ -224,12 +225,12 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
 
   const previousSessions = sessions.value;
   const snapshotSessions = snapshot.sessions.map((live): ChatSession => {
-    const previous = previousSessions.find((session) => session.id === live.id || session.storedSessionId === live.id);
+    const previous = findStoredSession(previousSessions, live);
     const runtimeStatus = live.activity === "thinking" || live.activity === "using-tool"
       ? "streaming" as const
       : live.activity === "waiting-for-user" ? "waiting" as const : "ready" as const;
     return {
-      ...(previous ?? { id: live.id, messages: [] }),
+      ...(previous ?? { id: storedSessionClientId(live.profileId, live.id), messages: [] }),
       storedSessionId: live.id,
       profileId: live.profileId,
       title: live.title,

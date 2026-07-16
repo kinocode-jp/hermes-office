@@ -41,6 +41,13 @@ export class OfficeDeviceAuthRequiredError extends Error {
   }
 }
 
+export class OfficeHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`Office Server returned HTTP ${status}.`);
+    this.name = "OfficeHttpError";
+  }
+}
+
 // A cold Hermes snapshot can legitimately take several seconds while its
 // profile/session indexes initialize. Keep the UI responsive, but do not
 // drop into demo fallback during a normal first launch.
@@ -226,7 +233,7 @@ async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, 
       const replacement = await recoverOfficeSession(serverUrl, session.csrfToken);
       return await requestOfficeJson<T>(url, options, replacement, serverUrl, false);
     }
-    if (!response.ok) throw new Error(`Office Server returned HTTP ${response.status}.`);
+    if (!response.ok) throw new OfficeHttpError(response.status);
     return await response.json() as T;
   } finally {
     window.clearTimeout(timeout);

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type {
   AgentActivity,
   ChatSessionSummary,
@@ -16,6 +16,8 @@ const MAX_SESSION_ROWS = UPSTREAM_PAGE_SIZE * MAX_SESSION_PAGES;
 const MAX_PROFILE_ROWS = 2_000;
 const MAX_INVENTORY_BYTES = 8 * 1024 * 1024;
 const INVENTORY_TIMEOUT_MS = 7_000;
+const INVENTORY_GENERATION_TTL_MS = 5 * 60_000;
+const MAX_INVENTORY_GENERATIONS = 8;
 
 export type HermesJsonResult = { value: unknown; bytes: number };
 export type HermesInventoryRequester = (path: string, timeoutMs: number) => Promise<HermesJsonResult>;
@@ -158,32 +160,61 @@ function withoutRows(state: CollectionState, mappedLength: number): Omit<Collect
   };
 }
 
+type InventoryGeneration = CollectedHermesInventory & {
+  token: string;
+  signature: string;
+  expiresAt: number;
+};
+
 export class HermesInventoryCache {
-  #token = "";
-  #profiles: ProfileSummary[] = [];
-  #sessions: ChatSessionSummary[] = [];
-  #profilesState: Omit<CollectionState, "rows"> = { truncated: false, partialFailures: 0 };
-  #sessionsState: Omit<CollectionState, "rows"> = { truncated: false, partialFailures: 0 };
+  readonly #generations = new Map<string, InventoryGeneration>();
+  readonly #ttlMs: number;
+  readonly #maxGenerations: number;
+  readonly #now: () => number;
+
+  constructor(options: { ttlMs?: number; maxGenerations?: number; now?: () => number } = {}) {
+    this.#ttlMs = Math.max(1, options.ttlMs ?? INVENTORY_GENERATION_TTL_MS);
+    this.#maxGenerations = Math.max(1, options.maxGenerations ?? MAX_INVENTORY_GENERATIONS);
+    this.#now = options.now ?? Date.now;
+  }
 
   replace(inventory: CollectedHermesInventory): { profiles: ProfileSummary[]; sessions: ChatSessionSummary[]; metadata: OfficeInventoryMetadata } {
-    this.#token = randomBytes(12).toString("base64url");
-    this.#profiles = inventory.profiles;
-    this.#sessions = inventory.sessions;
-    this.#profilesState = inventory.profilesState;
-    this.#sessionsState = inventory.sessionsState;
-    const profiles = this.#page("profiles", 0, SNAPSHOT_PAGE_SIZE);
-    const sessions = this.#page("sessions", 0, SNAPSHOT_PAGE_SIZE);
+    const now = this.#now();
+    this.#prune(now);
+    const signature = inventorySignature(inventory);
+    let generation = [...this.#generations.values()].find((item) => item.signature === signature);
+    if (generation === undefined) {
+      generation = {
+        token: randomBytes(12).toString("base64url"),
+        signature,
+        expiresAt: now + this.#ttlMs,
+        profiles: [...inventory.profiles],
+        sessions: [...inventory.sessions],
+        profilesState: { ...inventory.profilesState },
+        sessionsState: { ...inventory.sessionsState },
+      };
+    } else {
+      generation.expiresAt = now + this.#ttlMs;
+      this.#generations.delete(generation.token);
+    }
+    this.#generations.set(generation.token, generation);
+    this.#prune(now);
+    const profiles = this.#page(generation, "profiles", 0, SNAPSHOT_PAGE_SIZE);
+    const sessions = this.#page(generation, "sessions", 0, SNAPSHOT_PAGE_SIZE);
     return { profiles: [...profiles.profiles], sessions: [...sessions.sessions], metadata: { profiles: profiles.pagination, sessions: sessions.pagination } };
   }
 
   page(kind: OfficeInventoryKind, cursor: string, limit: number): OfficeInventoryPage {
-    const offset = decodeCursor(cursor, this.#token, kind);
-    return this.#page(kind, offset, Math.min(100, Math.max(1, Math.trunc(limit))));
+    const decoded = decodeCursor(cursor, kind);
+    this.#prune(this.#now());
+    const generation = this.#generations.get(decoded.token);
+    if (generation === undefined) throw new InventoryCursorError("Inventory cursor is stale or invalid.");
+    return this.#page(generation, kind, decoded.offset, Math.min(100, Math.max(1, Math.trunc(limit))));
   }
 
-  #page(kind: OfficeInventoryKind, offset: number, limit: number): OfficeInventoryPage {
-    const rows = kind === "profiles" ? this.#profiles : this.#sessions;
-    const state = kind === "profiles" ? this.#profilesState : this.#sessionsState;
+  #page(generation: InventoryGeneration, kind: OfficeInventoryKind, offset: number, limit: number): OfficeInventoryPage {
+    const rows = kind === "profiles" ? generation.profiles : generation.sessions;
+    const state = kind === "profiles" ? generation.profilesState : generation.sessionsState;
     const window = rows.slice(offset, offset + limit);
     const nextOffset = offset + window.length;
     const hasMore = nextOffset < rows.length;
@@ -194,7 +225,7 @@ export class HermesInventoryCache {
       hasMore,
       truncated: state.truncated,
       partialFailures: state.partialFailures,
-      ...(hasMore ? { nextCursor: encodeCursor(this.#token, kind, nextOffset) } : {}),
+      ...(hasMore ? { nextCursor: encodeCursor(generation.token, kind, nextOffset) } : {}),
     };
     return {
       kind,
@@ -202,6 +233,17 @@ export class HermesInventoryCache {
       sessions: kind === "sessions" ? window as ChatSessionSummary[] : [],
       pagination,
     };
+  }
+
+  #prune(now: number): void {
+    for (const [token, generation] of this.#generations) {
+      if (generation.expiresAt <= now) this.#generations.delete(token);
+    }
+    while (this.#generations.size > this.#maxGenerations) {
+      const oldest = this.#generations.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.#generations.delete(oldest);
+    }
   }
 }
 
@@ -211,16 +253,20 @@ function encodeCursor(token: string, kind: OfficeInventoryKind, offset: number):
   return Buffer.from(`v1:${token}:${kind}:${offset}`, "utf8").toString("base64url");
 }
 
-function decodeCursor(value: string, token: string, kind: OfficeInventoryKind): number {
+function decodeCursor(value: string, kind: OfficeInventoryKind): { token: string; offset: number } {
   if (value.length < 1 || value.length > 256) throw new InventoryCursorError("Inventory cursor is invalid.");
   let decoded: string;
   try { decoded = Buffer.from(value, "base64url").toString("utf8"); }
   catch { throw new InventoryCursorError("Inventory cursor is invalid."); }
   const match = /^v1:([A-Za-z0-9_-]{16}):(profiles|sessions):(0|[1-9][0-9]{0,6})$/.exec(decoded);
-  if (match === null || match[1] !== token || match[2] !== kind) throw new InventoryCursorError("Inventory cursor is stale or invalid.");
+  if (match === null || match[2] !== kind) throw new InventoryCursorError("Inventory cursor is stale or invalid.");
   const offset = Number(match[3]);
   if (!Number.isSafeInteger(offset) || offset > MAX_SESSION_ROWS) throw new InventoryCursorError("Inventory cursor is invalid.");
-  return offset;
+  return { token: match[1]!, offset };
+}
+
+function inventorySignature(inventory: CollectedHermesInventory): string {
+  return createHash("sha256").update(JSON.stringify(inventory)).digest("base64url");
 }
 
 function dedupeRecords(rows: Record<string, unknown>[], keyOf: (row: Record<string, unknown>) => string | undefined): Record<string, unknown>[] {
