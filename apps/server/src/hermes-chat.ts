@@ -436,7 +436,10 @@ function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | u
   if (["tool.start", "tool.generating", "tool.progress", "tool.complete"].includes(raw.type)) {
     return { ...base, payload: compact({ toolId: safeId(firstValue(payload, ["tool_id", "id"])), name: safeShortText(firstValue(payload, ["name", "tool_name"]), 120), status: safeShortText(payload.status, 80), summary: sanitizeText(firstString(payload, ["summary"]), 2 * 1024), error: typeof payload.error === "boolean" ? payload.error : undefined, durationSeconds: finiteNumber(payload.duration_s) }) };
   }
-  if (["gateway.ready", "session.info", "status.update", "error"].includes(raw.type)) {
+  if (raw.type === "status.update") {
+    return { ...base, payload: compact({ kind: safeShortText(payload.kind, 80), status: safeShortText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024) }) };
+  }
+  if (["gateway.ready", "session.info", "error"].includes(raw.type)) {
     return { ...base, payload: compact({ status: safeShortText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024), model: safeShortText(payload.model, 200), provider: safeShortText(payload.provider, 100), running: typeof payload.running === "boolean" ? payload.running : undefined, storedSessionId: safeId(payload.stored_session_id), version: safeShortText(payload.version, 80) }) };
   }
   return undefined;

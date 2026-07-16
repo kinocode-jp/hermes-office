@@ -6,18 +6,52 @@ export function mergeServerSessionStatus(previous: ChatSession | undefined, acti
   if (previous.pendingInteraction || previous.status === "waiting") return "waiting";
   if (previous.connectionState === "error") return previous.status;
   if (incoming !== "ready") return incoming;
-  return hasStreamingWork(previous) ? "streaming" : "ready";
+  return isChatRunActive(previous) ? "streaming" : "ready";
 }
 
 export function canSubmitChatPrompt(session: ChatSession): boolean {
   const connected = session.remoteKind === "demo" || session.connectionState === "ready";
-  return connected && !session.pendingInteraction && session.status === "ready" && !hasStreamingWork(session);
+  return connected && session.status === "ready" && !isChatRunActive(session);
 }
 
-function hasStreamingWork(session: ChatSession): boolean {
-  return session.status === "streaming"
+export function isChatRunActive(session: ChatSession): boolean {
+  return session.status === "streaming" || session.status === "waiting"
+    || session.pendingInteraction !== undefined
     || session.streamingMessageId !== undefined
     || session.messages.some((message) => message.status === "streaming");
+}
+
+export function mergeGatewayStatusUpdate(session: ChatSession, payload: Record<string, unknown>): ChatSession {
+  const statusField = normalizedString(payload.status);
+  if (statusField) return mergeKnownGatewayStatus(session, statusField);
+
+  const kind = normalizedString(payload.kind);
+  if (!kind) return session;
+  if (kind === "status") {
+    const text = normalizedString(payload.text) ?? normalizedString(payload.message);
+    return text ? mergeKnownGatewayStatus(session, text) : session;
+  }
+  return mergeKnownGatewayStatus(session, kind);
+}
+
+function mergeKnownGatewayStatus(session: ChatSession, value: string): ChatSession {
+  if (session.pendingInteraction) return session;
+  if (value === "thinking" || value === "using-tool" || value === "streaming" || value === "running") {
+    return session.status === "streaming" ? session : { ...session, status: "streaming" };
+  }
+  if (value === "waiting" || value === "waiting-for-user") {
+    return session.status === "waiting" ? session : { ...session, status: "waiting" };
+  }
+  if (value === "ready" || value === "idle") {
+    return isChatRunActive(session) || session.status === "ready" ? session : { ...session, status: "ready" };
+  }
+  return session;
+}
+
+function normalizedString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
+  return normalized || undefined;
 }
 
 function serverSessionStatus(activity: string): ChatSession["status"] {

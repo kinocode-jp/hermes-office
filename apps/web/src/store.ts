@@ -6,7 +6,7 @@ import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInter
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
-import { canSubmitChatPrompt, mergeServerSessionStatus } from "./session-runtime";
+import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
@@ -419,12 +419,13 @@ export function sendMessage(sessionId: string, body: string): void {
 
 export function interruptSession(sessionId: string): void {
   const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session || session.connectionState !== "ready" || session.status !== "streaming") return;
+  if (!session || session.connectionState !== "ready" || !isChatRunActive(session)) return;
   interruptChatSession(sessionId);
   sessions.value = sessions.value.map((item) => item.id === sessionId ? {
     ...item,
     status: "ready",
     streamingMessageId: undefined,
+    pendingInteraction: undefined,
     messages: item.messages.map((message) => message.status === "streaming" ? { ...message, status: "cancelled" } : message)
   } : item);
 }
@@ -528,6 +529,7 @@ export function setChatSessionError(sessionId: string, message: string): void {
     errorMessage: message,
     status: "ready",
     streamingMessageId: undefined,
+    pendingInteraction: undefined,
     messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
   }));
 }
@@ -603,13 +605,12 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       streamingMessageId: undefined,
       pendingInteraction: undefined,
       messages: exists
-        ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" } : message)
-        : completeText ? [...session.messages, { id: messageId, from: "agent", body: completeText, at: nowTime(), status: "complete" }] : session.messages
+        ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" } : message.status === "streaming" ? { ...message, status: "complete" } : message)
+        : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTime(), status: "complete" as const }] : [])]
     };
   }
   if (event.type === "status.update") {
-    const status = stringValue(payload.status);
-    return { ...session, status: status === "waiting-for-user" ? "waiting" : status === "thinking" || status === "using-tool" ? "streaming" : "ready" };
+    return mergeGatewayStatusUpdate(session, payload);
   }
   if (event.type.startsWith("tool.")) {
     const toolId = stringValue(payload.toolId) ?? stringValue(payload.tool_id) ?? `tool-${event.liveSessionId}`;
@@ -632,6 +633,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       status: "ready",
       errorMessage: message,
       streamingMessageId: undefined,
+      pendingInteraction: undefined,
       messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
     };
   }

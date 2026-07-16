@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
 import { locale, localizeRuntimeMessage, t } from "../i18n";
 import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage } from "../store";
-import { canSubmitChatPrompt } from "../session-runtime";
+import { canSubmitChatPrompt, isChatRunActive } from "../session-runtime";
 
 export function ChatPane({ session, profile }: { session: ChatSession; profile: Profile }) {
   const [draft, setDraft] = useState("");
@@ -11,6 +11,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const isLiveChat = session.remoteKind === "stored" || session.remoteKind === "draft";
   const isConnected = !isLiveChat || session.connectionState === "ready";
   const canSend = canSubmitChatPrompt(session);
+  const runActive = isChatRunActive(session);
   const statusText = useMemo(() => {
     if (session.connectionState === "error") return t("chat.status.error");
     if (session.connectionState === "connecting") return t("chat.status.connecting");
@@ -18,10 +19,10 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
     if (session.historyState === "loading") return t("chat.status.loading");
     if (session.pendingInteraction?.kind === "approval") return t("chat.status.approval");
     if (session.pendingInteraction?.kind === "clarify") return t("chat.status.clarify");
-    if (session.status === "streaming") return t("chat.status.running");
     if (session.status === "waiting") return t("chat.status.waiting");
+    if (runActive) return t("chat.status.running");
     return t("chat.status.ready");
-  }, [isLiveChat, locale.value, session.connectionState, session.historyState, session.pendingInteraction?.kind, session.status]);
+  }, [isLiveChat, locale.value, runActive, session.connectionState, session.historyState, session.pendingInteraction?.kind, session.status]);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -85,7 +86,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
       <form class="composer" onSubmit={submit}>
         <textarea
           value={draft}
-          disabled={!canSend || session.status === "streaming"}
+          disabled={!canSend}
           onInput={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -93,10 +94,10 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
               event.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={session.pendingInteraction ? t("chat.answerAbove") : !isConnected ? t("chat.connectingPlaceholder") : session.status === "streaming" ? t("chat.runningPlaceholder") : t("chat.instruct", { name: profile.name })}
+          placeholder={session.pendingInteraction ? t("chat.answerAbove") : !isConnected ? t("chat.connectingPlaceholder") : runActive ? t("chat.runningPlaceholder") : t("chat.instruct", { name: profile.name })}
           rows={1}
         />
-        {session.status === "streaming" && isLiveChat ? (
+        {runActive && isLiveChat ? (
           <button type="button" class="interrupt-button" disabled={session.connectionState !== "ready"} onClick={() => interruptSession(session.id)}>{t("chat.stop")}</button>
         ) : (
           <button type="submit" disabled={!canSend || !draft.trim()}>{t("chat.send")}</button>

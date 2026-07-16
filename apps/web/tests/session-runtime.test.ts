@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatSession } from "../src/domain.ts";
-import { canSubmitChatPrompt, mergeServerSessionStatus } from "../src/session-runtime.ts";
-import { registerChatRuntime, sendMessage, sessions } from "../src/store.ts";
+import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "../src/session-runtime.ts";
+import { interruptSession, reduceChatGatewayEvent, registerChatRuntime, sendMessage, sessions } from "../src/store.ts";
 
 const ready: ChatSession = {
   id: "client", storedSessionId: "stored", profileId: "profile", title: "Session",
@@ -54,4 +54,128 @@ test("sendMessage rejects every in-flight shape and atomically blocks a second p
   sessions.value = [{ ...ready, status: "waiting" }];
   sendMessage(ready.id, "waiting");
   assert.deepEqual(submitted, ["first"]);
+});
+
+test("canonical Hermes status notifications preserve local run state before and after message start", () => {
+  const submitted: string[] = [];
+  registerChatRuntime({
+    ensureSession() {}, releaseSession() {}, interrupt() {},
+    submitPrompt(_sessionId, text) { submitted.push(text); },
+    async respondClarify() {}, async respondApproval() {}
+  });
+  sessions.value = [{ ...ready }];
+  sendMessage(ready.id, "first");
+
+  const withoutKind = reduceChatGatewayEvent(sessions.value[0]!, {
+    type: "status.update", liveSessionId: "live", payload: { message: "Preparing follow-up" }
+  });
+  const beforeStart = reduceChatGatewayEvent(withoutKind, {
+    type: "status.update", liveSessionId: "live", payload: { kind: "process", message: "Preparing follow-up" }
+  });
+  assert.equal(beforeStart.status, "streaming");
+  assert.equal(isChatRunActive(beforeStart), true);
+  sessions.value = [beforeStart];
+  sendMessage(ready.id, "duplicate-before-start");
+
+  const started = reduceChatGatewayEvent(beforeStart, {
+    type: "message.start", liveSessionId: "live", payload: { messageId: "agent-1" }
+  });
+  const afterStart = reduceChatGatewayEvent(started, {
+    type: "status.update", liveSessionId: "live", payload: { kind: "goal", text: "Goal progress" }
+  });
+  assert.equal(afterStart.status, "streaming");
+  assert.equal(afterStart.streamingMessageId, "agent-1");
+  assert.equal(isChatRunActive(afterStart), true);
+  sessions.value = [afterStart];
+  sendMessage(ready.id, "duplicate-after-start");
+  assert.deepEqual(submitted, ["first"]);
+});
+
+test("only recognized status values transition and informational or unknown values preserve state", () => {
+  assert.equal(mergeGatewayStatusUpdate(ready, { status: "thinking" }).status, "streaming");
+  assert.equal(mergeGatewayStatusUpdate(ready, { kind: "using-tool" }).status, "streaming");
+  assert.equal(mergeGatewayStatusUpdate(ready, { kind: "status", message: "waiting_for_user" }).status, "waiting");
+  assert.equal(mergeGatewayStatusUpdate(ready, { kind: "status", message: "ready" }), ready);
+
+  const active = { ...ready, status: "streaming" as const };
+  assert.equal(mergeGatewayStatusUpdate(active, { kind: "status", text: "ready" }), active);
+  assert.equal(mergeGatewayStatusUpdate(active, { kind: "compacting", text: "Compacting context" }), active);
+  assert.equal(mergeGatewayStatusUpdate(active, { kind: "future-kind", text: "Ready-ish text" }), active);
+  assert.equal(mergeGatewayStatusUpdate(active, {}), active);
+  assert.equal(mergeGatewayStatusUpdate(active, { status: "future-status", kind: "status", text: "ready" }), active);
+});
+
+test("tool progress and approval waits remain active across status notifications", () => {
+  const toolProgress = reduceChatGatewayEvent(ready, {
+    type: "tool.progress", liveSessionId: "live", payload: { toolId: "tool-1", name: "Shell", summary: "Running" }
+  });
+  const afterToolNotice = reduceChatGatewayEvent(toolProgress, {
+    type: "status.update", liveSessionId: "live", payload: { kind: "process", text: "Still working" }
+  });
+  assert.equal(isChatRunActive(afterToolNotice), true);
+  assert.equal(afterToolNotice.messages[0]?.status, "streaming");
+
+  const waiting = reduceChatGatewayEvent(ready, {
+    type: "approval.request", liveSessionId: "live",
+    payload: { approvalId: "approval-1", choices: ["once", "deny"], allowPermanent: false }
+  });
+  const afterWaitingNotice = reduceChatGatewayEvent(waiting, {
+    type: "status.update", liveSessionId: "live", payload: { status: "thinking" }
+  });
+  assert.equal(afterWaitingNotice.status, "waiting");
+  assert.equal(afterWaitingNotice.pendingInteraction?.id, "approval:approval-1");
+  assert.equal(isChatRunActive(afterWaitingNotice), true);
+});
+
+test("completion, interruption, and error are authoritative run terminators", () => {
+  const active: ChatSession = {
+    ...ready,
+    status: "streaming",
+    streamingMessageId: "agent-1",
+    messages: [
+      { id: "tool-1", from: "tool", body: "running", at: "00:00", status: "streaming" },
+      { id: "agent-1", from: "agent", body: "done", at: "00:01", status: "streaming" }
+    ]
+  };
+  const complete = reduceChatGatewayEvent(active, {
+    type: "message.complete", liveSessionId: "live", payload: { messageId: "agent-1", text: "done" }
+  });
+  assert.equal(isChatRunActive(complete), false);
+  assert.deepEqual(complete.messages.map(({ status }) => status), ["complete", "complete"]);
+
+  const error = reduceChatGatewayEvent(active, {
+    type: "error", liveSessionId: "live", payload: { message: "failed" }
+  });
+  assert.equal(isChatRunActive(error), false);
+  assert.deepEqual(error.messages.map(({ status }) => status), ["failed", "failed"]);
+
+  const pending = reduceChatGatewayEvent(active, {
+    type: "approval.request", liveSessionId: "live",
+    payload: { approvalId: "approval-1", choices: ["once"], allowPermanent: false }
+  });
+  const pendingError = reduceChatGatewayEvent(pending, {
+    type: "error", liveSessionId: "live", payload: { message: "failed" }
+  });
+  assert.equal(pendingError.pendingInteraction, undefined);
+  assert.equal(isChatRunActive(pendingError), false);
+
+  const interrupts: string[] = [];
+  registerChatRuntime({
+    ensureSession() {}, releaseSession() {}, submitPrompt() {},
+    interrupt(sessionId) { interrupts.push(sessionId); },
+    async respondClarify() {}, async respondApproval() {}
+  });
+  sessions.value = [active];
+  interruptSession(active.id);
+  interruptSession(active.id);
+  assert.deepEqual(interrupts, [active.id]);
+  assert.equal(isChatRunActive(sessions.value[0]!), false);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ status }) => status), ["cancelled", "cancelled"]);
+
+  sessions.value = [pending];
+  interruptSession(active.id);
+  interruptSession(active.id);
+  assert.deepEqual(interrupts, [active.id, active.id]);
+  assert.equal(sessions.value[0]?.pendingInteraction, undefined);
+  assert.equal(isChatRunActive(sessions.value[0]!), false);
 });

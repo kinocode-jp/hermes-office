@@ -110,6 +110,7 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
   });
   sockets.on("connection", (websocket) => {
     websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "secret.request", session_id: "live-1", payload: { request_id: "secret-1", prompt: "API key" } } }));
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "status.update", session_id: "live-1", payload: { kind: "process", text: "Preparing follow-up", private_state: "hidden" } } }));
     websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "approval.request", session_id: "live-1", payload: { command: "curl https://x/?token=supersecretvalue", description: "Network action", choices: ["once", "deny"], allow_permanent: false, raw_args: { password: "hidden" } } } }));
     websocket.on("message", (data) => {
       const frame = JSON.parse(data.toString()) as Record<string, unknown>;
@@ -141,9 +142,10 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
   assert.deepEqual(received[1]?.params, { profile: "coder", title: "Seeded chat", close_on_disconnect: true, source: "desktop", messages: [{ role: "system", content: "Office shared context" }] });
   assert.deepEqual(result.value, { liveSessionId: "live-1", storedSessionId: "stored-1", messageCount: 0 });
   assert.equal(JSON.stringify(result).includes("private/path"), false);
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.type, "approval.request");
-  assert.equal(events[0]?.payload.command, "curl https://x/?token=[REDACTED]");
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[0], { type: "status.update", sessionId: "live-1", payload: { kind: "process", message: "Preparing follow-up" } });
+  assert.equal(events[1]?.type, "approval.request");
+  assert.equal(events[1]?.payload.command, "curl https://x/?token=[REDACTED]");
   assert.equal(JSON.stringify(events).includes("hidden"), false);
   await connection.close();
 });
