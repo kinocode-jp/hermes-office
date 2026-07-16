@@ -337,10 +337,22 @@ export interface OfficeGlobalSettingsDto {
 }
 
 export interface OfficeManagedSkill { profile: string; skill: string }
+export interface OfficePendingSkillOverride extends OfficeManagedSkill {
+  id: string;
+  desiredEnabled: boolean;
+  expectedEnabled: boolean;
+  createdAt: string;
+}
 export interface OfficeGlobalMaterializationState {
   settings: OfficeGlobalSettingsDto;
   managedSkills: OfficeManagedSkill[];
   skillOverrides: OfficeManagedSkill[];
+  pendingSkillOverrides: OfficePendingSkillOverride[];
+}
+
+export interface OfficeGlobalSettingsStoreOptions {
+  /** Testable storage boundary; throwing leaves the previous atomic state intact. */
+  beforeWrite?: (state: OfficeGlobalMaterializationState) => Promise<void> | void;
 }
 
 export interface OfficeGlobalSettingsUpdate {
@@ -354,11 +366,13 @@ export interface OfficeGlobalSettingsUpdate {
 /** Office-owned global inheritance store. Hermes has no global profile layer. */
 export class OfficeGlobalSettingsStore {
   readonly #filePath: string;
+  readonly #options: OfficeGlobalSettingsStoreOptions;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options: OfficeGlobalSettingsStoreOptions = {}) {
     if (filePath.trim() === "" || filePath.includes("\0")) throw invalid("Global settings path is invalid.");
     this.#filePath = filePath;
+    this.#options = options;
   }
 
   async read(): Promise<OfficeGlobalSettingsDto> {
@@ -389,7 +403,7 @@ export class OfficeGlobalSettingsStore {
         updatedAt: new Date().toISOString(),
         skillSync: { state: "pending", failures: [] },
       });
-      const next = { settings, managedSkills: current.managedSkills, skillOverrides: current.skillOverrides };
+      const next = { ...current, settings };
       await this.#writeState(next);
       return next;
     });
@@ -408,7 +422,7 @@ export class OfficeGlobalSettingsStore {
         ...current.settings,
         skillSync: { state: failures.length === 0 ? "ready" : "pending", failures },
       });
-      const next = { settings, managedSkills: validateManagedSkills(managedSkills), skillOverrides: validateManagedSkills(skillOverrides) };
+      const next = { ...current, settings, managedSkills: validateManagedSkills(managedSkills), skillOverrides: validateManagedSkills(skillOverrides) };
       await this.#writeState(next);
       return settings;
     });
@@ -426,7 +440,7 @@ export class OfficeGlobalSettingsStore {
         throw new HermesSettingsError("conflict", "Global settings changed while skills were being synchronized.");
       }
       await this.#writeState({
-        settings: current.settings,
+        ...current,
         managedSkills: validateManagedSkills(managedSkills),
         skillOverrides: validateManagedSkills(skillOverrides),
       });
@@ -441,7 +455,79 @@ export class OfficeGlobalSettingsStore {
       const skillOverrides = current.skillOverrides.some((item) => `${item.profile}\0${item.skill}` === key)
         ? current.skillOverrides
         : [...current.skillOverrides, { profile, skill }];
-      await this.#writeState({ settings: current.settings, managedSkills, skillOverrides });
+      const pendingSkillOverrides = current.pendingSkillOverrides.filter((item) => `${item.profile}\0${item.skill}` !== key);
+      await this.#writeState({ ...current, managedSkills, skillOverrides, pendingSkillOverrides });
+    });
+  }
+
+  async prepareSkillOverride(
+    profile: string,
+    skill: string,
+    desiredEnabled: boolean,
+    expectedEnabled: boolean,
+  ): Promise<{ transaction: OfficePendingSkillOverride; existing: boolean }> {
+    return await this.#mutate(async () => {
+      const current = await this.#readStateUnsafe();
+      const validProfile = requiredProfile(profile);
+      const validSkill = requiredName(skill, "managed skill");
+      const existing = current.pendingSkillOverrides.find((item) => item.profile === validProfile && item.skill === validSkill);
+      if (existing !== undefined) {
+        if (existing.desiredEnabled !== desiredEnabled || existing.expectedEnabled !== expectedEnabled) {
+          throw new HermesSettingsError("conflict", "A different Profile skill change is pending reconciliation.");
+        }
+        return { transaction: existing, existing: true };
+      }
+      const transaction: OfficePendingSkillOverride = {
+        id: randomBytes(32).toString("base64url"),
+        profile: validProfile,
+        skill: validSkill,
+        desiredEnabled,
+        expectedEnabled,
+        createdAt: new Date().toISOString(),
+      };
+      await this.#writeState({
+        ...current,
+        pendingSkillOverrides: [...current.pendingSkillOverrides, transaction],
+      });
+      return { transaction, existing: false };
+    });
+  }
+
+  async commitSkillOverride(transaction: OfficePendingSkillOverride): Promise<void> {
+    await this.#mutate(async () => {
+      const current = await this.#readStateUnsafe();
+      const pending = current.pendingSkillOverrides.find((item) => item.id === transaction.id);
+      const key = `${transaction.profile}\0${transaction.skill}`;
+      if (pending === undefined) {
+        if (current.skillOverrides.some((item) => `${item.profile}\0${item.skill}` === key)) return;
+        throw new HermesSettingsError("conflict", "Profile skill ownership transaction is no longer current.");
+      }
+      if (pending.profile !== transaction.profile || pending.skill !== transaction.skill
+        || pending.desiredEnabled !== transaction.desiredEnabled || pending.expectedEnabled !== transaction.expectedEnabled) {
+        throw new HermesSettingsError("conflict", "Profile skill ownership transaction does not match durable state.");
+      }
+      const pendingKey = `${pending.profile}\0${pending.skill}`;
+      const managedSkills = current.managedSkills.filter((item) => `${item.profile}\0${item.skill}` !== pendingKey);
+      const skillOverrides = current.skillOverrides.some((item) => `${item.profile}\0${item.skill}` === pendingKey)
+        ? current.skillOverrides
+        : [...current.skillOverrides, { profile: pending.profile, skill: pending.skill }];
+      await this.#writeState({
+        ...current,
+        managedSkills,
+        skillOverrides,
+        pendingSkillOverrides: current.pendingSkillOverrides.filter((item) => item.id !== transaction.id),
+      });
+    });
+  }
+
+  async abortSkillOverride(transaction: OfficePendingSkillOverride): Promise<void> {
+    await this.#mutate(async () => {
+      const current = await this.#readStateUnsafe();
+      if (!current.pendingSkillOverrides.some((item) => item.id === transaction.id)) return;
+      await this.#writeState({
+        ...current,
+        pendingSkillOverrides: current.pendingSkillOverrides.filter((item) => item.id !== transaction.id),
+      });
     });
   }
 
@@ -450,16 +536,22 @@ export class OfficeGlobalSettingsStore {
       const text = await readFile(this.#filePath, "utf8");
       return validateGlobalState(JSON.parse(text) as unknown);
     } catch (error) {
-      if (isNodeError(error, "ENOENT")) return { settings: defaultGlobalSettings(), managedSkills: [], skillOverrides: [] };
+      if (isNodeError(error, "ENOENT")) return { settings: defaultGlobalSettings(), managedSkills: [], skillOverrides: [], pendingSkillOverrides: [] };
       if (error instanceof HermesSettingsError) throw error;
       throw new HermesSettingsError("rejected", "Global settings could not be read.");
     }
   }
 
   async #writeState(state: OfficeGlobalMaterializationState): Promise<void> {
-    await atomicWriteJson(this.#filePath, state.managedSkills.length === 0 && state.skillOverrides.length === 0
+    await this.#options.beforeWrite?.(state);
+    await atomicWriteJson(this.#filePath, state.managedSkills.length === 0 && state.skillOverrides.length === 0 && state.pendingSkillOverrides.length === 0
       ? state.settings
-      : { ...state.settings, managedSkills: state.managedSkills, skillOverrides: state.skillOverrides });
+      : {
+          ...state.settings,
+          managedSkills: state.managedSkills,
+          skillOverrides: state.skillOverrides,
+          pendingSkillOverrides: state.pendingSkillOverrides,
+        });
   }
 
   async #mutate<T>(operation: () => Promise<T>): Promise<T> {
@@ -492,7 +584,37 @@ function validateGlobalState(value: unknown): OfficeGlobalMaterializationState {
   const settings = validateGlobal(value);
   const managed = isRecord(value) && Array.isArray(value.managedSkills) ? value.managedSkills : [];
   const overrides = isRecord(value) && Array.isArray(value.skillOverrides) ? value.skillOverrides : [];
-  return { settings, managedSkills: validateManagedSkills(managed), skillOverrides: validateManagedSkills(overrides) };
+  const pending = isRecord(value) && Array.isArray(value.pendingSkillOverrides) ? value.pendingSkillOverrides : [];
+  return {
+    settings,
+    managedSkills: validateManagedSkills(managed),
+    skillOverrides: validateManagedSkills(overrides),
+    pendingSkillOverrides: validatePendingSkillOverrides(pending),
+  };
+}
+
+function validatePendingSkillOverrides(value: unknown[]): OfficePendingSkillOverride[] {
+  if (value.length > 1_000) throw invalid("Pending Profile skill changes are too large.");
+  const result = value.map((item): OfficePendingSkillOverride => {
+    if (!isRecord(item) || typeof item.id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(item.id)
+      || typeof item.desiredEnabled !== "boolean" || typeof item.expectedEnabled !== "boolean"
+      || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt))) {
+      throw invalid("Pending Profile skill change is invalid.");
+    }
+    return {
+      id: item.id,
+      profile: requiredProfile(item.profile),
+      skill: requiredName(item.skill, "managed skill"),
+      desiredEnabled: item.desiredEnabled,
+      expectedEnabled: item.expectedEnabled,
+      createdAt: item.createdAt,
+    };
+  });
+  if (new Set(result.map((item) => item.id)).size !== result.length
+    || new Set(result.map((item) => `${item.profile}\0${item.skill}`)).size !== result.length) {
+    throw invalid("Pending Profile skill changes contain duplicates.");
+  }
+  return result;
 }
 
 function validateManagedSkills(value: unknown[]): OfficeManagedSkill[] {

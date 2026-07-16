@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { dirname, isAbsolute } from "node:path";
@@ -22,6 +23,11 @@ const ATTEMPT_WINDOW_MS = 60_000;
 const MAX_CLIENT_ATTEMPTS = 5;
 const MAX_GLOBAL_ATTEMPTS = 100;
 const MAX_RATE_LIMIT_KEYS = 512;
+const MAX_RENEW_GLOBAL_ATTEMPTS = 100;
+const MAX_RENEW_CLIENT_ATTEMPTS = 6;
+const MAX_RENEW_DEVICE_ATTEMPTS = 8;
+const SESSION_RENEW_WINDOW_MS = 30 * 60_000;
+const LAST_SEEN_WRITE_COOLDOWN_MS = 5 * 60_000;
 const DESKTOP_CAPABILITY_HEADER = "x-hermes-office-desktop-capability";
 const DESKTOP_PROTOCOL_PREFIX = "hermes-office.desktop.";
 const DEFAULT_DESKTOP_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] as const;
@@ -97,6 +103,10 @@ export class OfficeAuth {
   readonly #onAudit: ((record: OfficeAuditRecord) => void) | undefined;
   readonly #audit: OfficeAuditRecord[] = [];
   readonly #attempts = new Map<string, AttemptWindow>();
+  readonly #renewAttempts = new Map<string, AttemptWindow>();
+  #registryWriteTail: Promise<void> = Promise.resolve();
+  #lastSeenDirty = false;
+  #lastSeenFlush: Promise<void> | undefined;
   #enrollmentConsumed = false;
 
   constructor(options: OfficeAuthOptions = {}) {
@@ -139,11 +149,11 @@ export class OfficeAuth {
     return session;
   }
 
-  bootstrapDevice(
+  async bootstrapDevice(
     request: IncomingMessage,
     response: ServerResponse,
     credentials: { token: string; deviceName: string },
-  ): DeviceBootstrapResult {
+  ): Promise<DeviceBootstrapResult> {
     if (this.#remoteTokenDigest === undefined) return { outcome: "disabled" };
     if (!this.#isTrustedSecureProxyRequest(request)) return { outcome: "insecure_transport" };
     if (!this.#consumeRemoteAttempts(request, credentials.token)) {
@@ -173,7 +183,7 @@ export class OfficeAuth {
     };
     this.#devices.set(id, device);
     this.#enrollmentConsumed = true;
-    if (!this.#saveDeviceRegistry()) {
+    if (!await this.#saveDeviceRegistry()) {
       this.#devices.delete(id);
       return { outcome: "storage_unavailable" };
     }
@@ -186,7 +196,22 @@ export class OfficeAuth {
     if (!this.#isTrustedSecureProxyRequest(request)) return { outcome: "insecure_transport" };
     const device = this.#authenticateDeviceCredential(request, "");
     if (device === undefined) return this.#invalidDevice();
+    if (!this.#consumeRenewAttempts(request, device.id)) {
+      this.#appendAudit("auth.device", "rate_limited", undefined, false, device.id);
+      return { outcome: "rate_limited" };
+    }
+    const active = this.#activeDeviceSession(request, device.id);
+    this.#scheduleLastSeen(device);
+    if (active !== undefined) {
+      this.#appendAudit("auth.device", "allowed", active, false);
+      return { outcome: "success", session: active, enrolled: false };
+    }
     return { outcome: "success", session: this.#issueDeviceSession(request, response, device), enrolled: false };
+  }
+
+  async flushRegistryWrites(): Promise<void> {
+    await this.#lastSeenFlush;
+    await this.#registryWriteTail;
   }
 
   authenticate(request: IncomingMessage): OfficeAuthSession | undefined {
@@ -262,18 +287,18 @@ export class OfficeAuth {
     return { devices: [...this.#devices.values()].map(publicDevice) };
   }
 
-  revokeDevice(session: OfficeAuthSession, deviceId: string): boolean {
+  async revokeDevice(session: OfficeAuthSession, deviceId: string): Promise<boolean> {
     if (!session.principal.local || session.principal.tier !== "owner") return false;
     const device = this.#devices.get(deviceId);
     if (device === undefined || device.revokedAt !== undefined) return false;
     device.revokedAt = new Date().toISOString();
-    if (!this.#saveDeviceRegistry()) { delete device.revokedAt; return false; }
+    if (!await this.#saveDeviceRegistry()) { delete device.revokedAt; return false; }
     for (const [key, stored] of this.#sessions) if (stored.principal.id === deviceId) this.#sessions.delete(key);
     this.#appendAudit("device.revoke", "allowed", session, true, deviceId);
     return true;
   }
 
-  revoke(request: IncomingMessage, response: ServerResponse): boolean {
+  async revoke(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const session = this.authenticate(request);
     const rawToken = readCookie(request.headers.cookie, COOKIE_NAME);
     if (rawToken === undefined || session === undefined) return false;
@@ -281,7 +306,7 @@ export class OfficeAuth {
       const device = this.#devices.get(session.principal.id);
       if (device === undefined || device.revokedAt !== undefined) return false;
       device.revokedAt = new Date().toISOString();
-      if (!this.#saveDeviceRegistry()) { delete device.revokedAt; return false; }
+      if (!await this.#saveDeviceRegistry()) { delete device.revokedAt; return false; }
       for (const [key, stored] of this.#sessions) if (stored.principal.id === device.id) this.#sessions.delete(key);
     }
     const removed = session.principal.local ? this.#sessions.delete(tokenDigest(rawToken)) : true;
@@ -293,8 +318,7 @@ export class OfficeAuth {
   }
 
   #issueDeviceSession(request: IncomingMessage, response: ServerResponse, device: DeviceRecord): OfficeAuthSession {
-    device.lastSeenAt = new Date().toISOString();
-    this.#saveDeviceRegistry();
+    this.#scheduleLastSeen(device);
     const session = this.#issueSession(request, response, {
       id: device.id, tier: device.tier, local: false, deviceName: device.displayName,
     });
@@ -328,6 +352,43 @@ export class OfficeAuth {
     return safeEqual(tokenDigest(credential), device.credentialDigest) ? device : undefined;
   }
 
+  #activeDeviceSession(request: IncomingMessage, deviceId: string): OfficeAuthSession | undefined {
+    this.#prune();
+    const rawToken = readCookie(request.headers.cookie, COOKIE_NAME);
+    if (rawToken === undefined || rawToken.length > 128) return undefined;
+    const stored = this.#sessions.get(tokenDigest(rawToken));
+    if (stored === undefined || stored.principal.id !== deviceId || stored.expiresAtMs - Date.now() <= SESSION_RENEW_WINDOW_MS) return undefined;
+    return publicSession(stored);
+  }
+
+  #scheduleLastSeen(device: DeviceRecord): void {
+    const now = Date.now();
+    const previous = device.lastSeenAt === undefined ? 0 : Date.parse(device.lastSeenAt);
+    if (Number.isFinite(previous) && now - previous < LAST_SEEN_WRITE_COOLDOWN_MS) return;
+    device.lastSeenAt = new Date(now).toISOString();
+    this.#lastSeenDirty = true;
+    this.#startLastSeenFlush();
+  }
+
+  #startLastSeenFlush(): void {
+    if (this.#lastSeenFlush !== undefined) return;
+    const flush = this.#flushLastSeen();
+    this.#lastSeenFlush = flush;
+    void flush.finally(() => {
+      if (this.#lastSeenFlush !== flush) return;
+      this.#lastSeenFlush = undefined;
+      if (this.#lastSeenDirty) this.#startLastSeenFlush();
+    });
+  }
+
+  async #flushLastSeen(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    while (this.#lastSeenDirty) {
+      this.#lastSeenDirty = false;
+      await this.#saveDeviceRegistry();
+    }
+  }
+
   #isTrustedSecureProxyRequest(request: IncomingMessage): boolean {
     if (!isLoopbackAddress(request.socket.remoteAddress) || this.#trustedProxyHops < 1) return false;
     return request.headers["x-forwarded-proto"] === "https" && request.headers.forwarded === undefined;
@@ -336,21 +397,29 @@ export class OfficeAuth {
   #consumeRemoteAttempts(request: IncomingMessage, token: string): boolean {
     const client = forwardedClientKey(request.headers["x-forwarded-for"], this.#trustedProxyHops);
     if (client === undefined) return false;
-    return this.#consumeAttempt("global", MAX_GLOBAL_ATTEMPTS)
-      && this.#consumeAttempt(`client:${client}`, MAX_CLIENT_ATTEMPTS)
-      && this.#consumeAttempt(`credential:${tokenDigest(token).slice(0, 24)}`, MAX_CLIENT_ATTEMPTS);
+    return this.#consumeAttempt(this.#attempts, "global", MAX_GLOBAL_ATTEMPTS)
+      && this.#consumeAttempt(this.#attempts, `client:${client}`, MAX_CLIENT_ATTEMPTS)
+      && this.#consumeAttempt(this.#attempts, `credential:${tokenDigest(token).slice(0, 24)}`, MAX_CLIENT_ATTEMPTS);
   }
 
-  #consumeAttempt(key: string, limit: number): boolean {
+  #consumeRenewAttempts(request: IncomingMessage, deviceId: string): boolean {
+    const client = forwardedClientKey(request.headers["x-forwarded-for"], this.#trustedProxyHops);
+    if (client === undefined) return false;
+    return this.#consumeAttempt(this.#renewAttempts, "global", MAX_RENEW_GLOBAL_ATTEMPTS)
+      && this.#consumeAttempt(this.#renewAttempts, `client:${client}`, MAX_RENEW_CLIENT_ATTEMPTS)
+      && this.#consumeAttempt(this.#renewAttempts, `device:${deviceId}`, MAX_RENEW_DEVICE_ATTEMPTS);
+  }
+
+  #consumeAttempt(collection: Map<string, AttemptWindow>, key: string, limit: number): boolean {
     const now = Date.now();
-    for (const [entryKey, window] of this.#attempts) if (window.resetAt <= now) this.#attempts.delete(entryKey);
-    if (this.#attempts.size >= MAX_RATE_LIMIT_KEYS && !this.#attempts.has(key)) {
-      const oldest = this.#attempts.keys().next();
-      if (!oldest.done) this.#attempts.delete(oldest.value);
+    for (const [entryKey, window] of collection) if (window.resetAt <= now) collection.delete(entryKey);
+    if (collection.size >= MAX_RATE_LIMIT_KEYS && !collection.has(key)) {
+      const oldest = collection.keys().next();
+      if (!oldest.done) collection.delete(oldest.value);
     }
-    const current = this.#attempts.get(key);
+    const current = collection.get(key);
     if (current === undefined || current.resetAt <= now) {
-      this.#attempts.set(key, { count: 1, resetAt: now + ATTEMPT_WINDOW_MS });
+      collection.set(key, { count: 1, resetAt: now + ATTEMPT_WINDOW_MS });
       return true;
     }
     if (current.count >= limit) return false;
@@ -406,10 +475,52 @@ export class OfficeAuth {
   #resetRegistryGeneration(): void {
     this.#devices.clear();
     this.#enrollmentConsumed = false;
-    this.#saveDeviceRegistry();
+    this.#saveDeviceRegistrySync();
   }
 
-  #saveDeviceRegistry(): boolean {
+  #registrySnapshot(): string {
+    return JSON.stringify({
+      version: 1,
+      enrollmentTokenDigest: this.#remoteTokenGeneration,
+      enrollmentConsumed: this.#enrollmentConsumed,
+      devices: [...this.#devices.values()],
+    });
+  }
+
+  #saveDeviceRegistry(): Promise<boolean> {
+    if (this.#deviceRegistryPath === undefined || this.#remoteTokenDigest === undefined) return Promise.resolve(true);
+    const snapshot = this.#registrySnapshot();
+    const operation = this.#registryWriteTail.then(async () => await this.#writeDeviceRegistry(snapshot));
+    this.#registryWriteTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async #writeDeviceRegistry(snapshot: string): Promise<boolean> {
+    if (this.#deviceRegistryPath === undefined) return true;
+    const temporary = `${this.#deviceRegistryPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    let file: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      const directory = dirname(this.#deviceRegistryPath);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await chmod(directory, 0o700);
+      file = await open(temporary, "wx", 0o600);
+      await file.writeFile(snapshot, { encoding: "utf8" });
+      await file.sync();
+      await file.close();
+      file = undefined;
+      await rename(temporary, this.#deviceRegistryPath);
+      await chmod(this.#deviceRegistryPath, 0o600);
+      const directoryHandle = await open(directory, "r");
+      try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+      return true;
+    } catch {
+      if (file !== undefined) try { await file.close(); } catch { /* best effort */ }
+      try { await unlink(temporary); } catch { /* best effort */ }
+      return false;
+    }
+  }
+
+  #saveDeviceRegistrySync(): boolean {
     if (this.#deviceRegistryPath === undefined || this.#remoteTokenDigest === undefined) return true;
     const temporary = `${this.#deviceRegistryPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     let fileDescriptor: number | undefined;
@@ -418,12 +529,7 @@ export class OfficeAuth {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       chmodSync(directory, 0o700);
       fileDescriptor = openSync(temporary, "wx", 0o600);
-      writeFileSync(fileDescriptor, JSON.stringify({
-        version: 1,
-        enrollmentTokenDigest: this.#remoteTokenGeneration,
-        enrollmentConsumed: this.#enrollmentConsumed,
-        devices: [...this.#devices.values()],
-      }), { encoding: "utf8" });
+      writeFileSync(fileDescriptor, this.#registrySnapshot(), { encoding: "utf8" });
       fsyncSync(fileDescriptor);
       closeSync(fileDescriptor);
       fileDescriptor = undefined;

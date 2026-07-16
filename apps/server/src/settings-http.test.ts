@@ -136,23 +136,18 @@ test("profile skill override is persisted only after the Hermes mutation succeed
   const origin = await listen(server);
   t.after(() => server.close());
 
-  for (const [error, status] of [
-    [new HermesSettingsError("conflict", "changed"), 409],
-    [new HermesSettingsError("timed_out", "timed out"), 504],
-    [new HermesSettingsError("rejected", "rejected"), 502],
-  ] as const) {
-    failure = error;
-    const failed = await jsonFetch(`${origin}/api/v1/profiles/coder/skills/local`, "PATCH", { enabled: false, expectedEnabled: true });
-    assert.equal(failed.status, status);
-    assert.deepEqual((await store.readMaterialization()).managedSkills, [{ profile: "coder", skill: "local" }]);
-    assert.deepEqual((await store.readMaterialization()).skillOverrides, []);
-  }
+  const failed = await jsonFetch(`${origin}/api/v1/profiles/coder/skills/local`, "PATCH", { enabled: false, expectedEnabled: true });
+  assert.equal(failed.status, 409);
+  assert.deepEqual((await store.readMaterialization()).managedSkills, [{ profile: "coder", skill: "local" }]);
+  assert.deepEqual((await store.readMaterialization()).skillOverrides, []);
+  assert.equal((await store.readMaterialization()).pendingSkillOverrides.length, 0, "definite conflicts abort the intent");
 
   failure = undefined;
   const succeeded = await jsonFetch(`${origin}/api/v1/profiles/coder/skills/local`, "PATCH", { enabled: false, expectedEnabled: true });
   assert.equal(succeeded.status, 200);
   assert.deepEqual((await store.readMaterialization()).managedSkills, []);
   assert.deepEqual((await store.readMaterialization()).skillOverrides, [{ profile: "coder", skill: "local" }]);
+  assert.deepEqual((await store.readMaterialization()).pendingSkillOverrides, []);
 });
 
 function makeAdapter(calls: Array<{ method: string; args: unknown[] }>): HermesSettingsAdapter {

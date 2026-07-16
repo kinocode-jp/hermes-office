@@ -84,7 +84,7 @@ export async function routeSettingsHttp(
         const mutation = async (): Promise<void> =>
           await dependencies.settings.setSkillEnabled(profile, skill, enabled, expectedEnabled);
         if (dependencies.globalInheritance === undefined) await mutation();
-        else await dependencies.globalInheritance.applyProfileSkillOverride(profile, skill, mutation);
+        else await dependencies.globalInheritance.applyProfileSkillOverride(profile, skill, enabled, expectedEnabled, mutation);
         return { ...ok({ ok: true, name: skill, enabled }), changed: { kind: "skill", profile, id: skill } };
       }
       if (segments.length === 7 && segments[6] === "content") {

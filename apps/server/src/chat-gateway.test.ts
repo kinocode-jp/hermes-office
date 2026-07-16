@@ -237,6 +237,52 @@ test("approval and clarification claims are exclusive and recover only after tim
   assert.equal(client.errorCode(29), -32004);
 });
 
+test("a same-session approval arriving during a claim survives both success and failure of its predecessor", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  const firstSuccess = deferred<void>();
+  const firstFailure = deferred<void>();
+  const requests: HermesChatRequest[] = [];
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => {
+      publish = onEvent;
+      return connection(async (request) => {
+        requests.push(request);
+        if (requests.length === 1) await firstSuccess.promise;
+        if (requests.length === 3) await firstFailure.promise;
+        return { method: request.method, value: { status: "ok" } };
+      });
+    }),
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+  });
+  await flush();
+
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["once"], allowPermanent: false } });
+  client.rpc(40, "approval.respond", { session_id: "s-successor", choice: "once" });
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["deny"], allowPermanent: false } });
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["later"], allowPermanent: false } });
+  firstSuccess.resolve(undefined);
+  await flush();
+  client.rpc(41, "approval.respond", { session_id: "s-successor", choice: "deny" });
+  await flush();
+  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 2);
+  assert.equal(client.hasError(41), false);
+
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["once"], allowPermanent: false } });
+  client.rpc(42, "approval.respond", { session_id: "s-successor", choice: "once" });
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["deny"], allowPermanent: false } });
+  publish({ type: "approval.request", sessionId: "s-successor", payload: { choices: ["later"], allowPermanent: false } });
+  firstFailure.reject(new Error("predecessor failed"));
+  await flush();
+  assert.equal(client.errorCode(42), -32000);
+  client.rpc(43, "approval.respond", { session_id: "s-successor", choice: "deny" });
+  await flush();
+  assert.equal(requests.filter((request) => request.method === "approval.respond").length, 4);
+  assert.equal(client.hasError(43), false);
+});
+
 test("a queued response received before its request stays stale at the same clock tick", async () => {
   let publish!: (event: HermesChatEvent) => void;
   const gates = Array.from({ length: 4 }, () => deferred<void>());

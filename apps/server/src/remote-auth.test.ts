@@ -28,6 +28,13 @@ async function deviceLogin(
   });
 }
 
+async function renewDevice(base: string, cookie: string, client = "100.64.0.10"): Promise<Response> {
+  return await fetch(`${base}/api/v1/auth/device/renew`, {
+    method: "POST",
+    headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-Forwarded-Proto": "https", "X-Forwarded-For": client },
+  });
+}
+
 function responseCookies(response: Response): string {
   const raw = response.headers.get("set-cookie") ?? "";
   return [...raw.matchAll(/(?:^|,\s*)(hermes_office_(?:device|session))=([^;,\s]+)/g)]
@@ -181,10 +188,7 @@ test("one-time enrollment creates a revocable remote operator device without exp
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-CSRF-Token": session.csrfToken },
     })).status, 401);
 
-    const renewal = await fetch(`${base}/api/v1/auth/device/renew`, {
-      method: "POST",
-      headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-Forwarded-Proto": "https" },
-    });
+    const renewal = await renewDevice(base, cookie);
     assert.equal(renewal.status, 401);
 
     const nextLogin = await deviceLogin(base, REMOTE_TOKEN, "Owner phone");
@@ -192,6 +196,105 @@ test("one-time enrollment creates a revocable remote operator device without exp
   } finally {
     await server.close();
   }
+});
+
+test("device renewal is session-aware, IP/device limited, and a limited burst does not rewrite the registry", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-renew-limit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const deviceRegistryPath = join(directory, "devices.json");
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath,
+  });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const login = await deviceLogin(base, REMOTE_TOKEN);
+    assert.equal(login.status, 200);
+    const cookies = responseCookies(login);
+    const loginSession = await login.json() as { csrfToken: string; expiresAt: string };
+    const registryBefore = await readFile(deviceRegistryPath, "utf8");
+
+    const missingClient = await fetch(`${base}/api/v1/auth/device/renew`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, Cookie: cookies, "X-Forwarded-Proto": "https" },
+    });
+    assert.equal(missingClient.status, 429);
+    assert.equal(missingClient.headers.get("retry-after"), "60");
+
+    const noOp = await renewDevice(base, cookies);
+    assert.equal(noOp.status, 200);
+    assert.equal(noOp.headers.get("set-cookie"), null);
+    assert.deepEqual(await noOp.json(), loginSession);
+
+    const sameIpBurst = await Promise.all(Array.from({ length: 7 }, () => renewDevice(base, cookies)));
+    assert.equal(sameIpBurst.filter((response) => response.status === 200).length, 5);
+    assert.equal(sameIpBurst.filter((response) => response.status === 429).length, 2);
+    const otherIpBurst = await Promise.all(Array.from({ length: 5 }, (_, index) => renewDevice(base, cookies, `100.64.1.${index + 1}`)));
+    assert.equal(otherIpBurst.filter((response) => response.status === 200).length, 2);
+    assert.equal(otherIpBurst.filter((response) => response.status === 429).length, 3);
+    for (const response of [...sameIpBurst, ...otherIpBurst]) {
+      if (response.status === 429) assert.equal(response.headers.get("retry-after"), "60");
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(await readFile(deviceRegistryPath, "utf8"), registryBefore);
+  } finally { await server.close(); }
+});
+
+test("a debounced last-seen update is durable across an orderly restart", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-renew-durable-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const deviceRegistryPath = join(directory, "devices.json");
+  const options = {
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath,
+  } as const;
+  const enrolled = createOfficeServer(options);
+  const enrolledAddress = await enrolled.listen();
+  const login = await deviceLogin(`http://127.0.0.1:${enrolledAddress.port}`, REMOTE_TOKEN);
+  assert.equal(login.status, 200);
+  const deviceCookie = responseCookies(login).split("; ").find((cookie) => cookie.startsWith("hermes_office_device="))!;
+  await enrolled.close();
+
+  const oldLastSeen = "2000-01-01T00:00:00.000Z";
+  const staleRegistry = JSON.parse(await readFile(deviceRegistryPath, "utf8")) as { devices: Array<Record<string, unknown>> };
+  staleRegistry.devices[0]!.lastSeenAt = oldLastSeen;
+  await writeFile(deviceRegistryPath, JSON.stringify(staleRegistry), { mode: 0o600 });
+  const renewed = createOfficeServer(options);
+  const renewedAddress = await renewed.listen();
+  const renewedBase = `http://127.0.0.1:${renewedAddress.port}`;
+  const renewal = await renewDevice(renewedBase, deviceCookie);
+  assert.equal(renewal.status, 200);
+  assert.match(renewal.headers.get("set-cookie") ?? "", /hermes_office_session=/);
+  await renewed.close();
+
+  const persisted = JSON.parse(await readFile(deviceRegistryPath, "utf8")) as { devices: Array<{ lastSeenAt?: string }> };
+  assert.notEqual(persisted.devices[0]!.lastSeenAt, oldLastSeen);
+  const restarted = createOfficeServer(options);
+  const restartedAddress = await restarted.listen();
+  const restartedBase = `http://127.0.0.1:${restartedAddress.port}`;
+  try {
+    const restartedRenewal = await renewDevice(restartedBase, deviceCookie);
+    assert.equal(restartedRenewal.status, 200);
+    const sessionCookie = responseCookies(restartedRenewal);
+    const session = await restartedRenewal.json() as { csrfToken: string };
+    assert.equal((await fetch(`${restartedBase}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, Cookie: `${deviceCookie}; ${sessionCookie}`, "X-CSRF-Token": session.csrfToken },
+    })).status, 200);
+  } finally { await restarted.close(); }
+
+  const revokedRestart = createOfficeServer(options);
+  const revokedRestartAddress = await revokedRestart.listen();
+  try {
+    assert.equal((await renewDevice(`http://127.0.0.1:${revokedRestartAddress.port}`, deviceCookie)).status, 401);
+  } finally { await revokedRestart.close(); }
 });
 
 async function waitForTopic(websocket: WebSocket, topic: string): Promise<void> {
@@ -291,10 +394,7 @@ test("device registry survives restart and token rotation replaces its generatio
   const secondAddress = await second.listen();
   const secondBase = `http://127.0.0.1:${secondAddress.port}`;
   assert.equal((await deviceLogin(secondBase, REMOTE_TOKEN, "Second phone")).status, 409);
-  assert.equal((await fetch(`${secondBase}/api/v1/auth/device/renew`, {
-    method: "POST",
-    headers: { Origin: REMOTE_ORIGIN, Cookie: firstCookies, "X-Forwarded-Proto": "https" },
-  })).status, 200);
+  assert.equal((await renewDevice(secondBase, firstCookies)).status, 200);
   await second.close();
 
   const rotatedToken = "replacement-enrollment-token-with-32-characters";
@@ -303,10 +403,7 @@ test("device registry survives restart and token rotation replaces its generatio
   const rotatedBase = `http://127.0.0.1:${rotatedAddress.port}`;
   let rotatedCookies = "";
   try {
-    assert.equal((await fetch(`${rotatedBase}/api/v1/auth/device/renew`, {
-      method: "POST",
-      headers: { Origin: REMOTE_ORIGIN, Cookie: firstCookies, "X-Forwarded-Proto": "https" },
-    })).status, 401);
+    assert.equal((await renewDevice(rotatedBase, firstCookies)).status, 401);
     const replacementLogin = await deviceLogin(rotatedBase, rotatedToken, "Replacement phone");
     assert.equal(replacementLogin.status, 200);
     rotatedCookies = responseCookies(replacementLogin);
@@ -317,10 +414,7 @@ test("device registry survives restart and token rotation replaces its generatio
   const rotatedRestartBase = `http://127.0.0.1:${rotatedRestartAddress.port}`;
   try {
     assert.equal((await deviceLogin(rotatedRestartBase, rotatedToken, "Another phone")).status, 409);
-    assert.equal((await fetch(`${rotatedRestartBase}/api/v1/auth/device/renew`, {
-      method: "POST",
-      headers: { Origin: REMOTE_ORIGIN, Cookie: rotatedCookies, "X-Forwarded-Proto": "https" },
-    })).status, 200);
+    assert.equal((await renewDevice(rotatedRestartBase, rotatedCookies)).status, 200);
   } finally { await rotatedRestart.close(); }
 });
 
@@ -359,10 +453,7 @@ test("device registry rejects every invalid enrollment-consumed representation a
     const address = await server.listen();
     const base = `http://127.0.0.1:${address.port}`;
     try {
-      assert.equal((await fetch(`${base}/api/v1/auth/device/renew`, {
-        method: "POST",
-        headers: { Origin: REMOTE_ORIGIN, Cookie: enrolledCookies, "X-Forwarded-Proto": "https" },
-      })).status, 401);
+      assert.equal((await renewDevice(base, enrolledCookies)).status, 401);
       assert.equal((await deviceLogin(base, REMOTE_TOKEN)).status, 409);
     } finally { await server.close(); }
   }

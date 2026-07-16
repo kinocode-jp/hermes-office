@@ -93,6 +93,166 @@ test("failed materialization is explicit pending state and the next revision ret
   assert.equal(await coordinator.sessionCreateContext(), undefined);
 });
 
+test("durable override intent survives commit I/O failure and restart", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-override-outbox-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "global.json");
+  let failCommit = false;
+  const store = new OfficeGlobalSettingsStore(file, {
+    beforeWrite: async (state) => {
+      if (failCommit && state.pendingSkillOverrides.length === 0 && state.skillOverrides.length > 0) {
+        throw new Error("injected commit failure");
+      }
+    },
+  });
+  await seedManagedSkill(store, "coder", "browser");
+  const skills = new Map([["coder", new Map([["browser", true]])]]);
+  const settings = fakeSettings(skills, []);
+  const coordinator = new GlobalInheritanceCoordinator({ store, settings, listProfiles: async () => ["coder"] });
+
+  failCommit = true;
+  await assert.rejects(
+    coordinator.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+      skills.get("coder")!.set("browser", false);
+    }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "rejected" && error.message.includes("reconciliation"),
+  );
+  assert.equal(skills.get("coder")?.get("browser"), false, "Hermes mutation did succeed");
+  const pending = await store.readMaterialization();
+  assert.equal(pending.pendingSkillOverrides.length, 1);
+  assert.deepEqual(pending.managedSkills, [{ profile: "coder", skill: "browser" }]);
+  assert.deepEqual(pending.skillOverrides, []);
+
+  failCommit = false;
+  let duplicateMutationCalls = 0;
+  const restartedStore = new OfficeGlobalSettingsStore(file);
+  const restarted = new GlobalInheritanceCoordinator({ store: restartedStore, settings, listProfiles: async () => ["coder"] });
+  await restarted.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+    duplicateMutationCalls += 1;
+  });
+  assert.equal(duplicateMutationCalls, 0, "desired Hermes state commits without a duplicate mutation");
+  const committed = await restartedStore.readMaterialization();
+  assert.deepEqual(committed.pendingSkillOverrides, []);
+  assert.deepEqual(committed.managedSkills, []);
+  assert.deepEqual(committed.skillOverrides, [{ profile: "coder", skill: "browser" }]);
+  await restarted.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+    duplicateMutationCalls += 1;
+  });
+  assert.equal(duplicateMutationCalls, 0, "a committed duplicate is idempotent");
+  await restarted.update({ expectedRevision: 1, skills: ["browser"] });
+  assert.equal(skills.get("coder")?.get("browser"), false, "later global sync must respect recovered ownership");
+});
+
+test("Hermes failure remains recoverable and conflicting duplicates are rejected", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-override-hermes-failure-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "global.json");
+  const store = new OfficeGlobalSettingsStore(file);
+  await seedManagedSkill(store, "coder", "browser");
+  const skills = new Map([["coder", new Map([["browser", true]])]]);
+  const mutations: Array<[string, string, boolean, boolean | undefined]> = [];
+  const settings = fakeSettings(skills, mutations);
+  const coordinator = new GlobalInheritanceCoordinator({ store, settings, listProfiles: async () => ["coder"] });
+
+  await assert.rejects(
+    coordinator.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+      throw new HermesSettingsError("timed_out", "ambiguous upstream timeout");
+    }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "rejected" && error.message.includes("reconciliation"),
+  );
+  assert.equal((await store.readMaterialization()).pendingSkillOverrides.length, 1);
+  assert.deepEqual((await coordinator.read()).skillSync, {
+    state: "pending",
+    failures: [{ profile: "coder", skill: "browser", operation: "disable" }],
+  });
+
+  let conflictingMutationCalls = 0;
+  await assert.rejects(
+    coordinator.applyProfileSkillOverride("coder", "browser", true, false, async () => {
+      conflictingMutationCalls += 1;
+    }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "conflict",
+  );
+  assert.equal(conflictingMutationCalls, 0);
+
+  const restarted = new GlobalInheritanceCoordinator({
+    store: new OfficeGlobalSettingsStore(file),
+    settings,
+    listProfiles: async () => ["coder"],
+  });
+  await restarted.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+    throw new Error("existing intent must reconcile instead");
+  });
+  assert.equal(skills.get("coder")?.get("browser"), false);
+  assert.deepEqual(mutations, [["coder", "browser", false, true]]);
+});
+
+test("intent write failure prevents Hermes mutation from starting", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-override-prepare-failure-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "global.json");
+  let failPrepare = false;
+  const store = new OfficeGlobalSettingsStore(file, {
+    beforeWrite: async (state) => {
+      if (failPrepare && state.pendingSkillOverrides.length > 0) throw new Error("injected prepare failure");
+    },
+  });
+  await seedManagedSkill(store, "coder", "browser");
+  failPrepare = true;
+  const skills = new Map([["coder", new Map([["browser", true]])]]);
+  const coordinator = new GlobalInheritanceCoordinator({ store, settings: fakeSettings(skills, []), listProfiles: async () => ["coder"] });
+  let mutationCalls = 0;
+  await assert.rejects(coordinator.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+    mutationCalls += 1;
+  }));
+  assert.equal(mutationCalls, 0);
+  assert.equal(skills.get("coder")?.get("browser"), true);
+  assert.deepEqual((await store.readMaterialization()).pendingSkillOverrides, []);
+});
+
+test("Hermes precondition failure plus abort I/O failure remains durable", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-override-abort-failure-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "global.json");
+  let failAbort = false;
+  const store = new OfficeGlobalSettingsStore(file, {
+    beforeWrite: async (state) => {
+      if (failAbort && state.pendingSkillOverrides.length === 0 && state.skillOverrides.length === 0) {
+        throw new Error("injected abort failure");
+      }
+    },
+  });
+  await seedManagedSkill(store, "coder", "browser");
+  failAbort = true;
+  const skills = new Map([["coder", new Map([["browser", true]])]]);
+  const settings = fakeSettings(skills, []);
+  const coordinator = new GlobalInheritanceCoordinator({ store, settings, listProfiles: async () => ["coder"] });
+  await assert.rejects(
+    coordinator.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+      throw new HermesSettingsError("conflict", "changed");
+    }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "rejected" && error.message.includes("reconciliation"),
+  );
+  assert.equal((await store.readMaterialization()).pendingSkillOverrides.length, 1);
+
+  failAbort = false;
+  const restarted = new GlobalInheritanceCoordinator({
+    store: new OfficeGlobalSettingsStore(file),
+    settings,
+    listProfiles: async () => ["coder"],
+  });
+  await restarted.applyProfileSkillOverride("coder", "browser", false, true, async () => {
+    throw new Error("durable intent must reconcile after restart");
+  });
+  assert.equal(skills.get("coder")?.get("browser"), false);
+  assert.deepEqual((await new OfficeGlobalSettingsStore(file).readMaterialization()).pendingSkillOverrides, []);
+});
+
+async function seedManagedSkill(store: OfficeGlobalSettingsStore, profile: string, skill: string): Promise<void> {
+  const staged = await store.beginMaterialization({ expectedRevision: 0, skills: [skill] });
+  await store.finishMaterialization(staged.settings.revision, [{ profile, skill }], [], []);
+}
+
 function fakeSettings(
   state: Map<string, Map<string, boolean>>,
   mutations: Array<[string, string, boolean, boolean | undefined]>,

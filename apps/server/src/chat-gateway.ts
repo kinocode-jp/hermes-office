@@ -47,6 +47,7 @@ interface PendingResponse {
   state: PendingResponseState;
 }
 interface PendingApproval extends PendingResponse { choices: ReadonlySet<string>; }
+interface PendingApprovalSlot { active: PendingApproval; successor?: PendingApproval; }
 type PendingClaim =
   | { kind: "approval"; key: string; entry: PendingApproval }
   | { kind: "clarification"; key: string; entry: PendingResponse };
@@ -92,7 +93,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   catch { client.close(1013, "Hermes runtime unavailable"); return; }
 
   const queued: Array<{ body: string; receivedAt: number; receivedOrder: number }> = [];
-  const pendingApprovals = new Map<string, PendingApproval>();
+  const pendingApprovals = new Map<string, PendingApprovalSlot>();
   const pendingClarifications = new Map<string, PendingResponse>();
   let upstream: Awaited<ReturnType<ReturnType<HermesRuntimeSource["chat"]>["connect"]>> | undefined;
   let closed = false;
@@ -154,9 +155,10 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
           sendRpcError(send, frame.id, -32003, "Permanent approval requires verified local owner access.");
           return;
         }
-        const pending = targetId === undefined ? undefined : pendingApprovals.get(targetId);
+        const slot = targetId === undefined ? undefined : pendingApprovals.get(targetId);
+        const pending = slot?.active;
         if (pending === undefined || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
-          if (pending?.expiresAt !== undefined && pending.expiresAt <= receivedAt) pendingApprovals.delete(targetId!);
+          if (slot !== undefined && pending?.expiresAt !== undefined && pending.expiresAt <= receivedAt) promoteApprovalSuccessor(pendingApprovals, targetId!, slot);
           sendRpcError(send, frame.id, -32004, "Pending approval was not found or has expired.");
           return;
         }
@@ -228,10 +230,12 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         : [];
       const createdAt = now();
       const createdOrder = ++chronology;
+      const approval: PendingApproval = { choices: new Set(choices), createdAt, createdOrder, expiresAt: createdAt + limits.approvalTtlMs, state: "pending" };
       const existing = pendingApprovals.get(event.sessionId);
-      if (existing?.state !== "claimed") {
-        pendingApprovals.set(event.sessionId, { choices: new Set(choices), createdAt, createdOrder, expiresAt: createdAt + limits.approvalTtlMs, state: "pending" });
-      }
+      // Responses have only a session id, so preserve the first successor and
+      // never let a later event replace it while the active request is claimed.
+      if (existing?.active.state === "claimed") existing.successor ??= approval;
+      else pendingApprovals.set(event.sessionId, { active: approval });
       trimOldest(pendingApprovals, 128);
     }
     if (event.type === "clarify.request" && typeof event.payload.requestId === "string") {
@@ -280,24 +284,47 @@ function sendRpcError(send: (value: unknown) => void, id: string | number, code:
 
 function consumeClaim(
   claim: PendingClaim | undefined,
-  approvals: ReadonlyMap<string, PendingApproval>,
+  approvals: Map<string, PendingApprovalSlot>,
   clarifications: ReadonlyMap<string, PendingResponse>,
 ): void {
   if (claim === undefined) return;
-  const current = claim.kind === "approval" ? approvals.get(claim.key) : clarifications.get(claim.key);
+  if (claim.kind === "approval") {
+    const slot = approvals.get(claim.key);
+    if (slot?.active !== claim.entry || claim.entry.state !== "claimed") return;
+    claim.entry.state = "consumed";
+    promoteApprovalSuccessor(approvals, claim.key, slot);
+    return;
+  }
+  const current = clarifications.get(claim.key);
   if (current === claim.entry && claim.entry.state === "claimed") claim.entry.state = "consumed";
 }
 
 function restoreClaim(
   claim: PendingClaim | undefined,
-  approvals: ReadonlyMap<string, PendingApproval>,
+  approvals: Map<string, PendingApprovalSlot>,
   clarifications: ReadonlyMap<string, PendingResponse>,
   closed: boolean,
   currentTime: number,
 ): void {
-  if (claim === undefined || closed || claim.entry.expiresAt <= currentTime) return;
-  const current = claim.kind === "approval" ? approvals.get(claim.key) : clarifications.get(claim.key);
-  if (current === claim.entry && claim.entry.state === "claimed") claim.entry.state = "pending";
+  if (claim === undefined || closed) return;
+  if (claim.kind === "approval") {
+    const slot = approvals.get(claim.key);
+    if (slot?.active !== claim.entry || claim.entry.state !== "claimed") return;
+    // Restoring A beside B would make the next session-scoped response
+    // ambiguous. Once B exists it is the only safe request to promote.
+    if (slot.successor !== undefined) promoteApprovalSuccessor(approvals, claim.key, slot);
+    else if (claim.entry.expiresAt > currentTime) claim.entry.state = "pending";
+    else approvals.delete(claim.key);
+    return;
+  }
+  const current = clarifications.get(claim.key);
+  if (claim.entry.expiresAt > currentTime && current === claim.entry && claim.entry.state === "claimed") claim.entry.state = "pending";
+}
+
+function promoteApprovalSuccessor(approvals: Map<string, PendingApprovalSlot>, key: string, slot: PendingApprovalSlot): void {
+  if (slot.successor === undefined) { approvals.delete(key); return; }
+  slot.active = slot.successor;
+  delete slot.successor;
 }
 
 function trimOldest<T>(collection: Map<string, T> | Set<string>, maximum: number): void {

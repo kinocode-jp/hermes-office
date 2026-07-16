@@ -160,7 +160,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       }
       try {
         const credentials = await readDeviceAuthBody(request, maxJsonBytes);
-        const result = auth.bootstrapDevice(request, response, credentials);
+        const result = await auth.bootstrapDevice(request, response, credentials);
         if (result.outcome === "success") writeJson(response, 200, result.session, maxResponseJsonBytes);
         else if (result.outcome === "rate_limited") {
           writeError(response, 429, "rate_limited", "Too many device authentication attempts.", maxJsonBytes, { "Retry-After": "60" });
@@ -187,6 +187,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       if (requestHasBody(request)) { request.resume(); writeError(response, 413, "bad_request", "Renewal request bodies are not accepted.", maxJsonBytes); return; }
       const result = auth.renewDevice(request, response);
       if (result.outcome === "success") writeJson(response, 200, result.session, maxResponseJsonBytes);
+      else if (result.outcome === "rate_limited") writeError(response, 429, "rate_limited", "Too many device renewal attempts.", maxJsonBytes, { "Retry-After": "60" });
       else if (result.outcome === "insecure_transport") writeError(response, 403, "forbidden", "Remote renewal requires a configured trusted HTTPS proxy.", maxJsonBytes);
       else writeError(response, 401, "unauthenticated", "Device credential is invalid or revoked.", maxJsonBytes);
       return;
@@ -200,7 +201,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
       } else if (!auth.authorizeOperation(request, "state.read", true).allowed) {
         writeError(response, 403, "forbidden", "A valid Office session and CSRF token are required.", maxJsonBytes);
-      } else if (!auth.revoke(request, response)) {
+      } else if (!await auth.revoke(request, response)) {
         writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
       } else {
         writeJson(response, 200, { ok: true }, maxResponseJsonBytes);
@@ -289,7 +290,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       let deviceId: string;
       try { deviceId = decodeURIComponent(revokeDeviceMatch[1]!); }
       catch { writeError(response, 400, "bad_request", "Device identifier is malformed.", maxJsonBytes); return; }
-      if (!auth.revokeDevice(access.session, deviceId)) { writeError(response, 404, "not_found", "Active device was not found.", maxJsonBytes); return; }
+      if (!await auth.revokeDevice(access.session, deviceId)) { writeError(response, 404, "not_found", "Active device was not found.", maxJsonBytes); return; }
       for (const client of websocketServer.clients) if (eventSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
       for (const client of chatWebSocketServer.clients) if (chatSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
       writeJson(response, 200, { ok: true }, maxResponseJsonBytes);
@@ -481,7 +482,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     port,
     originAllowlist,
     listen: () =>
-      new Promise((resolve, reject) => {
+      new Promise<AddressInfo>((resolve, reject) => {
         const onError = (error: Error): void => reject(error);
         httpServer.once("error", onError);
         httpServer.listen(port, host, () => {
@@ -499,7 +500,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         });
       }),
     close: () =>
-      new Promise((resolve, reject) => {
+      new Promise<void>((resolve, reject) => {
         for (const client of websocketServer.clients) {
           client.close(1001, "Server shutting down");
         }
@@ -508,11 +509,13 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
           chatWebSocketServer.close(() => {
             httpServer.close((error) => {
               if (error) { reject(error); return; }
-              if (runtimeSource === undefined) resolve();
-              else runtimeSource.close().then(resolve, reject);
+              resolve();
             });
           });
         });
+      }).then(async () => {
+        await auth.flushRegistryWrites();
+        await runtimeSource?.close();
       }),
     broadcast: <T>(topic: EventTopic, payload: T, aggregateId?: string): boolean => {
       const event = makeEvent(++sequence, topic, payload, aggregateId);
