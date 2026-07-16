@@ -6,7 +6,7 @@ export const DEFAULT_CLIENT_HISTORY_LIMITS: ClientHistoryLimits = {
   maxBytes: 8 * 1024 * 1024,
 };
 
-export type HistoryLimitReason = "page_limit" | "message_limit" | "byte_limit" | "server_limit" | "upstream_error";
+export type HistoryLimitReason = "page_limit" | "message_limit" | "byte_limit" | "server_limit" | "upstream_error" | "upstream_invalid_rows";
 export type ClientHistoryLimits = { maxPages: number; maxMessages: number; maxBytes: number };
 export type BoundedHistoryPage = {
   messages: ChatMessage[];
@@ -57,7 +57,10 @@ export class HistoryAccumulator {
     if (page.direction === "older") this.messages.unshift(...accepted);
     else this.messages.push(...accepted);
     this.#serverPartial ||= page.partial;
-    if (page.truncated) this.#reason ??= normalizeReason(page.truncationReason);
+    if (page.truncated) {
+      this.#reason ??= normalizeReason(page.truncationReason);
+      if (this.#reason === "upstream_invalid_rows") this.#error ??= "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。";
+    }
     if (page.hasMore && this.#reason === undefined) {
       if (this.#pages >= this.#limits.maxPages) this.#reason = "page_limit";
       else if (this.messages.length >= this.#limits.maxMessages) this.#reason = "message_limit";
@@ -86,7 +89,7 @@ export class HistoryAccumulator {
 }
 
 function normalizeReason(value: string | undefined): HistoryLimitReason {
-  return value === "page_limit" || value === "message_limit" || value === "byte_limit" ? value : "server_limit";
+  return value === "page_limit" || value === "message_limit" || value === "byte_limit" || value === "upstream_invalid_rows" ? value : "server_limit";
 }
 
 function validLimits(limits: ClientHistoryLimits): boolean {

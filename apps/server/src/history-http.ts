@@ -13,7 +13,7 @@ export const DEFAULT_HISTORY_AGGREGATE_LIMITS: HistoryAggregateLimits = {
   maxBytes: 8 * 1024 * 1024,
 };
 
-export type HistoryTruncationReason = "page_limit" | "message_limit" | "byte_limit";
+export type HistoryTruncationReason = "page_limit" | "message_limit" | "byte_limit" | "upstream_invalid_rows";
 export type HistoryAggregateLimits = { maxPages: number; maxMessages: number; maxBytes: number };
 type HistoryCursorState = {
   sessionId: string;
@@ -40,6 +40,7 @@ export interface OfficeHistoryPage extends Omit<HermesHistoryDto, "pagination"> 
     cumulative: { pages: number; messages: number; bytes: number };
     limits: HistoryAggregateLimits;
     window: { start: number; end: number; omittedBefore: boolean };
+    source: { returned: number; normalizedReturned: number; dropped: number };
   };
 }
 
@@ -66,7 +67,12 @@ export async function fetchOfficeHistoryPage(
   const history = fetchLimit === 0
     ? emptyHistory(cursor.sessionId, profile, fetchOffset)
     : await chat.fetchHistory({ sessionId: cursor.sessionId, profile, limit: fetchLimit, offset: fetchOffset });
-  if (history.pagination.offset !== fetchOffset || history.pagination.returned !== fetchLimit) {
+  if (history.pagination.offset !== fetchOffset || history.pagination.limit !== fetchLimit
+    || !Number.isSafeInteger(history.pagination.returned) || history.pagination.returned !== fetchLimit
+    || !Number.isSafeInteger(history.pagination.normalizedReturned) || history.pagination.normalizedReturned < 0
+    || !Number.isSafeInteger(history.pagination.dropped) || history.pagination.dropped < 0
+    || history.pagination.normalizedReturned !== history.messages.length
+    || history.pagination.dropped !== history.pagination.returned - history.pagination.normalizedReturned) {
     throw new Error("Hermes history changed while its tail window was loading.");
   }
   return fitPage(history, limit, cursor, requestedSessionId, profile, maxResponseBytes, limits);
@@ -104,36 +110,38 @@ function fitPage(
 ): OfficeHistoryPage {
   const messages: HermesHistoryMessageDto[] = [];
   let addedBytes = 0;
-  let truncationReason: HistoryTruncationReason | undefined;
+  let budgetReason: HistoryTruncationReason | undefined;
+  const integrityReason: HistoryTruncationReason | undefined = history.pagination.dropped > 0 ? "upstream_invalid_rows" : undefined;
   for (let index = history.messages.length - 1; index >= 0; index -= 1) {
     const message = history.messages[index]!;
-    if (cursor.messages + messages.length >= limits.maxMessages) { truncationReason = "message_limit"; break; }
+    if (cursor.messages + messages.length >= limits.maxMessages) { budgetReason = "message_limit"; break; }
     const messageBytes = Buffer.byteLength(JSON.stringify(message)) + 1;
-    if (cursor.bytes + addedBytes + messageBytes > limits.maxBytes) { truncationReason = "byte_limit"; break; }
+    if (cursor.bytes + addedBytes + messageBytes > limits.maxBytes) { budgetReason = "byte_limit"; break; }
     const candidateMessages = [message, ...messages];
     const candidateBytes = addedBytes + messageBytes;
     const candidateOffset = message.index;
     const candidateHasMore = candidateOffset > cursor.start;
-    const candidateReason = candidateHasMore ? undefined : terminalOmissionReason(cursor);
-    const candidate = makePage(history, candidateMessages, limit, cursor, candidateOffset, candidateBytes, candidateHasMore, false, candidateReason, requestedSessionId, profile, limits);
+    const candidateReason = integrityReason ?? (candidateHasMore ? undefined : terminalOmissionReason(cursor));
+    const candidate = makePage(history, candidateMessages, limit, cursor, candidateOffset, candidateBytes, candidateHasMore && integrityReason === undefined, false, candidateReason, requestedSessionId, profile, limits);
     if (Buffer.byteLength(JSON.stringify(candidate)) > maxResponseBytes) break;
     messages.unshift(message);
     addedBytes = candidateBytes;
   }
 
-  const pageLimitedByBytes = messages.length < history.messages.length && truncationReason === undefined;
+  const pageLimitedByBytes = messages.length < history.messages.length && budgetReason === undefined;
   const nextOffset = messages[0]?.index ?? cursor.offset;
   const moreAvailable = nextOffset > cursor.start;
   const cumulative = { pages: cursor.pages + 1, messages: cursor.messages + messages.length, bytes: cursor.bytes + addedBytes };
-  if (moreAvailable && truncationReason === undefined) {
-    if (cumulative.pages >= limits.maxPages) truncationReason = "page_limit";
-    else if (cumulative.messages >= limits.maxMessages) truncationReason = "message_limit";
-    else if (cumulative.bytes >= limits.maxBytes) truncationReason = "byte_limit";
+  if (moreAvailable && budgetReason === undefined) {
+    if (cumulative.pages >= limits.maxPages) budgetReason = "page_limit";
+    else if (cumulative.messages >= limits.maxMessages) budgetReason = "message_limit";
+    else if (cumulative.bytes >= limits.maxBytes) budgetReason = "byte_limit";
   }
-  if (!moreAvailable && truncationReason === undefined) truncationReason = terminalOmissionReason(cursor);
+  if (!moreAvailable && budgetReason === undefined) budgetReason = terminalOmissionReason(cursor);
+  const truncationReason = integrityReason ?? budgetReason;
   const truncated = truncationReason !== undefined;
   const hasMore = moreAvailable && !truncated;
-  if (messages.length === 0 && (cursor.offset > cursor.start || (truncated && cursor.messages === 0))) {
+  if (messages.length === 0 && history.messages.length > 0 && (cursor.offset > cursor.start || (truncated && cursor.messages === 0))) {
     throw new Error("A single history message exceeds the Office response or aggregate budget.");
   }
   const page = makePage(history, messages, limit, cursor, nextOffset, addedBytes, hasMore, pageLimitedByBytes, truncated ? truncationReason : undefined, requestedSessionId, profile, limits);
@@ -170,11 +178,16 @@ function makePage(
       direction: "older",
       pageLimitedByBytes,
       truncated,
-      partial: truncated && cumulative.messages > 0,
+      partial: truncationReason === "upstream_invalid_rows" || (truncated && cumulative.messages > 0),
       ...(truncationReason === undefined ? {} : { truncationReason }),
       cumulative,
       limits,
       window: { start: cursor.start, end: cursor.end, omittedBefore: cursor.start > 0 },
+      source: {
+        returned: history.pagination.returned,
+        normalizedReturned: history.pagination.normalizedReturned,
+        dropped: history.pagination.dropped,
+      },
     },
   };
 }
@@ -184,7 +197,7 @@ function terminalOmissionReason(cursor: HistoryCursorState): HistoryTruncationRe
 }
 
 function emptyHistory(sessionId: string, profile: string, offset: number): HermesHistoryDto {
-  return { sessionId, profile, messages: [], pagination: { limit: 0, offset, returned: 0 } };
+  return { sessionId, profile, messages: [], pagination: { limit: 0, offset, returned: 0, normalizedReturned: 0, dropped: 0 } };
 }
 
 function validateQuery(url: URL): void {

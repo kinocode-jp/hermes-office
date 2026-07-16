@@ -91,7 +91,12 @@ export interface HermesHistoryDto {
   pagination: {
     limit: number;
     offset: number;
+    /** Number of rows returned on the Hermes wire before normalization. */
     returned: number;
+    /** Number of rows that passed the secret-safe Office normalizer. */
+    normalizedReturned: number;
+    /** Malformed wire rows excluded by the normalizer. */
+    dropped: number;
   };
 }
 
@@ -439,11 +444,12 @@ function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | u
 
 function normalizeHistory(raw: unknown, requestedId: string, profile: string, limit: number, offset: number, maxTextBytes: number): HermesHistoryDto {
   if (!isRecord(raw) || !Array.isArray(raw.messages)) throw publicError("backend_rejected", "Hermes returned invalid chat history.");
+  if (raw.messages.length > limit) throw publicError("backend_rejected", "Hermes returned invalid chat history pagination.");
   const resolvedId = safeId(raw.session_id) ?? requestedId;
-  const entries = raw.messages.slice(0, limit);
-  const messages = entries.flatMap((item, index): HermesHistoryMessageDto[] => {
+  const messages = raw.messages.flatMap((item, index): HermesHistoryMessageDto[] => {
     if (!isRecord(item) || !isRole(item.role)) return [];
     const timestamp = normalizeTimestamp(item.timestamp);
+    if (item.timestamp !== undefined && timestamp === undefined) return [];
     const toolName = safeShortText(item.tool_name, 120);
     if (item.role === "system") return [{ index: offset + index, role: "system", text: "[System message hidden]", redacted: true, ...(timestamp === undefined ? {} : { timestamp }) }];
     if (item.role === "tool") return [{ index: offset + index, role: "tool", text: "[Tool output hidden]", redacted: true, ...(toolName === undefined ? {} : { toolName }), ...(timestamp === undefined ? {} : { timestamp }) }];
@@ -452,7 +458,18 @@ function normalizeHistory(raw: unknown, requestedId: string, profile: string, li
     const redacted = text !== original;
     return [{ index: offset + index, role: item.role, text, ...(redacted ? { redacted: true } : {}), ...(timestamp === undefined ? {} : { timestamp }) }];
   });
-  return { sessionId: resolvedId, profile, messages, pagination: { limit, offset, returned: entries.length } };
+  return {
+    sessionId: resolvedId,
+    profile,
+    messages,
+    pagination: {
+      limit,
+      offset,
+      returned: raw.messages.length,
+      normalizedReturned: messages.length,
+      dropped: raw.messages.length - messages.length,
+    },
+  };
 }
 
 function normalizeOptions(options: HermesChatTransportOptions): NormalizedOptions {

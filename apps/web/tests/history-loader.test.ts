@@ -47,6 +47,27 @@ test("a later upstream failure preserves already loaded history as partial", () 
   assert.deepEqual({ count: history.messages.length, partial: history.result().partial, reason: history.result().reason, error: history.result().error }, { count: 2, partial: true, reason: "upstream_error", error: "temporary history failure" });
 });
 
+test("malformed upstream rows produce an explicit safe UI notice while retaining valid rows", () => {
+  const history = new HistoryAccumulator();
+  assert.equal(history.append({
+    messages: [message(0), message(2)],
+    direction: "older",
+    hasMore: false,
+    truncated: true,
+    partial: true,
+    truncationReason: "upstream_invalid_rows",
+  }), false);
+  assert.deepEqual(history.messages.map(({ id }) => id), ["m0", "m2"]);
+  assert.deepEqual(
+    { partial: history.result().partial, reason: history.result().reason, error: history.result().error },
+    {
+      partial: true,
+      reason: "upstream_invalid_rows",
+      error: "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。",
+    },
+  );
+});
+
 function page(messages: ReturnType<typeof message>[], hasMore: boolean) {
   return { messages, direction: "older" as const, hasMore, truncated: false, partial: false };
 }

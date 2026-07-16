@@ -19,7 +19,7 @@ test("remote operator can resume, interrupt, and read visible single-tenant sess
     chat: () => ({
       inspectHistory: async ({ sessionId }: { sessionId: string }) => ({ sessionId, total: 0 }),
       fetchHistory: async ({ sessionId, profile }: { sessionId: string; profile: string }) => ({
-        sessionId, profile, messages: [], pagination: { limit: 200, offset: 0, returned: 0 },
+        sessionId, profile, messages: [], pagination: { limit: 200, offset: 0, returned: 0, normalizedReturned: 0, dropped: 0 },
       }),
       connect: async () => ({
         closed: false,

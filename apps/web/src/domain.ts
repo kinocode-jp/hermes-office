@@ -165,3 +165,9 @@ export type OfficeSnapshot = {
   inventory: { profiles: OfficeInventoryPagination; sessions: OfficeInventoryPagination };
   boards: Array<{ id: string; name: string; cardCount: number }>;
 };
+
+export type OfficeSnapshotRequestIdentity = Readonly<{
+  serverUrl: string;
+  connectionGeneration: number;
+  requestGeneration: number;
+}>;

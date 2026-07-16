@@ -1,6 +1,13 @@
 import type { ApprovalChoice, ChatMessage } from "./domain";
-import { officeFetchJson, officeServerUrl } from "./office-api";
-import { createAuthenticatedOfficeWebSocket } from "./desktop-transport";
+import {
+  officeFetchJson,
+  officeServerUrl,
+  OfficeDeviceAuthRequiredError,
+  openOfficeWebSocket,
+  recoverOfficeWebSocketAuthentication,
+  shouldRecoverOfficeWebSocket,
+  type OfficeWebSocketLease,
+} from "./office-api";
 import { DEFAULT_CLIENT_HISTORY_LIMITS, HistoryAccumulator, type ChatHistoryResult } from "./history-loader";
 
 export type { ChatHistoryResult } from "./history-loader";
@@ -43,6 +50,9 @@ export type ChatApiConnection = {
 export type ChatApiDependencies = {
   serverUrl?: string;
   createWebSocket?: (url: string) => Promise<WebSocket>;
+  openWebSocket?: (url: string, serverUrl: string) => Promise<OfficeWebSocketLease>;
+  recoverAuthentication?: (serverUrl: string, rejectedAuthRevision: number) => Promise<void>;
+  reconnectDelay?: (attempt: number) => number;
   fetchJson?: typeof officeFetchJson;
   randomId?: () => string;
 };
@@ -68,12 +78,17 @@ type LiveTarget = { clientSessionId: string; generation: number };
 const RPC_TIMEOUT_MS = 15_000;
 const HISTORY_TIMEOUT_MS = 10_000;
 const RECONNECT_MAX_MS = 8_000;
+const MAX_PREOPEN_WEBSOCKET_FAILURES = 3;
 const HISTORY_PAGE_LIMIT = 25;
 const MAX_HISTORY_PAGES = DEFAULT_CLIENT_HISTORY_LIMITS.maxPages;
 
 export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatApiDependencies = {}): ChatApiConnection {
   const serverUrl = dependencies.serverUrl ?? officeServerUrl();
-  const createWebSocket = dependencies.createWebSocket ?? createAuthenticatedOfficeWebSocket;
+  const openWebSocket = dependencies.openWebSocket ?? (dependencies.createWebSocket
+    ? async (url: string) => ({ socket: await dependencies.createWebSocket!(url), authRevision: 0 })
+    : openOfficeWebSocket);
+  const recoverAuthentication = dependencies.recoverAuthentication ?? recoverOfficeWebSocketAuthentication;
+  const reconnectDelay = dependencies.reconnectDelay ?? ((attempt: number) => Math.min(RECONNECT_MAX_MS, 800 * (2 ** attempt)));
   const fetchJson = dependencies.fetchJson ?? officeFetchJson;
   const randomId = dependencies.randomId ?? (() => crypto.randomUUID());
   const targets = new Map<string, ActiveTarget>();
@@ -85,9 +100,16 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   let nextGeneration = 0;
   let socket: WebSocket | undefined;
   let socketOpening = false;
+  let socketOpenAttempt: symbol | undefined;
   let stopped = false;
+  let lifecycleGeneration = 0;
   let reconnectAttempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let socketAuthRevision: number | undefined;
+  let socketOpened = false;
+  let socketFailedBeforeOpen = false;
+  let attemptedRecoveryRevision: number | undefined;
+  let preOpenFailureCount = 0;
 
   const rejectPending = (message: string) => {
     for (const request of pending.values()) {
@@ -99,7 +121,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
 
   const scheduleReconnect = () => {
     if (stopped || reconnectTimer !== undefined) return;
-    const delay = Math.min(RECONNECT_MAX_MS, 800 * (2 ** reconnectAttempt));
+    const delay = reconnectDelay(reconnectAttempt);
     reconnectAttempt += 1;
     reconnectTimer = globalThis.setTimeout(() => {
       reconnectTimer = undefined;
@@ -107,9 +129,17 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     }, delay);
   };
 
-  const handleClose = (event?: CloseEvent) => {
+  const handleClose = (event: CloseEvent) => {
+    const rejectedRevision = socketAuthRevision;
+    const ambiguousPreOpenFailure = !socketOpened && (event.code === 1006 || socketFailedBeforeOpen);
+    if (ambiguousPreOpenFailure) preOpenFailureCount += 1;
+    const needsAuthentication = shouldRecoverOfficeWebSocket(event, socketOpened, socketFailedBeforeOpen)
+      && (!ambiguousPreOpenFailure || preOpenFailureCount === 1);
     const historyResyncRequired = event?.code === 1013 && event.reason.includes("reload history");
     socket = undefined;
+    socketAuthRevision = undefined;
+    socketOpened = false;
+    socketFailedBeforeOpen = false;
     opening.clear();
     liveToClient.clear();
     if (historyResyncRequired) loadedHistories.clear();
@@ -119,7 +149,29 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       "disconnected",
       stopped ? undefined : historyResyncRequired ? "接続復旧後に履歴を再同期します" : "再接続を待っています",
     );
-    scheduleReconnect();
+    if (stopped) return;
+    if (ambiguousPreOpenFailure && preOpenFailureCount >= MAX_PREOPEN_WEBSOCKET_FAILURES) {
+      callbacks.onSocketState("error", "Chat WebSocketへ接続できませんでした。手動で再接続してください。");
+      return;
+    }
+    if (!needsAuthentication || rejectedRevision === undefined) {
+      scheduleReconnect();
+      return;
+    }
+    if (attemptedRecoveryRevision === rejectedRevision) {
+      callbacks.onSocketState("error", "端末の再認証が必要です。");
+      return;
+    }
+    attemptedRecoveryRevision = rejectedRevision;
+    const recoveryGeneration = lifecycleGeneration;
+    void recoverAuthentication(serverUrl, rejectedRevision).then(
+      () => { if (!stopped && lifecycleGeneration === recoveryGeneration) scheduleReconnect(); },
+      () => {
+        if (stopped || lifecycleGeneration !== recoveryGeneration) return;
+        callbacks.onSocketState("error", "端末の再認証が必要です。");
+        for (const clientSessionId of targets.keys()) callbacks.onSessionError(clientSessionId, "端末の再認証が必要です。");
+      },
+    );
   };
 
   const handleMessage = (data: unknown) => {
@@ -174,23 +226,36 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
 
   const openSocket = async () => {
     if (stopped || socket || socketOpening) return;
+    const attempt = Symbol("chat-socket-open");
     socketOpening = true;
+    socketOpenAttempt = attempt;
     callbacks.onSocketState("connecting");
-    let nextSocket: WebSocket;
+    let lease: OfficeWebSocketLease;
     try {
-      nextSocket = await createWebSocket(chatWebSocketUrl(serverUrl));
+      lease = await openWebSocket(chatWebSocketUrl(serverUrl), serverUrl);
     } catch (error) {
+      if (socketOpenAttempt !== attempt) return;
       socketOpening = false;
+      socketOpenAttempt = undefined;
       callbacks.onSocketState("error", errorText(error));
-      scheduleReconnect();
+      if (!(error instanceof OfficeDeviceAuthRequiredError)) scheduleReconnect();
       return;
     }
+    if (socketOpenAttempt !== attempt) { lease.socket.close(1000, "Superseded connection"); return; }
     socketOpening = false;
+    socketOpenAttempt = undefined;
+    const nextSocket = lease.socket;
     if (stopped || socket) { nextSocket.close(1000, "Client stopped"); return; }
     socket = nextSocket;
+    socketAuthRevision = lease.authRevision;
+    socketOpened = false;
+    socketFailedBeforeOpen = false;
     nextSocket.addEventListener("open", () => {
       if (socket !== nextSocket || stopped) return;
+      socketOpened = true;
+      preOpenFailureCount = 0;
       reconnectAttempt = 0;
+      attemptedRecoveryRevision = undefined;
       callbacks.onSocketState("ready");
       for (const target of targets.values()) {
         void loadHistory(target);
@@ -202,6 +267,8 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (socket === nextSocket) handleClose(event);
     });
     nextSocket.addEventListener("error", () => {
+      if (socket !== nextSocket) return;
+      socketFailedBeforeOpen = !socketOpened;
       callbacks.onSocketState("error", "Chat WebSocketへ接続できませんでした。");
       for (const clientSessionId of targets.keys()) callbacks.onSessionError(clientSessionId, "Chat WebSocketへ接続できませんでした。");
       nextSocket.close();
@@ -387,23 +454,40 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     },
     retry() {
       stopped = false;
+      lifecycleGeneration += 1;
+      socketOpenAttempt = undefined;
+      socketOpening = false;
       if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
+      reconnectAttempt = 0;
+      attemptedRecoveryRevision = undefined;
+      preOpenFailureCount = 0;
       rejectPending("Chat接続を再試行します。");
       opening.clear();
       liveToClient.clear();
-      socket?.close();
+      const closingSocket = socket;
       socket = undefined;
+      socketAuthRevision = undefined;
+      socketOpened = false;
+      socketFailedBeforeOpen = false;
+      closingSocket?.close();
       void openSocket();
     },
     stop() {
       stopped = true;
+      lifecycleGeneration += 1;
+      socketOpenAttempt = undefined;
+      socketOpening = false;
       if (reconnectTimer !== undefined) globalThis.clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
       for (const active of [...targets.values()]) deactivateTarget(active);
       rejectPending("Chat client stopped.");
-      socket?.close(1000, "Client stopped");
+      const closingSocket = socket;
       socket = undefined;
+      socketAuthRevision = undefined;
+      socketOpened = false;
+      socketFailedBeforeOpen = false;
+      closingSocket?.close(1000, "Client stopped");
       callbacks.onSocketState("disconnected");
     }
   };

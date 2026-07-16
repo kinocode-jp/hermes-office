@@ -34,7 +34,7 @@ test("Office history endpoint serves large histories as bounded cursor pages", a
           sessionId: request.sessionId,
           profile: request.profile,
           messages: page,
-          pagination: { limit, offset, returned: page.length },
+          pagination: { limit, offset, returned: page.length, normalizedReturned: page.length, dropped: 0 },
         };
       },
     }),

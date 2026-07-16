@@ -1,8 +1,8 @@
 import { signal } from "@preact/signals";
-import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, Profile } from "./domain";
-import { isOfficeSnapshot, OfficeHttpError, officeFetchJson } from "./office-api";
+import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "./domain";
+import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
-import { applyOfficeSnapshot, profileList, sessions } from "./store";
+import { profileList, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
 type InventoryPage = {
@@ -12,16 +12,29 @@ type InventoryPage = {
   pagination: OfficeInventoryPagination;
 };
 type InventoryLoadState = OfficeInventoryPagination & { loading: boolean; error?: string | undefined };
+type InventoryIdentity = OfficeSnapshotRequestIdentity & { inventoryGeneration: number };
+type SnapshotRefresh = (expected: Pick<OfficeSnapshotRequestIdentity, "serverUrl" | "connectionGeneration">) => Promise<OfficeSnapshotRequestIdentity | undefined>;
 
 const emptyState: InventoryLoadState = { returned: 0, available: 0, total: 0, hasMore: false, truncated: false, partialFailures: 0, loading: false };
 export const profileInventoryState = signal<InventoryLoadState>({ ...emptyState });
 export const sessionInventoryState = signal<InventoryLoadState>({ ...emptyState });
-let inventoryServerUrl = "";
+let nextInventoryGeneration = 0;
+let nextLegacyRequestGeneration = 0;
+let inventoryIdentity: InventoryIdentity | undefined;
+let refreshSnapshot: SnapshotRefresh | undefined;
+subscribeOfficeAuthChanges(invalidateInventoryAuthentication);
 
-export function initializeInventory(snapshot: OfficeSnapshot, serverUrl: string): void {
-  inventoryServerUrl = serverUrl;
+export function initializeInventory(snapshot: OfficeSnapshot, source: string | OfficeSnapshotRequestIdentity): void {
+  const snapshotIdentity = typeof source === "string"
+    ? { serverUrl: source, connectionGeneration: 0, requestGeneration: ++nextLegacyRequestGeneration }
+    : source;
+  inventoryIdentity = { ...snapshotIdentity, inventoryGeneration: ++nextInventoryGeneration };
   profileInventoryState.value = { ...snapshot.inventory.profiles, loading: false };
   sessionInventoryState.value = { ...snapshot.inventory.sessions, loading: false };
+}
+
+export function registerInventorySnapshotRefresh(action: SnapshotRefresh | undefined): void {
+  refreshSnapshot = action;
 }
 
 export async function loadMoreProfiles(): Promise<void> { await loadMore("profiles"); }
@@ -30,28 +43,32 @@ export async function loadMoreSessions(): Promise<void> { await loadMore("sessio
 async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promise<void> {
   const stateSignal = kind === "profiles" ? profileInventoryState : sessionInventoryState;
   const current = stateSignal.value;
-  if (current.loading || !current.hasMore || current.nextCursor === undefined || inventoryServerUrl === "") return;
+  const identity = inventoryIdentity;
+  if (current.loading || !current.hasMore || current.nextCursor === undefined || !identity) return;
+  const cursor = current.nextCursor;
   stateSignal.value = { ...current, loading: true, error: undefined };
   try {
-    const query = new URLSearchParams({ kind, cursor: current.nextCursor, limit: "100" });
-    const page = await officeFetchJson<unknown>(`/api/v1/inventory?${query}`, {}, inventoryServerUrl);
+    const query = new URLSearchParams({ kind, cursor, limit: "100" });
+    const page = await officeFetchJson<unknown>(`/api/v1/inventory?${query}`, {}, identity.serverUrl);
+    if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
     if (!isInventoryPage(page, kind)) throw new Error("Office Serverの一覧ページに互換性がありません。");
     mergeInventoryPage(page);
     stateSignal.value = { ...page.pagination, loading: false };
   } catch (caught) {
+    if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
     let error = caught;
-    if (error instanceof OfficeHttpError && error.status === 409 && !retriedAfterRefresh) {
+    if (error instanceof OfficeHttpError && error.status === 409 && !retriedAfterRefresh && refreshSnapshot) {
       try {
-        const snapshot = await officeFetchJson<unknown>("/api/v1/snapshot", {}, inventoryServerUrl);
-        if (!isOfficeSnapshot(snapshot)) throw new Error("Office Serverの一覧snapshotに互換性がありません。");
-        applyOfficeSnapshot(snapshot, inventoryServerUrl);
-        initializeInventory(snapshot, inventoryServerUrl);
+        const refreshed = await refreshSnapshot({ serverUrl: identity.serverUrl, connectionGeneration: identity.connectionGeneration });
+        if (!refreshed) throw new Error("Office Serverの一覧snapshotを更新できませんでした。");
+        if (!isCurrentSnapshot(refreshed)) return;
         await loadMore(kind, true);
         return;
       } catch (refreshError) {
         error = refreshError;
       }
     }
+    if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
     const message = error instanceof Error ? error.message : "一覧を取得できませんでした。";
     if (caught instanceof OfficeHttpError && caught.status === 409) {
       const { nextCursor: _staleCursor, ...withoutCursor } = current;
@@ -60,6 +77,28 @@ async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promi
       stateSignal.value = { ...current, loading: false, error: message };
     }
   }
+}
+
+function isCurrentLoad(identity: InventoryIdentity, state: InventoryLoadState, cursor: string): boolean {
+  return inventoryIdentity === identity && state.loading && state.nextCursor === cursor;
+}
+
+function isCurrentSnapshot(identity: OfficeSnapshotRequestIdentity): boolean {
+  return inventoryIdentity?.serverUrl === identity.serverUrl
+    && inventoryIdentity.connectionGeneration === identity.connectionGeneration
+    && inventoryIdentity.requestGeneration === identity.requestGeneration;
+}
+
+function invalidateInventoryAuthentication(serverUrl: string): void {
+  if (inventoryIdentity?.serverUrl !== serverUrl) return;
+  inventoryIdentity = undefined;
+  profileInventoryState.value = invalidatedState(profileInventoryState.value);
+  sessionInventoryState.value = invalidatedState(sessionInventoryState.value);
+}
+
+function invalidatedState(state: InventoryLoadState): InventoryLoadState {
+  const { nextCursor: _invalidCursor, ...rest } = state;
+  return { ...rest, hasMore: false, loading: false, error: undefined };
 }
 
 export function mergeInventoryPage(page: InventoryPage): void {

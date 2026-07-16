@@ -7,7 +7,7 @@ import { connectOfficeApi } from "./office-api";
 import { isLocalOfficeClient } from "./auth-state";
 import { notifyAccessAuditChanged, shouldRefreshAccessAudit } from "./audit-api";
 import { initializeI18n } from "./i18n";
-import { initializeInventory } from "./inventory";
+import { initializeInventory, registerInventorySnapshotRefresh } from "./inventory";
 import {
   applyChatGatewayEvent,
   applyChatHistory,
@@ -61,10 +61,10 @@ function startAuthenticatedServices(): void {
 
 const officeApi = connectOfficeApi({
   onConnecting: setOfficeConnecting,
-  onSnapshot(snapshot, serverUrl) {
-    applyOfficeSnapshot(snapshot, serverUrl);
-    initializeInventory(snapshot, serverUrl);
-    setOfficeAuthenticated(serverUrl);
+  onSnapshot(snapshot, identity) {
+    if (!applyOfficeSnapshot(snapshot, identity)) return;
+    initializeInventory(snapshot, identity);
+    setOfficeAuthenticated(identity.serverUrl);
     startAuthenticatedServices();
     if (snapshot.capabilities.runtime.state === "ready") void refreshKanbanBoard();
   },
@@ -80,7 +80,11 @@ const officeApi = connectOfficeApi({
     if (event.topic === "access.changed" && shouldRefreshAccessAudit(event.payload)) notifyAccessAuditChanged();
   }
 });
-registerOfficeRetry(() => officeApi.retry());
+registerOfficeRetry(() => {
+  officeApi.retry();
+  chatApi?.retry();
+});
+registerInventorySnapshotRefresh((expected) => officeApi.refresh(expected));
 
 window.addEventListener("beforeunload", () => {
   chatApi?.stop();

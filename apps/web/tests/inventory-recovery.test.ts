@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { OfficeSnapshot } from "../src/domain.ts";
-import { initializeInventory, loadMoreSessions, sessionInventoryState } from "../src/inventory.ts";
+import type { OfficeSnapshot, OfficeSnapshotRequestIdentity } from "../src/domain.ts";
+import { initializeInventory, loadMoreSessions, registerInventorySnapshotRefresh, sessionInventoryState } from "../src/inventory.ts";
 import { storedSessionClientId } from "../src/session-identity.ts";
-import { profileList, sessions } from "../src/store.ts";
+import { applyOfficeSnapshot, profileList, sessions } from "../src/store.ts";
 
 test("a stale continuation refreshes the snapshot once and resumes pagination", async () => {
   const serverUrl = "http://127.0.0.1:54321";
@@ -11,6 +11,8 @@ test("a stale continuation refreshes the snapshot once and resumes pagination", 
   const originalWindow = globalThis.window;
   const originalLocation = globalThis.location;
   const calls: string[] = [];
+  const staleIdentity: OfficeSnapshotRequestIdentity = { serverUrl, connectionGeneration: 1, requestGeneration: 1 };
+  const freshIdentity: OfficeSnapshotRequestIdentity = { serverUrl, connectionGeneration: 1, requestGeneration: 2 };
   Object.defineProperty(globalThis, "window", { configurable: true, value: globalThis });
   Object.defineProperty(globalThis, "location", { configurable: true, value: { protocol: "http:", hostname: "127.0.0.1" } });
   globalThis.fetch = async (input) => {
@@ -18,21 +20,29 @@ test("a stale continuation refreshes the snapshot once and resumes pagination", 
     calls.push(new URL(url).pathname);
     if (url.endsWith("/api/v1/auth/local")) return json({ csrfToken: "0123456789abcdef" });
     if (url.includes("/api/v1/inventory") && calls.filter((path) => path === "/api/v1/inventory").length === 1) return json({}, 409);
-    if (url.endsWith("/api/v1/snapshot")) return json(snapshot("fresh-cursor"));
     if (url.includes("/api/v1/inventory")) {
       return json({ kind: "sessions", profiles: [], sessions: [{ id: "session-100", profileId: "p1", title: "Recovered", activity: "idle" }], pagination: { returned: 1, available: 101, total: 101, hasMore: false, truncated: false, partialFailures: 0 } });
     }
     return json({}, 404);
   };
   try {
-    initializeInventory(snapshot("stale-cursor"), serverUrl);
+    applyOfficeSnapshot(snapshot("stale-cursor"), staleIdentity);
+    initializeInventory(snapshot("stale-cursor"), staleIdentity);
+    registerInventorySnapshotRefresh(async (expected) => {
+      assert.deepEqual(expected, { serverUrl, connectionGeneration: staleIdentity.connectionGeneration });
+      const fresh = snapshot("fresh-cursor");
+      assert.equal(applyOfficeSnapshot(fresh, freshIdentity), true);
+      initializeInventory(fresh, freshIdentity);
+      return freshIdentity;
+    });
     await loadMoreSessions();
-    assert.deepEqual(calls, ["/api/v1/auth/local", "/api/v1/inventory", "/api/v1/snapshot", "/api/v1/inventory"]);
+    assert.deepEqual(calls, ["/api/v1/auth/local", "/api/v1/inventory", "/api/v1/inventory"]);
     assert.equal(sessionInventoryState.value.hasMore, false);
     assert.equal(sessionInventoryState.value.error, undefined);
     assert.equal(profileList.value[0]?.id, "p1");
     assert.equal(sessions.value.at(-1)?.id, storedSessionClientId("p1", "session-100"));
   } finally {
+    registerInventorySnapshotRefresh(undefined);
     globalThis.fetch = originalFetch;
     Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
     Object.defineProperty(globalThis, "location", { configurable: true, value: originalLocation });

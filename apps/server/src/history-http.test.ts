@@ -84,6 +84,74 @@ test("message, UTF-8 byte, and page limits retain the newest safe suffix", async
   assert.equal(byPage.last.pagination.truncationReason, "page_limit");
 });
 
+test("mixed malformed Hermes rows are omitted but never promoted to a complete transcript", async () => {
+  const chat = malformedHistoryFixture([
+    shortMessage(0),
+    undefined,
+    shortMessage(2),
+    undefined,
+    shortMessage(4),
+  ]);
+  const page = await fetchOfficeHistoryPage(chat, new URL("http://office.local/messages?limit=5"), "stored-1", 1024 * 1024);
+  assert.deepEqual(page.messages.map(({ index }) => index), [0, 2, 4]);
+  assert.deepEqual(page.pagination.source, { returned: 5, normalizedReturned: 3, dropped: 2 });
+  assert.equal(page.pagination.hasMore, false);
+  assert.equal(page.pagination.nextCursor, undefined);
+  assert.equal(page.pagination.truncated, true);
+  assert.equal(page.pagination.partial, true);
+  assert.equal(page.pagination.truncationReason, "upstream_invalid_rows");
+  assert.equal(JSON.stringify(page).includes("raw payload"), false);
+});
+
+test("an all-invalid page returns an empty explicit partial result instead of a complete transcript", async () => {
+  const page = await fetchOfficeHistoryPage(
+    malformedHistoryFixture([undefined, undefined]),
+    new URL("http://office.local/messages?limit=2"),
+    "stored-1",
+    1024 * 1024,
+  );
+  assert.deepEqual(page.messages, []);
+  assert.deepEqual(page.pagination.source, { returned: 2, normalizedReturned: 0, dropped: 2 });
+  assert.deepEqual(
+    { truncated: page.pagination.truncated, partial: page.pagination.partial, reason: page.pagination.truncationReason },
+    { truncated: true, partial: true, reason: "upstream_invalid_rows" },
+  );
+});
+
+test("a malformed row on a later page retains the newest fetched suffix and stops safely", async () => {
+  const source = [shortMessage(0), undefined, shortMessage(2), shortMessage(3), shortMessage(4), shortMessage(5)];
+  const chat = malformedHistoryFixture(source);
+  const first = await fetchOfficeHistoryPage(chat, new URL("http://office.local/messages?limit=2"), "stored-1", 1024 * 1024);
+  assert.deepEqual(first.messages.map(({ index }) => index), [4, 5]);
+  assert.equal(first.pagination.hasMore, true);
+  const second = await fetchOfficeHistoryPage(chat, historyUrl(first, 2), "stored-1", 1024 * 1024);
+  assert.deepEqual(second.messages.map(({ index }) => index), [2, 3]);
+  assert.equal(second.pagination.truncationReason, undefined);
+  const third = await fetchOfficeHistoryPage(chat, historyUrl(second, 2), "stored-1", 1024 * 1024);
+  assert.deepEqual(third.messages.map(({ index }) => index), [0]);
+  assert.deepEqual({ hasMore: third.pagination.hasMore, partial: third.pagination.partial, reason: third.pagination.truncationReason }, {
+    hasMore: false, partial: true, reason: "upstream_invalid_rows",
+  });
+});
+
+test("malformed rows outside the latest 500 window do not taint it and a later clean reload recovers", async () => {
+  const outside = malformedHistoryFixture([undefined, ...Array.from({ length: 500 }, (_, index) => shortMessage(index + 1))]);
+  const bounded = await collectHistory(outside, 25);
+  assert.equal(bounded.messages.length, 500);
+  assert.equal(bounded.last.pagination.truncationReason, "message_limit");
+  assert.deepEqual(bounded.last.pagination.source, { returned: 25, normalizedReturned: 25, dropped: 0 });
+
+  let malformed = true;
+  const recovering = malformedHistoryFixture([shortMessage(0), undefined], () => malformed);
+  const first = await fetchOfficeHistoryPage(recovering, new URL("http://office.local/messages?limit=2"), "stored-1", 1024 * 1024);
+  assert.equal(first.pagination.truncationReason, "upstream_invalid_rows");
+  malformed = false;
+  const second = await fetchOfficeHistoryPage(recovering, new URL("http://office.local/messages?limit=2"), "stored-1", 1024 * 1024);
+  assert.equal(second.pagination.truncated, false);
+  assert.equal(second.pagination.partial, false);
+  assert.deepEqual(second.messages.map(({ index }) => index), [0, 1]);
+});
+
 function historyFixture(source: HermesHistoryMessageDto[], requests: Array<{ limit?: number; offset?: number }> = []): HermesChatTransport {
   return {
     connect: async () => { throw new Error("unused"); },
@@ -93,7 +161,33 @@ function historyFixture(source: HermesHistoryMessageDto[], requests: Array<{ lim
       const limit = request.limit ?? 25;
       const offset = request.offset ?? 0;
       const messages = source.slice(offset, offset + limit);
-      return { sessionId: request.sessionId, profile: request.profile, messages, pagination: { limit, offset, returned: messages.length } };
+      return { sessionId: request.sessionId, profile: request.profile, messages, pagination: { limit, offset, returned: messages.length, normalizedReturned: messages.length, dropped: 0 } };
+    },
+  };
+}
+
+function malformedHistoryFixture(
+  source: Array<HermesHistoryMessageDto | undefined>,
+  isMalformed: () => boolean = () => true,
+): HermesChatTransport {
+  return {
+    connect: async () => { throw new Error("unused"); },
+    inspectHistory: async ({ sessionId }) => ({ sessionId, total: source.length }),
+    fetchHistory: async (request) => {
+      const limit = request.limit ?? 25;
+      const offset = request.offset ?? 0;
+      const wire = source.slice(offset, offset + limit);
+      const messages = wire.flatMap((message, index) => {
+        if (message !== undefined) return [message];
+        return isMalformed() ? [] : [shortMessage(offset + index)];
+      });
+      const dropped = isMalformed() ? wire.filter((message) => message === undefined).length : 0;
+      return {
+        sessionId: request.sessionId,
+        profile: request.profile,
+        messages,
+        pagination: { limit, offset, returned: wire.length, normalizedReturned: messages.length, dropped },
+      };
     },
   };
 }

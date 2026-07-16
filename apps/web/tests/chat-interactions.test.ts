@@ -25,6 +25,23 @@ test("resumed history keeps its ordered latest window before newer live messages
   assert.equal(sessions.value[0]?.historyPartial, true);
 });
 
+test("malformed saved history exposes its safe notice in chat state", () => {
+  sessions.value = [{ ...session }];
+  applyChatHistory(session.id, [
+    { id: "saved-safe", from: "agent", body: "safe row", at: "12:01", status: "complete" },
+  ], "resolved-session", {
+    truncated: true,
+    partial: true,
+    loadedPages: 1,
+    loadedMessages: 1,
+    loadedBytes: 100,
+    reason: "upstream_invalid_rows",
+    error: "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。",
+  });
+  assert.equal(sessions.value[0]?.historyPartial, true);
+  assert.equal(sessions.value[0]?.historyNotice, "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。");
+});
+
 test("clarification requests become durable waiting interactions", () => {
   const next = reduceChatGatewayEvent(session, {
     type: "clarify.request",

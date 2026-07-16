@@ -23,15 +23,17 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
       writeJson(response, { id: "resolved-42", message_count: 501, system_prompt: "must never escape" });
       return;
     }
+    const historyRows = [
+      { role: "system", content: "internal system prompt", timestamp: 1_700_000_000 },
+      { role: "user", content: "Use token=supersecretvalue in this turn", timestamp: 1_700_000_001 },
+      { role: "assistant", content: [{ type: "text", text: "Working" }, { type: "image", data: "hidden" }] },
+      { role: "tool", content: "PRIVATE OUTPUT", tool_name: "terminal" },
+      { role: "invalid", content: "drop" },
+    ];
+    const requestedLimit = Number(new URL(observedUrl, "http://127.0.0.1").searchParams.get("limit") ?? historyRows.length);
     writeJson(response, {
       session_id: "resolved-42",
-      messages: [
-        { role: "system", content: "internal system prompt", timestamp: 1_700_000_000 },
-        { role: "user", content: "Use token=supersecretvalue in this turn", timestamp: 1_700_000_001 },
-        { role: "assistant", content: [{ type: "text", text: "Working" }, { type: "image", data: "hidden" }] },
-        { role: "tool", content: "PRIVATE OUTPUT", tool_name: "terminal" },
-        { role: "invalid", content: "drop" },
-      ],
+      messages: historyRows.slice(0, requestedLimit),
       system_prompt: "must never escape",
       model_config: { api_key: "must never escape" },
     });
@@ -53,7 +55,7 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
   assert.ok(observedUrls.some((url) => /^\/api\/sessions\/session-42\/messages\?/.test(url) && url.includes("limit=1") && url.includes("offset=0")));
   assert.ok(observedUrls.some((url) => /^\/api\/sessions\/resolved-42\?/.test(url) && url.includes("profile=coder")));
   assert.ok(observedUrls.some((url) => /^\/api\/sessions\/session-42\/messages\?/.test(url) && url.includes("limit=4") && url.includes("offset=2")));
-  assert.deepEqual(history.pagination, { limit: 4, offset: 2, returned: 4 });
+  assert.deepEqual(history.pagination, { limit: 4, offset: 2, returned: 4, normalizedReturned: 4, dropped: 0 });
   assert.equal(history.sessionId, "resolved-42");
   assert.deepEqual(history.messages.map((message) => message.role), ["system", "user", "assistant", "tool"]);
   assert.equal(history.messages[0]?.text, "[System message hidden]");
@@ -63,6 +65,36 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
   assert.equal(history.messages[3]?.toolName, "terminal");
   assert.equal(JSON.stringify(history).includes("must never escape"), false);
   assert.equal(JSON.stringify(history).includes("PRIVATE OUTPUT"), false);
+});
+
+test("fetchHistory counts and safely drops individual malformed wire rows", async (t) => {
+  const server = createServer((_request, response) => writeJson(response, {
+    session_id: "resolved-safe",
+    messages: [
+      { role: "user", content: "kept" },
+      { role: "future-role", content: "raw payload secret=never-return-this" },
+      null,
+      { role: "assistant", content: "also kept", timestamp: 1_700_000_001 },
+      { role: "user", content: "bad timestamp secret=never-return-this", timestamp: "tomorrow" },
+    ],
+    api_key: "never-return-this",
+  }));
+  const origin = await listen(server);
+  t.after(() => server.close());
+
+  const history = await createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN }).fetchHistory({
+    sessionId: "stored-safe",
+    profile: "coder",
+    limit: 5,
+    offset: 0,
+  });
+  assert.deepEqual(history.messages.map(({ index, text }) => ({ index, text })), [
+    { index: 0, text: "kept" },
+    { index: 3, text: "also kept" },
+  ]);
+  assert.deepEqual(history.pagination, { limit: 5, offset: 0, returned: 5, normalizedReturned: 2, dropped: 3 });
+  assert.equal(JSON.stringify(history).includes("never-return-this"), false);
+  assert.equal(JSON.stringify(history).includes("raw payload"), false);
 });
 
 test("chat connection sends only validated allowlisted RPC and normalizes results/events", async (t) => {

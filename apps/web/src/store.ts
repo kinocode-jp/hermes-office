@@ -2,7 +2,7 @@ import { computed, signal } from "@preact/signals";
 import { officeInventoryReliability } from "@hermes-office/protocol";
 import { initialSessions, profiles } from "./demo-data";
 import type { ChatGatewayEvent, ChatHistoryResult, ChatTarget } from "./chat-api";
-import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
+import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
@@ -63,6 +63,7 @@ let kanbanMutations = 0;
 let kanbanRefresh: Promise<void> | undefined;
 let kanbanRefreshQueued = false;
 let runtimeDataSource: "none" | "demo" | "live" = "none";
+let latestOfficeSnapshotIdentity: OfficeSnapshotRequestIdentity | undefined;
 
 export function registerKanbanRuntime(api: KanbanApi): void {
   kanbanApi = api;
@@ -176,7 +177,14 @@ export function setOfficeConnecting(serverUrl: string): void {
   };
 }
 
-export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string): void {
+export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | OfficeSnapshotRequestIdentity): boolean {
+  const serverUrl = typeof source === "string" ? source : source.serverUrl;
+  if (typeof source !== "string") {
+    const latest = latestOfficeSnapshotIdentity;
+    if (latest && (source.connectionGeneration < latest.connectionGeneration
+      || (source.connectionGeneration === latest.connectionGeneration && source.requestGeneration <= latest.requestGeneration))) return false;
+    latestOfficeSnapshotIdentity = source;
+  }
   const explicitDemo = snapshot.capabilities.features.includes("demo");
   const profileInventoryUnavailable = !explicitDemo
     && snapshot.capabilities.runtime.state === "ready"
@@ -198,17 +206,17 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
 
   if (explicitDemo) {
     loadExplicitDemoState();
-    return;
+    return true;
   }
   if (snapshot.capabilities.runtime.state !== "ready") {
     clearRuntimeState();
-    return;
+    return true;
   }
   if (profileInventoryUnavailable) {
     if (runtimeDataSource !== "live") clearRuntimeState();
-    return;
+    return true;
   }
-  if (snapshot.profiles.length === 0) { clearRuntimeState(); return; }
+  if (snapshot.profiles.length === 0) { clearRuntimeState(); return true; }
   if (runtimeDataSource === "demo") clearRuntimeState();
 
   const previousProfiles = new Map(profileList.value.map((profile) => [profile.id, profile]));
@@ -268,6 +276,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
   }
   runtimeDataSource = "live";
   for (const target of getOpenChatTargets()) if (!previousTargetIds.has(target.clientSessionId)) ensureChatSession(target);
+  return true;
 }
 
 export function setOfficeEventStream(eventStream: OfficeConnection["eventStream"]): void {
