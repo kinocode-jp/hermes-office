@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { createOfficeServer } from "./server.js";
@@ -15,9 +18,21 @@ async function deviceLogin(
 ): Promise<Response> {
   return await fetch(`${base}/api/v1/auth/device`, {
     method: "POST",
-    headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json" },
+    headers: {
+      Origin: REMOTE_ORIGIN,
+      "Content-Type": "application/json",
+      "X-Forwarded-Proto": "https",
+      "X-Forwarded-For": "100.64.0.10",
+    },
     body: JSON.stringify({ token, deviceName }),
   });
+}
+
+function responseCookies(response: Response): string {
+  const raw = response.headers.get("set-cookie") ?? "";
+  return [...raw.matchAll(/(?:^|,\s*)(hermes_office_(?:device|session))=([^;,\s]+)/g)]
+    .map((match) => `${match[1]}=${match[2]}`)
+    .join("; ");
 }
 
 test("remote origins cannot claim local bootstrap even through a loopback proxy", async () => {
@@ -54,15 +69,23 @@ test("remote origins cannot claim local bootstrap even through a loopback proxy"
   }
 });
 
-test("configured remote token issues a remote owner session without exposing the credential", async () => {
+test("one-time enrollment creates a revocable remote operator device without exposing credentials", async () => {
   const server = createOfficeServer({
     port: 0,
     allowedOrigins: [LOCAL_ORIGIN, REMOTE_ORIGIN],
     remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
   });
   const address = await server.listen();
   const base = `http://127.0.0.1:${address.port}`;
   try {
+    const insecure = await fetch(`${base}/api/v1/auth/device`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: REMOTE_TOKEN, deviceName: "Plaintext phone" }),
+    });
+    assert.equal(insecure.status, 403);
+
     const login = await deviceLogin(base, REMOTE_TOKEN);
     assert.equal(login.status, 200);
     const loginText = await login.text();
@@ -75,22 +98,20 @@ test("configured remote token issues a remote owner session without exposing the
       id: session.principal.id,
       local: false,
       deviceName: "Travel phone",
-      tier: "owner",
+      tier: "operator",
     });
-    const cookie = login.headers.get("set-cookie") ?? "";
-    assert.match(cookie, /HttpOnly/);
+    const setCookie = login.headers.get("set-cookie") ?? "";
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /Secure/i);
+    assert.match(setCookie, /SameSite=Strict/i);
+    const cookie = responseCookies(login);
+    assert.match(cookie, /hermes_office_session=/);
+    assert.match(cookie, /hermes_office_device=/);
 
     const audit = await fetch(`${base}/api/v1/audit`, {
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie },
     });
-    assert.equal(audit.status, 200);
-    const auditText = await audit.text();
-    assert.equal(auditText.includes(REMOTE_TOKEN), false);
-    assert.equal(/password|api[_-]?key|access[_-]?token|refresh[_-]?token/i.test(auditText), false);
-    const records = (JSON.parse(auditText) as { records: Array<{ operation: string; outcome: string }> }).records;
-    assert.equal(records.some((record) => record.operation === "auth.device" && record.outcome === "allowed"), true);
-    assert.equal(records.some((record) => record.operation === "audit.read"), true);
-    assert.deepEqual(Object.keys(records[0] ?? {}).sort(), ["deviceName", "local", "occurredAt", "operation", "outcome"]);
+    assert.equal(audit.status, 403);
 
     assert.equal((await fetch(`${base}/api/v1/auth/logout`, {
       method: "POST",
@@ -125,13 +146,14 @@ test("configured remote token issues a remote owner session without exposing the
       headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-CSRF-Token": session.csrfToken },
     })).status, 401);
 
+    const renewal = await fetch(`${base}/api/v1/auth/device/renew`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, Cookie: cookie, "X-Forwarded-Proto": "https" },
+    });
+    assert.equal(renewal.status, 200);
+
     const nextLogin = await deviceLogin(base, REMOTE_TOKEN, "Owner phone");
-    const nextCookie = nextLogin.headers.get("set-cookie") ?? "";
-    const nextAudit = await fetch(`${base}/api/v1/audit`, { headers: { Origin: REMOTE_ORIGIN, Cookie: nextCookie } });
-    const nextAuditText = await nextAudit.text();
-    assert.equal(nextAuditText.includes(REMOTE_TOKEN), false);
-    const nextRecords = (JSON.parse(nextAuditText) as { records: Array<{ operation: string; outcome: string }> }).records;
-    assert.equal(nextRecords.some((record) => record.operation === "auth.logout" && record.outcome === "allowed"), true);
+    assert.equal(nextLogin.status, 409);
   } finally {
     await server.close();
   }
@@ -151,6 +173,7 @@ test("device authentication is disabled by default, bounded, strict, and rate li
     port: 0,
     allowedOrigins: [REMOTE_ORIGIN],
     remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
     maxJsonBytes: 4 * 1024,
   });
   const address = await server.listen();
@@ -158,14 +181,14 @@ test("device authentication is disabled by default, bounded, strict, and rate li
   try {
     const unknownField = await fetch(`${base}/api/v1/auth/device`, {
       method: "POST",
-      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json" },
+      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json", "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },
       body: JSON.stringify({ token: REMOTE_TOKEN, deviceName: "Phone", extra: true }),
     });
     assert.equal(unknownField.status, 400);
 
     const oversized = await fetch(`${base}/api/v1/auth/device`, {
       method: "POST",
-      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json" },
+      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json", "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },
       body: JSON.stringify({ token: "x".repeat(5_000), deviceName: "Phone" }),
     });
     assert.equal(oversized.status, 413);
@@ -180,5 +203,30 @@ test("device authentication is disabled by default, bounded, strict, and rate li
     assert.equal(limited.headers.get("retry-after"), "60");
   } finally {
     await server.close();
+  }
+});
+
+test("consumed enrollment survives a server restart", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const deviceRegistryPath = join(directory, "devices.json");
+  const options = {
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath,
+  } as const;
+  const first = createOfficeServer(options);
+  const firstAddress = await first.listen();
+  assert.equal((await deviceLogin(`http://127.0.0.1:${firstAddress.port}`, REMOTE_TOKEN)).status, 200);
+  await first.close();
+
+  const second = createOfficeServer(options);
+  const secondAddress = await second.listen();
+  try {
+    assert.equal((await deviceLogin(`http://127.0.0.1:${secondAddress.port}`, REMOTE_TOKEN, "Second phone")).status, 409);
+  } finally {
+    await second.close();
   }
 });

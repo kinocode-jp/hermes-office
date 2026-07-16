@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible non-security problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not report vulnerabilities or include credentials, prompts, Hermes
+        home data, or personal paths here. Use the Security tab for a private
+        vulnerability report.
+  - type: input
+    id: version
+    attributes:
+      label: Hermes Office revision
+      description: Commit SHA or branch name
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, Hermes Agent version, and browser/desktop
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Minimal steps using non-sensitive sample data
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private prompts, profile data, and personal paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { HermesProfileBackendAccess } from "./hermes-settings.js";
+import { createHermesChildEnvironment } from "./hermes-child-environment.js";
 
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 type ManagedChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -70,12 +71,7 @@ export class HermesProfileBackendPool {
       ["--profile", profile, "serve", "--host", "127.0.0.1", "--port", "0"],
       {
         cwd: this.#options.cwd,
-        env: {
-          ...process.env,
-          HERMES_DASHBOARD_SESSION_TOKEN: sessionToken,
-          HERMES_DESKTOP: "1",
-          TERMINAL_CWD: this.#options.cwd,
-        },
+        env: createHermesChildEnvironment({ sessionToken, cwd: this.#options.cwd }),
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,

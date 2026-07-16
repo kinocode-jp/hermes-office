@@ -13,9 +13,11 @@ import type {
 } from "@hermes-office/protocol";
 import { OFFICE_PROTOCOL_VERSION } from "./demo-state.js";
 import { createHermesChatTransport, type HermesChatTransport } from "./hermes-chat.js";
+import { createHermesChildEnvironment } from "./hermes-child-environment.js";
 import { createHermesKanbanHttpRequester, HermesKanbanAdapter } from "./hermes-kanban.js";
 import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import { HermesProfileBackendPool } from "./hermes-profile-pool.js";
+import { isSupportedHermesVersion, probeHermesCli } from "./hermes-runtime.js";
 import {
   createHermesSettingsAdapter,
   OfficeGlobalSettingsStore,
@@ -132,11 +134,19 @@ export class HermesBackend implements HermesRuntimeSource {
           this.#baseUrl = safeLoopbackOrigin(this.#options.baseUrl);
           this.#token = requiredToken(this.#options.sessionToken);
         } else {
+          const executable = this.#options.executable?.trim() || "hermes";
+          const cli = await probeHermesCli(executable, 5_000);
+          if (cli.state !== "available" || cli.version === undefined) {
+            throw new IncompatibleHermesError("Hermes CLI is unavailable or unsupported.");
+          }
           await this.#spawnManaged();
         }
         const raw = await this.#requestJson("/api/status", false);
         const version = readString(raw, "version");
         if (version === undefined) throw new IncompatibleHermesError("Hermes status contract is unavailable.");
+        if (!isSupportedHermesVersion(version)) {
+          throw new IncompatibleHermesError("Hermes API version is unsupported.");
+        }
         this.#state = {
           ...this.#state,
           state: "ready",
@@ -195,12 +205,7 @@ export class HermesBackend implements HermesRuntimeSource {
     const token = randomBytes(32).toString("base64url");
     const child = spawn(executable, ["serve", "--host", "127.0.0.1", "--port", "0"], {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        HERMES_DASHBOARD_SESSION_TOKEN: token,
-        HERMES_DESKTOP: "1",
-        TERMINAL_CWD: process.cwd(),
-      },
+      env: createHermesChildEnvironment({ sessionToken: token, cwd: process.cwd() }),
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

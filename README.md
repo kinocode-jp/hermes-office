@@ -1,143 +1,180 @@
 # Hermes Office
 
-Hermes Office is a standalone visual control plane for Hermes Agent. Each real
-Hermes Profile appears as a character with its own sessions, skills, memory
-provider, identity, and work queue. It is a separate application from Pilon.
+Hermes Office is an experimental, standalone visual interface for
+[Hermes Agent](https://github.com/NousResearch/hermes-agent). A Hermes Profile
+appears as an office character whose chats, settings, and assigned Kanban work
+can be opened from one responsive interface.
 
-## Product shape
+> [!IMPORTANT]
+> Hermes Office is an independent community project. It is not an official
+> Nous Research product, is not affiliated with or endorsed by Nous Research,
+> and does not replace the official Hermes Agent interface.
 
-- A Preact/Vite interface shared by desktop and the installable web app.
-- A Tauri 2 shell that supervises the bundled Office Server.
-- A narrow, secret-safe adapter over the official `hermes serve` API.
-- A responsive PWA for remote chat, approvals, and Kanban work.
-- The responsive Web/PWA is the phone client; Expo is not required for this version.
+The project is pre-1.0 and currently intended for source builds by a single
+trusted operator. Do not expose it directly to the public internet. See
+[Security status](#security-status) before enabling remote access.
 
-## Repository
+## What is implemented
+
+- Discovery of installed Hermes Profiles and stored sessions.
+- An animated pixel-office Profile roster. Six base characters include
+  front/side/back walking frames; profiles seven and later reuse the roster
+  with deterministic hue variants.
+- Per-Profile custom portrait uploads stored in the browser.
+- Up to four simultaneous chat panes with resume, streaming, steering,
+  interruption, reconnect, and normalized tool events.
+- Hermes Kanban viewing and mutations, Profile assignment, comments, live
+  refresh, and task cables on the office floor.
+- Profile-scoped installed Skills, SOUL, and Memory-provider settings through
+  Profile-pinned Hermes backends.
+- An Office-owned global selected-skill/shared-context layer with explicit
+  inheritance synchronization.
+- English/Japanese UI, adjustable text size, light/dark themes, responsive
+  phone navigation, and an installable PWA shell.
+- Loopback browser sessions, Tauri launch capabilities, origin/Host checks,
+  CSRF checks for cookie-authenticated writes, bounded request bodies, and an
+  experimental one-time remote-device enrollment/revocation flow.
+
+Deliberate exclusions include raw Memory-file editing, destructive Memory
+reset, provider-secret entry, Skill installation/deletion, arbitrary Hermes
+RPC, and public multi-user administration.
+
+## Repository layout
 
 ```text
-apps/web                 Shared responsive interface and PWA
-apps/desktop             Tauri desktop shell
-apps/server              Bounded local HTTP/WebSocket control-plane server
-packages/hermes-client   Official Hermes transport adapter
-packages/protocol        Public DTO and authorization contract
-packages/ui-tokens       Visual system
-docs                     Product, architecture, security, and integration notes
+apps/web                 Shared responsive Preact/Vite interface and PWA
+apps/desktop             Tauri 2 desktop shell
+apps/server              Local HTTP/WebSocket control-plane server
+packages/hermes-client   Hermes transport boundary
+packages/protocol        Shared DTO contract
+packages/ui-tokens       Visual tokens
+docs                     Design and integration documentation
 ```
+
+## Requirements
+
+- Node.js/npm versions from `.node-version` and `package.json`
+- Hermes Agent 0.18.2-compatible `hermes serve` installation
+- Rust toolchain from `rust-toolchain.toml` and the Tauri host prerequisites
+  when developing the desktop shell
 
 ## Development
 
+Install exactly from the committed lockfile:
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-This starts the Web/PWA interface on `4173`, the Office Server on `4317`, and a
-managed stock `hermes serve` backend on an OS-assigned loopback port. The
-Hermes session token remains inside the Office Server process.
+This starts the PWA on port `4173` and Office Server on port `4317`. By default,
+Office Server starts a managed stock `hermes serve` process on an OS-selected
+loopback port. The Hermes backend credential stays in Office Server.
 
-To run each surface separately:
+Run surfaces individually with:
 
 ```bash
 npm run dev:server
 npm run dev:web
-```
-
-Desktop development requires the Tauri prerequisites for the host OS:
-
-```bash
 npm run dev:desktop
 ```
-
-Implemented runtime features include:
-
-- real Profile and stored Session discovery;
-- a generated 12-cell character roster with deterministic Profile mapping and
-  a fallback portrait for newly added Profiles;
-- up to four simultaneous chat panes, stored history, streaming prompts, steering,
-  interruption, reconnect, and tool-event display;
-- the real Hermes Kanban board with card creation, status changes, Profile
-  assignment, comments, live refresh, and Office-floor task cables;
-- Profile-scoped Skills, SOUL, and Memory provider settings through a pool of
-  Profile-pinned Hermes backends;
-- revisioned Office Global Skills and shared context;
-- local and remote device sessions, CSRF protection, rate limiting, and a bounded
-  audit feed;
-- responsive phone navigation and an installable offline application shell.
-
-Raw Memory files, destructive Memory reset, provider secrets, Skill installation,
-and arbitrary Hermes RPC are deliberately not exposed by the remote-safe GUI.
 
 Runtime modes:
 
 ```bash
-# Default: Office starts and owns a loopback Hermes backend
+# Default: start and supervise a loopback Hermes backend
 HERMES_OFFICE_HERMES_MODE=managed npm run dev
 
-# UI/server demo without touching Hermes
+# UI/server demonstration without reading or starting Hermes
 HERMES_OFFICE_HERMES_MODE=demo npm run dev
 
-# Adopt an explicitly managed loopback backend
+# Connect to an explicitly managed loopback-only Hermes backend
 HERMES_OFFICE_HERMES_MODE=existing \
 HERMES_OFFICE_HERMES_URL=http://127.0.0.1:12345 \
-HERMES_OFFICE_HERMES_TOKEN=... npm run dev
+HERMES_OFFICE_HERMES_TOKEN=replace-me npm run dev
 ```
 
-## Production Web/PWA
+Do not commit environment files, tokens, Hermes home data, or generated build
+output.
+
+## Local production build
+
+Build and serve the web/server surface locally:
 
 ```bash
 npm run build:production
 npm start
 ```
 
-This serves the built PWA and API together from `http://127.0.0.1:4317`. The
-default listener is loopback-only. Static files have traversal/symlink protection,
-strict CSP, immutable hashed assets, and a non-cached app shell.
-
-For access away from home, keep Office bound to loopback and put an authenticated
-HTTPS private-network proxy such as Tailscale Serve in front of it. Configure a
-unique HTTPS origin and a random token of at least 32 characters:
-
-```bash
-HERMES_OFFICE_REMOTE_TOKEN='replace-with-a-random-32+-character-token' \
-HERMES_OFFICE_ALLOWED_ORIGINS='https://your-device.your-tailnet.ts.net' \
-npm start
-```
-
-Open the HTTPS URL on the phone and use the Remote Airlock screen once per browser
-session. The access token is submitted directly to the device-auth endpoint and is
-not stored in URL state, browser storage, logs, audit records, or application state.
-The resulting credential is an HttpOnly, SameSite cookie; writes also require the
-in-memory CSRF token. Direct non-loopback binding additionally requires
-`HERMES_OFFICE_ALLOW_NON_LOOPBACK=true`, but an HTTPS loopback proxy is preferred.
-
-## Desktop release
+The default listener is `127.0.0.1:4317`. Build desktop assets and the local
+Tauri application with:
 
 ```bash
 npm run build --workspace @hermes-office/desktop
 ```
 
-The macOS build produces the Hermes Office application and DMG. In release mode the
-Tauri shell starts the bundled Office Server module automatically, using the Node
-runtime installed with Hermes Agent when available, and terminates it when the app
-exits. Release builds generate an in-memory desktop capability on every launch.
-Development mode uses an explicitly local-only fixed capability shared by the Tauri
-IPC command and `beforeDevCommand`; normal browser development continues to use the
-loopback cookie session.
+This is a developer build, not an official signed release. No project binary is
+currently published. The release requirements are tracked in
+[`docs/RELEASING.md`](docs/RELEASING.md).
 
-## Security boundary
+## Security status
 
-- Hermes and Office tokens never cross into browser DTOs.
-- The Tauri shell mints a random launch-scoped desktop capability and passes it
-  to its WebView only through in-memory Tauri IPC. The Server accepts it only
-  from an exact Tauri origin over loopback; it is never written to storage.
-- Local bootstrap requires a loopback socket plus an exact local/Tauri Origin and
-  Host, and rejects forwarded requests.
-- Remote authentication is disabled unless a valid token is configured, compares
-  only digests in constant time, and limits attempts per peer.
-- Every JSON body, WebSocket frame, response, identifier, and allowed method is
-  bounded and validated.
-- The Office Server binds to loopback unless both remote-token configuration and
-  explicit non-loopback consent are present.
+The supported trust model is one trusted operator on one machine. The safest
+deployment keeps both Office and Hermes on loopback.
 
-The exact Profile settings contract and deliberate exclusions are documented in
-[`docs/HERMES-SETTINGS.md`](docs/HERMES-SETTINGS.md).
+Remote-device access exists for the same operator, but remains experimental. If
+you use it, keep Office bound to loopback and place an authenticated HTTPS
+private-network proxy such as Tailscale Serve in front of it. Configure one
+unique random, one-time enrollment token of at least 32 characters, one exact
+HTTPS origin, and the exact number of trusted loopback proxy hops:
+
+```bash
+HERMES_OFFICE_REMOTE_TOKEN='replace-with-a-random-32+-character-token' \
+HERMES_OFFICE_ALLOWED_ORIGINS='https://your-device.your-tailnet.ts.net' \
+HERMES_OFFICE_TRUSTED_PROXY_HOPS=1 \
+npm start
+```
+
+The first remote browser exchanges the enrollment token over the configured
+HTTPS proxy for a device credential and HttpOnly session cookie. The enrollment
+token cannot enroll a second device during that server process. Later login uses
+the device cookie; cookie-based writes also require a CSRF token. A remote
+device receives the `operator` tier, so it can chat and update Kanban but cannot
+change Profile/global settings or invoke local-only operations. A verified
+local owner can list/revoke enrolled devices, which also closes their active
+sockets.
+
+Device records, enrollment-consumed state, sessions, and the audit buffer are
+currently in memory. A server restart therefore invalidates device credentials
+and allows the configured enrollment token to be used for a fresh enrollment.
+This is not OIDC, durable device administration, tenant isolation, or a claim
+that an untrusted remote user can safely share the host. Direct public-internet
+exposure is unsupported. Direct non-loopback binding requires an additional
+explicit setting, but is not the recommended deployment.
+
+Read [`docs/SECURITY.md`](docs/SECURITY.md) for implemented controls, known
+limitations, and roadmap boundaries. Report suspected vulnerabilities through
+[`SECURITY.md`](SECURITY.md), not a public issue.
+
+## Documentation
+
+- [`docs/HERMES-INTEGRATION.md`](docs/HERMES-INTEGRATION.md) — pinned upstream
+  API research and the adapter boundary
+- [`docs/HERMES-SETTINGS.md`](docs/HERMES-SETTINGS.md) — current settings
+  adapter contract and exclusions
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current architecture and
+  explicitly separated roadmap
+- [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) — toolchain pins, update policy,
+  and known dependency limitations
+- [`docs/DESIGN.md`](docs/DESIGN.md) — product/design direction, not an
+  implementation guarantee
+- [`ASSETS.md`](ASSETS.md) — original asset provenance and license
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — dependency notice and
+  binary distribution policy
+
+## License
+
+Hermes Office source and original project assets are available under the
+[MIT License](LICENSE). Third-party dependencies and Hermes Agent remain under
+their respective licenses. See [ASSETS.md](ASSETS.md) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

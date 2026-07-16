@@ -1,5 +1,10 @@
 # Hermes Office — product and interface direction
 
+> **Document status:** This is a product and design direction document. It
+> intentionally includes proposed interactions and performance targets that may
+> not be implemented. The current feature inventory is in the root README;
+> security behavior is documented separately in `docs/SECURITY.md`.
+
 ## The subject
 
 Hermes Office is a lightweight control room for people who run several Hermes Agent profiles at once. Its single job is to make agents feel spatial and legible without hiding the serious controls needed to supervise their work.

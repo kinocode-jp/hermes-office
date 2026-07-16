@@ -2,6 +2,16 @@
   "name": "hermes-office",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinocode-jp/hermes-office.git"
+  },
+  "homepage": "https://github.com/kinocode-jp/hermes-office#readme",
+  "bugs": {
+    "url": "https://github.com/kinocode-jp/hermes-office/issues"
+  },
+  "packageManager": "npm@10.9.8",
   "type": "module",
   "workspaces": [
     "apps/*",
@@ -26,6 +36,7 @@
     "esbuild": "^0.25.10"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22 <23",
+    "npm": ">=10 <11"
   }
 }

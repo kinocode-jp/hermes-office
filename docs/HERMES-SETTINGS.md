@@ -1,5 +1,9 @@
 # Hermes settings adapter contract
 
+> **Document status:** This describes the currently implemented settings
+> adapter and its deliberate exclusions. Broader device tiers, step-up flows,
+> secret entry, and Skill installation are not claimed by this document.
+
 Validated against the locally installed Hermes Agent 0.18.2 source on
 2026-07-16. `apps/server/src/hermes-settings.ts` is the Office-facing boundary.
 

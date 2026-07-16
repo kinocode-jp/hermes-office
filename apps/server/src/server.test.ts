@@ -3,18 +3,19 @@ import test from "node:test";
 import { WebSocket } from "ws";
 import { createOfficeServer, isLoopbackHost, makeOriginAllowlist } from "./server.js";
 
-test("non-loopback listeners require an explicit opt-in", () => {
-  assert.throws(() => createOfficeServer({ host: "0.0.0.0" }), /Refusing non-loopback bind/);
+test("direct non-loopback listeners are always refused", () => {
+  assert.throws(() => createOfficeServer({ host: "0.0.0.0" }), /direct non-loopback bind/);
   assert.throws(
     () => createOfficeServer({ host: "0.0.0.0", allowNonLoopback: true }),
-    /without a remote access token/,
+    /trusted HTTPS reverse proxy/,
   );
-  assert.doesNotThrow(() =>
+  assert.throws(() =>
     createOfficeServer({
       host: "0.0.0.0",
       allowNonLoopback: true,
       remoteToken: "r".repeat(32),
     }),
+    /trusted HTTPS reverse proxy/,
   );
   assert.equal(isLoopbackHost("::1"), true);
   assert.equal(isLoopbackHost("192.168.1.20"), false);

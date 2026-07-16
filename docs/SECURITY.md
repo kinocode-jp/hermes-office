@@ -1,128 +1,151 @@
-# Security model
+# Security model and implementation status
 
-## Trust boundaries
+## Scope and trust model
 
-Hermes can execute tools with the host user's authority, so a chat message is not merely text input. Hermes Office treats prompts, profile instructions, skills, memory, and Kanban-triggered runs as execution-adjacent data.
+Hermes Agent can execute tools with the host user's authority. Prompts, Profile
+instructions, Skills, Memory, and Kanban-triggered activity are therefore
+execution-adjacent input rather than ordinary low-risk application data.
 
-The primary trust boundaries are:
+Hermes Office is experimental, pre-1.0 software. Its currently supported model
+is one trusted operator on one machine, with Office and Hermes on loopback.
+Private-network remote access by that same operator is experimental. Direct
+public-internet exposure, untrusted multi-user use, and tenant isolation are not
+supported.
 
-1. an untrusted UI process or browser to Office Server;
-2. remote ingress to the host machine;
-3. Office Server to the Hermes runtime and its tool processes;
-4. stored application data to the OS credential store;
-5. an installed skill or imported file to the runtime.
+This document describes controls visible in the current source. It is not an
+independent audit, certification, or warranty.
 
-Authorization is enforced at Office Server for every request and every WebSocket subscription. Hiding a control in the UI is not authorization.
+## Implemented controls
 
-## Identity and device permissions
+### Listener and request boundary
 
-Each authenticated user session is bound to a registered device. Device records have one of four increasing tiers:
+- Office Server binds to loopback by default.
+- Non-loopback binding requires an explicit opt-in plus valid remote-token and
+  allowed-origin configuration.
+- Local bootstrap checks the peer address, exact Host/Origin allowlists, and
+  rejects forwarded requests rather than trusting proxy headers.
+- CORS and WebSocket upgrades validate exact configured origins.
+- HTTP methods, content types, JSON shapes, identifiers, request bodies,
+  WebSocket frames, outbound responses, and event buffers are bounded.
+- Static web serving rejects traversal and symlink escape and sets a restrictive
+  CSP plus cache policies.
 
-| Tier | Intended access |
-| --- | --- |
-| `viewer` | Redacted profiles, sessions, activity, and Kanban state |
-| `operator` | Viewer plus chat, cancellation, card updates, and comments |
-| `manager` | Operator plus profile, memory, and skill enablement after step-up |
-| `owner` | Administration, device revocation, and eligible local-only actions |
+These controls reduce accidental exposure and cross-site drive-by requests.
+They do not make direct public binding a supported deployment.
 
-The effective authority is the lower of user grant, device grant, deployment policy, and operation policy. Revocation invalidates active sessions and WebSocket tickets. Inactive remote devices expire; owners can inspect last-seen timestamps and revoke them.
+### Sessions and mutations
 
-Tailscale identity and OIDC establish who connected. They do not establish the permission tier. The first owner is enrolled locally; subsequent device grants are explicit and audited.
+- Local browser sessions and optional remote-token sessions use random HttpOnly,
+  SameSite cookies with a bounded lifetime.
+- Cookie-authenticated mutations require a matching CSRF token.
+- The Tauri path requires an exact Tauri origin and a random launch-scoped
+  desktop capability supplied to the WebView through Tauri IPC.
+- A remote enrollment token can be spent once per server process through a
+  configured loopback HTTPS proxy. The comparison uses a digest and
+  constant-time equality; attempts are rate-limited globally, per client, and
+  per credential digest in bounded maps.
+- Enrollment creates a separate long-lived device credential and an `operator`
+  session. A local owner can list or revoke in-memory devices; revocation
+  invalidates sessions and closes matching event/chat sockets.
+- Per-operation policy checks enforce minimum tiers and distinguish remote-safe,
+  step-up-required, and local-only operations. No remote step-up flow exists, so
+  step-up operations fail closed for remote devices.
+- WebSocket authentication uses the existing Office session/capability boundary,
+  origin checks, frame bounds, and connection cleanup.
+- Authentication events are kept in a bounded in-memory audit feed.
 
-## Mutation boundaries
+The current enrollment flow is not a complete multi-user authorization system.
+Device, session, enrollment-consumed, rate-limit, and audit state is not durable;
+a restart invalidates devices and permits fresh use of the configured enrollment
+token.
 
-Roles and reachability are independent. Every operation is assigned one boundary in `@hermes-office/protocol`:
+### Hermes boundary
 
-- `read-only`: permitted according to tier, with response redaction;
-- `remote-safe`: available remotely at the required tier and rate-limited;
-- `step-up-required`: requires recent reauthentication in addition to tier;
-- `local-only`: requires an owner session and an unforgeable native/local presence proof.
+- Browsers receive normalized Office DTOs rather than the Hermes token, Hermes
+  backend URL, Profile filesystem paths, or raw provider-secret objects.
+- Managed and adopted Hermes endpoints are restricted to loopback.
+- Hermes child processes receive a constructed environment allowlist rather
+  than Office Server's complete environment; Office auth/proxy configuration
+  and unrelated provider credentials are not inherited.
+- Profile settings that Hermes scopes to a process are routed to a
+  Profile-pinned Hermes backend.
+- General provider-secret entry, Skill installation/deletion, destructive
+  Memory reset, raw Memory-file editing, and arbitrary Hermes RPC are excluded
+  from the GUI/API.
+- Office global context rejects likely credentials and is injected only into a
+  newly created session through an internal server path.
 
-Default high-risk decisions are:
+The desktop shell canonicalizes local Node/Hermes executable paths, rejects
+group/world-writable or unexpected-owner files on Unix, bounds version probes,
+and requires Node 22.x plus Hermes Agent 0.18.x. These executables are not yet
+verified against a project-signed digest manifest. Treat the local installation
+and user account as part of the trusted computing base.
 
-| Action | Boundary | Reason |
-| --- | --- | --- |
-| Send/cancel chat, edit/comment on cards | Remote-safe | Core remote operation, still audited and rate-limited |
-| Edit profile/memory, enable an installed skill | Step-up | Changes future agent behavior |
-| Delete profiles, change global settings, revoke devices | Step-up | Broad or destructive impact |
-| Install skill, configure/start/stop runtime | Local-only | May introduce or control executable code |
-| Write provider secrets | Local-only | Prevent remote credential replacement and exfiltration paths |
+### Browser content and storage
 
-Deployments may make a boundary stricter but never weaker without a protocol/security review. An owner connecting remotely cannot call a local-only operation.
+- The UI renders structured text/event data rather than injecting raw tool HTML.
+- Access credentials are not intentionally stored in URLs or local storage.
+- Custom Profile portraits and appearance preferences are browser-local and
+  should be treated as ordinary local application data, not secret storage.
 
-Step-up state is short-lived, audience-bound to Office Server, and invalidated after account or device changes. Local presence is proven through a Tauri-issued, single-use challenge over native IPC; loopback source IP alone is insufficient because browsers and local malware can reach loopback.
+## Remote access guidance
 
-## Secrets
+If remote access is necessary:
 
-Provider keys, OIDC client secrets, runtime environment values, refresh tokens, and tunnel credentials remain server-side. They are stored in the OS credential store when available, otherwise in an authenticated encrypted store whose key is outside the database.
+1. keep Office bound to loopback;
+2. use an authenticated HTTPS private-network proxy such as Tailscale Serve;
+3. configure the exact number of trusted loopback proxy hops and one exact HTTPS
+   origin rather than a wildcard;
+4. generate a unique random one-time Office enrollment token of at least 32
+   characters and do not
+   reuse a Hermes/provider credential;
+5. restrict the private network to devices controlled by the same trusted
+   operator;
+6. rotate the token and restart Office if a browser/device is lost;
+7. never expose stock `hermes serve` directly.
 
-The read API exposes only `SecretMetadata`: key name, configured state, and update time. It never returns plaintext, ciphertext, hashes, value length, prefixes, or raw environment variables. Logs, events, crash reports, audit records, exports, and backups use the same rule.
+TLS and proxy authentication are provided by the proxy; Office's loopback HTTP
+listener does not itself terminate TLS or validate Tailscale/OIDC identity.
 
-Secret entry is a native, local-only flow. The native shell passes the value to Office Server over a private one-shot channel, clears UI state, and receives only success plus updated metadata. Secret values are never placed in WebSocket events, URLs, command-line arguments, clipboard history, analytics, or persisted browser storage.
+## Known limitations
 
-Hermes receives only the minimum credentials needed for a run. Child-process environments are constructed from an allowlist rather than inherited wholesale.
+The following are not implemented or not claimed as complete:
 
-## Transport security
+- durable device enrollment and configurable per-device grants;
+- RBAC, recovery, and tenant boundaries suitable for untrusted users (the
+  current fixed remote `operator` tier and local revocation are defense-in-depth
+  for the single-operator model);
+- remote reauthentication/step-up (step-up operations currently fail closed)
+  and an unforgeable native presence flow beyond the Tauri capability;
+- OIDC, PKCE, trusted proxy identity, public recovery, or public-internet mode;
+- persistent tamper-evident audit storage and export;
+- OS credential-store backed provider-secret entry;
+- project-signed Node/Hermes runtime version and digest verification;
+- signed/notarized project binaries, checksums, SBOM, and provenance;
+- a formal external penetration test.
 
-### Loopback
+Some of these controls appear as design targets in historical/product documents.
+They must not be described as implemented until code, tests, and a security
+review support that statement.
 
-The server binds to `127.0.0.1` and `::1` only, preferably on an ephemeral port. Requests require a session even on loopback. Strict origin checks, a narrow CORS policy, CSRF tokens, and WebSocket origin validation prevent hostile websites from driving the service. Bootstrap capabilities are single use, short lived, and transmitted only through Tauri IPC.
+## Security invariants for changes
 
-### Tailscale
+- Never return Office, Hermes, provider, tunnel, or identity-provider secrets in
+  browser DTOs, logs, audit records, errors, URLs, or WebSocket events.
+- Construct child-process environments from an explicit minimum allowlist; do
+  not inherit the entire Office Server environment.
+- Keep Hermes endpoints on loopback and reject redirects or alternate addresses
+  that escape that boundary.
+- Apply authorization on the server for every request and socket operation;
+  hiding UI controls is not authorization.
+- Treat Skill content, SOUL, shared context, prompts, Kanban comments, tool
+  output, filenames, and Markdown as untrusted input.
+- Use revision/idempotency checks for mutation paths and re-check authorization
+  when queued work begins.
+- Do not introduce a permissive fallback when a remote identity, proxy, audit,
+  persistence, or compatibility check fails.
 
-Prefer Tailscale Serve with tailnet TLS. Office Server trusts identity headers only from a configured local proxy or validates identity through the Tailscale local API. It ignores forwarded identity headers from all other peers. Funnel is considered public exposure and therefore requires the public-mode controls.
+## Reporting
 
-### Public OIDC
-
-Public access requires TLS 1.2+, a fixed issuer allowlist, Authorization Code plus PKCE, exact redirect URIs, state and nonce checks, and signature/audience/expiry validation. Browser auth uses a backend-for-frontend session cookie; access or refresh tokens are not stored in `localStorage` or exposed to JavaScript.
-
-WebSocket connections use a single-use short-lived ticket obtained through the authenticated HTTP session. Query strings contain no long-lived credentials. Reverse-proxy settings explicitly list trusted hops; arbitrary `Forwarded` or `X-Forwarded-*` values are ignored.
-
-## Request and event protections
-
-- Payload schemas reject unknown discriminants and enforce size limits before Hermes sees data.
-- Chat, memory, comments, filenames, Markdown, and tool output are untrusted content. Rendering sanitizes HTML and blocks active URLs by default.
-- Mutations use idempotency keys and optimistic revisions. Authorization is checked again when queued work begins.
-- Per-device and per-operation rate limits protect prompts, cancellation, login, and step-up endpoints.
-- Event subscriptions are filtered by current access. Permission downgrade or revocation closes the stream immediately.
-- Tool output and Hermes process logs pass through redaction and bounded buffers before reaching a client.
-- File access uses explicit grants and canonicalized paths. The server rejects traversal, symlink escape, device paths, and implicit home-directory access.
-
-## Runtime and skill safety
-
-Managed Hermes artifacts require a pinned version, cryptographic digest, trusted signing source, atomic installation, and rollback. Existing-runtime mode accepts only loopback endpoints and must show the detected version and compatibility result.
-
-Skills are executable supply-chain inputs. Installation is local-only and presents source, version/commit, requested capabilities, integrity information, and changed files. Enabling a previously installed skill is separate from installing it. A global skill grant does not silently override a profile-level denial.
-
-Office animation is derived from normalized activity events. It never parses or executes tool output as code.
-
-## Audit and privacy
-
-Audit records include actor subject, device, operation, target identifier, outcome, request ID, and timestamp. They exclude prompt bodies, chat bodies, memory contents, secret material, access tokens, and complete filesystem paths. Security denials and mutations are audited; high-volume reads and streaming deltas are not recorded by default.
-
-Audit storage is append-oriented, access requires `owner`, and retention is configurable. Exports use the same redaction rules as the UI.
-
-## Secure defaults and failure behavior
-
-- Fresh installs expose loopback only and enroll one local owner.
-- Public exposure is off until OIDC, TLS/proxy trust, and recovery settings validate.
-- No authentication fallback activates when OIDC or Tailscale becomes unavailable.
-- Runtime version mismatch disables writes and reports `runtime_incompatible`.
-- Persistence or audit failure rejects security-sensitive mutations rather than continuing silently.
-- Client disconnect does not automatically cancel an agent run; explicit cancellation remains authorized and auditable.
-- A server restart invalidates transient bootstrap, step-up, and WebSocket tickets.
-
-## Initial threat-review checklist
-
-Before enabling remote access, verify:
-
-- loopback and remote listeners expose only intended interfaces;
-- a hostile browser origin cannot call HTTP or WebSocket endpoints;
-- forged proxy/Tailscale headers are ignored;
-- viewer/operator devices cannot mutate profile or global configuration;
-- remote owners cannot invoke local-only commands;
-- revocation terminates active HTTP and WebSocket sessions;
-- snapshots, deltas, logs, audits, backups, and crash reports contain no secret values;
-- duplicate/replayed mutations are idempotent;
-- stale revisions cannot overwrite newer memory or settings;
-- oversized chat/tool output cannot create unbounded memory use.
+Use the private process in the root [`SECURITY.md`](../SECURITY.md). Do not
+publish exploit details in a GitHub issue.

@@ -55,6 +55,7 @@ export type Operation =
   | "chat.session.archive"
   | "chat.message.send"
   | "chat.run.cancel"
+  | "chat.approval.permanent"
   | "kanban.card.create"
   | "kanban.card.update"
   | "kanban.card.comment"
@@ -86,6 +87,7 @@ export const OPERATION_POLICIES: Readonly<Record<Operation, OperationPolicy>> = 
   "chat.session.archive": policy("chat.session.archive", "operator", "remote-safe", true),
   "chat.message.send": policy("chat.message.send", "operator", "remote-safe", true),
   "chat.run.cancel": policy("chat.run.cancel", "operator", "remote-safe", true),
+  "chat.approval.permanent": policy("chat.approval.permanent", "owner", "local-only", true),
   "kanban.card.create": policy("kanban.card.create", "operator", "remote-safe", true),
   "kanban.card.update": policy("kanban.card.update", "operator", "remote-safe", true),
   "kanban.card.comment": policy("kanban.card.comment", "operator", "remote-safe", true),
@@ -355,13 +357,12 @@ export interface ConfigureRuntimeRequest {
   endpoint?: string;
 }
 
-export type MutationOperation = Exclude<Operation, "state.read" | "audit.read">;
-
 export interface OperationPayloadMap {
   "chat.session.create": CreateSessionRequest;
   "chat.session.archive": { sessionId: SessionId };
   "chat.message.send": SendMessageRequest;
   "chat.run.cancel": { sessionId: SessionId };
+  "chat.approval.permanent": { sessionId: SessionId };
   "kanban.card.create": CreateCardRequest;
   "kanban.card.update": UpdateCardRequest;
   "kanban.card.comment": AddCardCommentRequest;
@@ -380,7 +381,10 @@ export interface OperationPayloadMap {
   "device.revoke": { deviceId: DeviceId };
 }
 
-export interface MutationRequest<TOperation extends MutationOperation> {
+/** Mutation operations are exactly those with a transport payload contract. */
+export type MutationOperation = keyof OperationPayloadMap;
+
+export interface MutationRequest<TOperation extends keyof OperationPayloadMap> {
   requestId: string;
   operation: TOperation;
   payload: OperationPayloadMap[TOperation];

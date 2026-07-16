@@ -1,20 +1,34 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isIP } from "node:net";
+import { dirname, isAbsolute } from "node:path";
+import {
+  OPERATION_POLICIES,
+  type DeviceSummary,
+  type Operation,
+  type PermissionTier,
+} from "@hermes-office/protocol";
 
 const COOKIE_NAME = "hermes_office_session";
+const DEVICE_COOKIE_NAME = "hermes_office_device";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
+const DEVICE_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
 const MAX_SESSIONS = 64;
+const MAX_DEVICES = 32;
 const MAX_AUDIT_RECORDS = 256;
-const REMOTE_ATTEMPT_WINDOW_MS = 60_000;
-const MAX_REMOTE_ATTEMPTS = 5;
-const MAX_RATE_LIMIT_KEYS = 256;
+const ATTEMPT_WINDOW_MS = 60_000;
+const MAX_CLIENT_ATTEMPTS = 5;
+const MAX_GLOBAL_ATTEMPTS = 100;
+const MAX_RATE_LIMIT_KEYS = 512;
 const DESKTOP_CAPABILITY_HEADER = "x-hermes-office-desktop-capability";
 const DESKTOP_PROTOCOL_PREFIX = "hermes-office.desktop.";
 const DEFAULT_DESKTOP_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] as const;
+const TIER_RANK: Readonly<Record<PermissionTier, number>> = { viewer: 0, operator: 1, manager: 2, owner: 3 };
 
 export interface OfficePrincipal {
   id: string;
-  tier: "owner";
+  tier: PermissionTier;
   local: boolean;
   deviceName: string;
 }
@@ -27,7 +41,7 @@ export interface OfficeAuthSession {
 
 export interface OfficePublicAuditRecord {
   occurredAt: string;
-  operation: "auth.local" | "auth.device" | "auth.logout" | "audit.read";
+  operation: string;
   outcome: "allowed" | "denied" | "rate_limited";
   deviceName: string | null;
   local: boolean;
@@ -43,68 +57,81 @@ export interface OfficeAuthOptions {
   remoteToken?: string;
   desktopCapability?: string;
   desktopOrigins?: readonly string[];
+  trustedProxyHops?: number;
+  deviceRegistryPath?: string;
   onAudit?: (record: OfficeAuditRecord) => void;
 }
 
 export type DeviceBootstrapResult =
-  | { outcome: "success"; session: OfficeAuthSession }
-  | { outcome: "disabled" | "invalid" | "rate_limited" };
+  | { outcome: "success"; session: OfficeAuthSession; enrolled: boolean }
+  | { outcome: "disabled" | "invalid" | "rate_limited" | "insecure_transport" | "enrollment_consumed" | "storage_unavailable" };
 
-interface StoredSession extends OfficeAuthSession {
+export type AuthorizationResult =
+  | { allowed: true; session: OfficeAuthSession }
+  | { allowed: false; reason: "unauthenticated" | "csrf" | "tier" | "step_up_required" | "local_only" };
+
+interface StoredSession extends OfficeAuthSession { expiresAtMs: number; }
+interface AttemptWindow { count: number; resetAt: number; }
+interface DeviceRecord {
+  id: string;
+  displayName: string;
+  tier: PermissionTier;
+  credentialDigest: string;
+  createdAt: string;
+  lastSeenAt?: string;
+  revokedAt?: string;
   expiresAtMs: number;
-}
-
-interface AttemptWindow {
-  count: number;
-  resetAt: number;
 }
 
 export class OfficeAuth {
   readonly #sessions = new Map<string, StoredSession>();
+  readonly #devices = new Map<string, DeviceRecord>();
   readonly #remoteTokenDigest: Buffer | undefined;
   readonly #desktopCapabilityDigest: Buffer | undefined;
   readonly #desktopSession: OfficeAuthSession | undefined;
   readonly #desktopOrigins: ReadonlySet<string>;
+  readonly #trustedProxyHops: number;
+  readonly #deviceRegistryPath: string | undefined;
   readonly #onAudit: ((record: OfficeAuditRecord) => void) | undefined;
   readonly #audit: OfficeAuditRecord[] = [];
   readonly #attempts = new Map<string, AttemptWindow>();
+  #enrollmentConsumed = false;
 
   constructor(options: OfficeAuthOptions = {}) {
     this.#desktopOrigins = validateDesktopOrigins(options.desktopOrigins ?? DEFAULT_DESKTOP_ORIGINS);
-    const remoteToken = options.remoteToken;
-    if (remoteToken !== undefined) {
-      if (remoteToken.length < 32 || remoteToken.length > 4_096 || remoteToken.includes("\0")) {
-        throw new Error("Remote access token must contain 32 to 4096 characters.");
+    this.#trustedProxyHops = boundedInteger(options.trustedProxyHops, 0, 0, 8);
+    if (options.remoteToken !== undefined) {
+      if (options.remoteToken.length < 32 || options.remoteToken.length > 4_096 || options.remoteToken.includes("\0")) {
+        throw new Error("Remote enrollment token must contain 32 to 4096 characters.");
       }
-      this.#remoteTokenDigest = secretDigest(remoteToken);
+      this.#remoteTokenDigest = secretDigest(options.remoteToken);
     }
-    const desktopCapability = options.desktopCapability;
-    if (desktopCapability !== undefined) {
-      if (!isValidDesktopCapability(desktopCapability)) {
+    if (options.desktopCapability !== undefined) {
+      if (!isValidDesktopCapability(options.desktopCapability)) {
         throw new Error("Desktop capability must contain 32 to 256 URL-safe characters.");
       }
-      this.#desktopCapabilityDigest = secretDigest(desktopCapability);
+      this.#desktopCapabilityDigest = secretDigest(options.desktopCapability);
       this.#desktopSession = {
         principal: { id: "local-desktop", tier: "owner", local: true, deviceName: "Local desktop" },
-        // Desktop mutations are protected by the launch-scoped capability and
-        // an exact Tauri origin check, rather than a cross-site cookie CSRF token.
         csrfToken: randomBytes(24).toString("base64url"),
         expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
       };
     }
+    this.#deviceRegistryPath = normalizeRegistryPath(options.deviceRegistryPath);
+    this.#loadDeviceRegistry();
     this.#onAudit = options.onAudit;
   }
 
-  get remoteEnabled(): boolean {
-    return this.#remoteTokenDigest !== undefined;
-  }
+  get remoteEnabled(): boolean { return this.#remoteTokenDigest !== undefined; }
 
   bootstrapLocal(request: IncomingMessage, response: ServerResponse): OfficeAuthSession | undefined {
     if (!isTrustedLocalRequest(request)) {
       this.#appendAudit("auth.local", "denied", undefined, true);
       return undefined;
     }
-    const session = this.#issueSession(request, response, "Local desktop", true);
+    const session = this.#issueSession(request, response, {
+      id: "local-browser", tier: "owner", local: true, deviceName: "Local browser",
+    });
     this.#appendAudit("auth.local", "allowed", session, true);
     return session;
   }
@@ -115,26 +142,48 @@ export class OfficeAuth {
     credentials: { token: string; deviceName: string },
   ): DeviceBootstrapResult {
     if (this.#remoteTokenDigest === undefined) return { outcome: "disabled" };
-    const rateKey = request.socket.remoteAddress?.slice(0, 128) || "unknown";
-    if (!this.#consumeAttempt(rateKey)) {
+    if (!this.#isTrustedSecureProxyRequest(request)) return { outcome: "insecure_transport" };
+    if (!this.#consumeRemoteAttempts(request, credentials.token)) {
       this.#appendAudit("auth.device", "rate_limited", undefined, false);
       return { outcome: "rate_limited" };
     }
-
-    const candidate = secretDigest(credentials.token);
-    if (!timingSafeEqual(candidate, this.#remoteTokenDigest)) {
-      this.#appendAudit("auth.device", "denied", undefined, false);
-      return { outcome: "invalid" };
-    }
-
     const deviceName = normalizeDeviceName(credentials.deviceName);
-    if (deviceName === undefined) {
-      this.#appendAudit("auth.device", "denied", undefined, false);
-      return { outcome: "invalid" };
+    if (deviceName === undefined) return this.#invalidDevice();
+
+    const existing = this.#authenticateDeviceCredential(request, credentials.token);
+    if (existing !== undefined) {
+      return { outcome: "success", session: this.#issueDeviceSession(request, response, existing), enrolled: false };
     }
-    const session = this.#issueSession(request, response, deviceName, false);
-    this.#appendAudit("auth.device", "allowed", session, false);
-    return { outcome: "success", session };
+    if (!safeBufferEqual(secretDigest(credentials.token), this.#remoteTokenDigest)) return this.#invalidDevice();
+    if (this.#enrollmentConsumed) {
+      this.#appendAudit("auth.device", "denied", undefined, false);
+      return { outcome: "enrollment_consumed" };
+    }
+    if (this.#devices.size >= MAX_DEVICES) return this.#invalidDevice();
+
+    const credential = randomBytes(32).toString("base64url");
+    const id = `device-${randomBytes(12).toString("hex")}`;
+    const now = new Date().toISOString();
+    const device: DeviceRecord = {
+      id, displayName: deviceName, tier: "operator", credentialDigest: tokenDigest(credential),
+      createdAt: now, lastSeenAt: now, expiresAtMs: Date.now() + DEVICE_TTL_MS,
+    };
+    this.#devices.set(id, device);
+    this.#enrollmentConsumed = true;
+    if (!this.#saveDeviceRegistry()) {
+      this.#devices.delete(id);
+      return { outcome: "storage_unavailable" };
+    }
+    response.appendHeader("Set-Cookie", serializeDeviceCookie(`${id}.${credential}`, request, this.#trustedProxyHops));
+    return { outcome: "success", session: this.#issueDeviceSession(request, response, device), enrolled: true };
+  }
+
+  renewDevice(request: IncomingMessage, response: ServerResponse): DeviceBootstrapResult {
+    if (this.#remoteTokenDigest === undefined) return { outcome: "disabled" };
+    if (!this.#isTrustedSecureProxyRequest(request)) return { outcome: "insecure_transport" };
+    const device = this.#authenticateDeviceCredential(request, "");
+    if (device === undefined) return this.#invalidDevice();
+    return { outcome: "success", session: this.#issueDeviceSession(request, response, device), enrolled: false };
   }
 
   authenticate(request: IncomingMessage): OfficeAuthSession | undefined {
@@ -144,32 +193,42 @@ export class OfficeAuth {
     const rawToken = readCookie(request.headers.cookie, COOKIE_NAME);
     if (rawToken === undefined || rawToken.length > 128) return undefined;
     const stored = this.#sessions.get(tokenDigest(rawToken));
-    return stored === undefined ? undefined : publicSession(stored);
+    if (stored === undefined) return undefined;
+    if (!stored.principal.local) {
+      const device = this.#devices.get(stored.principal.id);
+      if (device === undefined || device.revokedAt !== undefined || device.expiresAtMs <= Date.now()) return undefined;
+    }
+    return publicSession(stored);
   }
 
-  authorizeMutation(request: IncomingMessage): OfficeAuthSession | undefined {
-    const desktop = this.#authenticateDesktop(request);
-    if (desktop !== undefined) return desktop;
+  authorizeOperation(request: IncomingMessage, operation: Operation, mutation: boolean): AuthorizationResult {
     const session = this.authenticate(request);
-    const supplied = request.headers["x-csrf-token"];
-    if (session === undefined || typeof supplied !== "string") return undefined;
-    return safeEqual(supplied, session.csrfToken) ? session : undefined;
+    if (session === undefined) return { allowed: false, reason: "unauthenticated" };
+    if (mutation && session.principal.id !== "local-desktop") {
+      const supplied = request.headers["x-csrf-token"];
+      if (typeof supplied !== "string" || !safeEqual(supplied, session.csrfToken)) return { allowed: false, reason: "csrf" };
+    }
+    return this.authorizeSession(session, operation);
   }
 
-  #authenticateDesktop(request: IncomingMessage): OfficeAuthSession | undefined {
-    if (this.#desktopCapabilityDigest === undefined || this.#desktopSession === undefined) return undefined;
-    if (!isTrustedDesktopRequest(request, this.#desktopOrigins)) return undefined;
-    const supplied = readDesktopCapability(request);
-    if (supplied === undefined || !isValidDesktopCapability(supplied)) return undefined;
-    return timingSafeEqual(secretDigest(supplied), this.#desktopCapabilityDigest)
-      ? {
-          ...this.#desktopSession,
-          principal: { ...this.#desktopSession.principal },
-          // The capability itself is launch-scoped. Keep individual WebSocket
-          // leases bounded while allowing a long-running desktop app to renew.
-          expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
-        }
-      : undefined;
+  /** Compatibility helper for callers that only need the CSRF/session gate. */
+  authorizeMutation(request: IncomingMessage): OfficeAuthSession | undefined {
+    const result = this.authorizeOperation(request, "state.read", true);
+    return result.allowed ? result.session : undefined;
+  }
+
+  authorizeSession(session: OfficeAuthSession, operation: Operation): AuthorizationResult {
+    const policy = OPERATION_POLICIES[operation];
+    let reason: Exclude<AuthorizationResult, { allowed: true }>["reason"];
+    if (TIER_RANK[session.principal.tier] < TIER_RANK[policy.minimumTier]) reason = "tier";
+    else if (policy.boundary === "local-only" && !session.principal.local) reason = "local_only";
+    else if (policy.boundary === "step-up-required" && !session.principal.local) reason = "step_up_required";
+    else {
+      if (policy.auditable) this.#appendAudit(operation, "allowed", session, session.principal.local);
+      return { allowed: true, session };
+    }
+    if (policy.auditable) this.#appendAudit(operation, "denied", session, session.principal.local);
+    return { allowed: false, reason };
   }
 
   readAudit(session: OfficeAuthSession): { records: OfficePublicAuditRecord[] } | undefined {
@@ -178,226 +237,269 @@ export class OfficeAuth {
     return { records: this.#audit.map(publicAuditRecord) };
   }
 
+  listDevices(session: OfficeAuthSession): { devices: DeviceSummary[] } | undefined {
+    if (!session.principal.local || session.principal.tier !== "owner") return undefined;
+    return { devices: [...this.#devices.values()].map(publicDevice) };
+  }
+
+  revokeDevice(session: OfficeAuthSession, deviceId: string): boolean {
+    if (!session.principal.local || session.principal.tier !== "owner") return false;
+    const device = this.#devices.get(deviceId);
+    if (device === undefined || device.revokedAt !== undefined) return false;
+    device.revokedAt = new Date().toISOString();
+    if (!this.#saveDeviceRegistry()) { delete device.revokedAt; return false; }
+    for (const [key, stored] of this.#sessions) if (stored.principal.id === deviceId) this.#sessions.delete(key);
+    this.#appendAudit("device.revoke", "allowed", session, true, deviceId);
+    return true;
+  }
+
   revoke(request: IncomingMessage, response: ServerResponse): boolean {
     const session = this.authenticate(request);
     const rawToken = readCookie(request.headers.cookie, COOKIE_NAME);
     if (rawToken === undefined) return false;
     const removed = this.#sessions.delete(tokenDigest(rawToken));
-    response.setHeader("Set-Cookie", `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    response.setHeader("Set-Cookie", expireCookie(COOKIE_NAME));
     this.#appendAudit("auth.logout", removed ? "allowed" : "denied", session, session?.principal.local ?? false);
     return removed;
   }
 
-  #issueSession(
-    request: IncomingMessage,
-    response: ServerResponse,
-    deviceName: string,
-    local: boolean,
-  ): OfficeAuthSession {
+  #issueDeviceSession(request: IncomingMessage, response: ServerResponse, device: DeviceRecord): OfficeAuthSession {
+    device.lastSeenAt = new Date().toISOString();
+    this.#saveDeviceRegistry();
+    const session = this.#issueSession(request, response, {
+      id: device.id, tier: device.tier, local: false, deviceName: device.displayName,
+    });
+    this.#appendAudit("auth.device", "allowed", session, false);
+    return session;
+  }
+
+  #issueSession(request: IncomingMessage, response: ServerResponse, principal: OfficePrincipal): OfficeAuthSession {
     this.#prune();
     if (this.#sessions.size >= MAX_SESSIONS) this.#dropOldest();
     const rawSessionToken = randomBytes(32).toString("base64url");
-    const csrfToken = randomBytes(24).toString("base64url");
     const expiresAtMs = Date.now() + SESSION_TTL_MS;
     const stored: StoredSession = {
-      principal: {
-        id: `${local ? "local" : "device"}-${randomBytes(8).toString("hex")}`,
-        tier: "owner",
-        local,
-        deviceName,
-      },
-      csrfToken,
-      expiresAt: new Date(expiresAtMs).toISOString(),
-      expiresAtMs,
+      principal: { ...principal }, csrfToken: randomBytes(24).toString("base64url"),
+      expiresAt: new Date(expiresAtMs).toISOString(), expiresAtMs,
     };
     this.#sessions.set(tokenDigest(rawSessionToken), stored);
-    response.setHeader("Set-Cookie", serializeCookie(rawSessionToken, request));
+    response.appendHeader("Set-Cookie", serializeSessionCookie(rawSessionToken, request, this.#trustedProxyHops));
     return publicSession(stored);
   }
 
-  #consumeAttempt(key: string): boolean {
+  #authenticateDeviceCredential(request: IncomingMessage, suppliedToken: string): DeviceRecord | undefined {
+    const raw = readCookie(request.headers.cookie, DEVICE_COOKIE_NAME);
+    const candidate = raw ?? suppliedToken;
+    const separator = candidate.indexOf(".");
+    if (separator < 1) return undefined;
+    const id = candidate.slice(0, separator);
+    const credential = candidate.slice(separator + 1);
+    const device = this.#devices.get(id);
+    if (device === undefined || device.revokedAt !== undefined || device.expiresAtMs <= Date.now()) return undefined;
+    return safeEqual(tokenDigest(credential), device.credentialDigest) ? device : undefined;
+  }
+
+  #isTrustedSecureProxyRequest(request: IncomingMessage): boolean {
+    if (!isLoopbackAddress(request.socket.remoteAddress) || this.#trustedProxyHops < 1) return false;
+    return request.headers["x-forwarded-proto"] === "https" && request.headers.forwarded === undefined;
+  }
+
+  #consumeRemoteAttempts(request: IncomingMessage, token: string): boolean {
+    const client = forwardedClientKey(request.headers["x-forwarded-for"], this.#trustedProxyHops);
+    if (client === undefined) return false;
+    return this.#consumeAttempt("global", MAX_GLOBAL_ATTEMPTS)
+      && this.#consumeAttempt(`client:${client}`, MAX_CLIENT_ATTEMPTS)
+      && this.#consumeAttempt(`credential:${tokenDigest(token).slice(0, 24)}`, MAX_CLIENT_ATTEMPTS);
+  }
+
+  #consumeAttempt(key: string, limit: number): boolean {
     const now = Date.now();
-    for (const [entryKey, window] of this.#attempts) {
-      if (window.resetAt <= now) this.#attempts.delete(entryKey);
-    }
+    for (const [entryKey, window] of this.#attempts) if (window.resetAt <= now) this.#attempts.delete(entryKey);
     if (this.#attempts.size >= MAX_RATE_LIMIT_KEYS && !this.#attempts.has(key)) {
       const oldest = this.#attempts.keys().next();
       if (!oldest.done) this.#attempts.delete(oldest.value);
     }
     const current = this.#attempts.get(key);
     if (current === undefined || current.resetAt <= now) {
-      this.#attempts.set(key, { count: 1, resetAt: now + REMOTE_ATTEMPT_WINDOW_MS });
+      this.#attempts.set(key, { count: 1, resetAt: now + ATTEMPT_WINDOW_MS });
       return true;
     }
-    if (current.count >= MAX_REMOTE_ATTEMPTS) return false;
+    if (current.count >= limit) return false;
     current.count += 1;
     return true;
   }
 
-  #appendAudit(
-    operation: OfficeAuditRecord["operation"],
-    outcome: OfficeAuditRecord["outcome"],
-    session: OfficeAuthSession | undefined,
-    local: boolean,
-  ): void {
+  #invalidDevice(): DeviceBootstrapResult {
+    this.#appendAudit("auth.device", "denied", undefined, false);
+    return { outcome: "invalid" };
+  }
+
+  #loadDeviceRegistry(): void {
+    if (this.#deviceRegistryPath === undefined || this.#remoteTokenDigest === undefined) return;
+    if (!existsSync(this.#deviceRegistryPath)) return;
+    // Once a registry exists, malformed state must never reopen bootstrap enrollment.
+    this.#enrollmentConsumed = true;
+    try {
+      const parsed = JSON.parse(readFileSync(this.#deviceRegistryPath, "utf8")) as unknown;
+      if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.devices)) return;
+      for (const raw of parsed.devices.slice(0, MAX_DEVICES)) {
+        const device = parseStoredDevice(raw);
+        if (device !== undefined) this.#devices.set(device.id, device);
+      }
+    } catch { /* Missing or invalid state rejects old device credentials. */ }
+  }
+
+  #saveDeviceRegistry(): boolean {
+    if (this.#deviceRegistryPath === undefined || this.#remoteTokenDigest === undefined) return true;
+    const temporary = `${this.#deviceRegistryPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    try {
+      mkdirSync(dirname(this.#deviceRegistryPath), { recursive: true, mode: 0o700 });
+      writeFileSync(temporary, JSON.stringify({
+        version: 1,
+        enrollmentConsumed: this.#enrollmentConsumed,
+        devices: [...this.#devices.values()],
+      }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+      renameSync(temporary, this.#deviceRegistryPath);
+      return true;
+    } catch {
+      // A write failure never expands access. Process-local enrollment remains one-time.
+      return false;
+    }
+  }
+
+  #authenticateDesktop(request: IncomingMessage): OfficeAuthSession | undefined {
+    if (this.#desktopCapabilityDigest === undefined || this.#desktopSession === undefined) return undefined;
+    if (!isTrustedDesktopRequest(request, this.#desktopOrigins)) return undefined;
+    const supplied = readDesktopCapability(request);
+    if (supplied === undefined || !isValidDesktopCapability(supplied)) return undefined;
+    return safeBufferEqual(secretDigest(supplied), this.#desktopCapabilityDigest)
+      ? { ...this.#desktopSession, principal: { ...this.#desktopSession.principal }, expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString() }
+      : undefined;
+  }
+
+  #appendAudit(operation: string, outcome: OfficeAuditRecord["outcome"], session: OfficeAuthSession | undefined, local: boolean, deviceId?: string): void {
     const principal = session?.principal;
     const record: OfficeAuditRecord = {
-      id: `audit-${randomBytes(8).toString("hex")}`,
-      occurredAt: new Date().toISOString(),
-      operation,
-      outcome,
-      actorId: principal?.id ?? null,
-      deviceId: principal?.id ?? null,
-      deviceName: principal?.deviceName ?? null,
-      local,
+      id: `audit-${randomBytes(8).toString("hex")}`, occurredAt: new Date().toISOString(), operation, outcome,
+      actorId: principal?.id ?? null, deviceId: deviceId ?? principal?.id ?? null,
+      deviceName: principal?.deviceName ?? null, local,
     };
     this.#audit.push(record);
     if (this.#audit.length > MAX_AUDIT_RECORDS) this.#audit.shift();
-    try { this.#onAudit?.({ ...record }); } catch { /* Audit observers cannot affect authentication. */ }
+    try { this.#onAudit?.({ ...record }); } catch { /* observers cannot affect access control */ }
   }
 
   #prune(): void {
     const now = Date.now();
     for (const [key, session] of this.#sessions) if (session.expiresAtMs <= now) this.#sessions.delete(key);
   }
-
-  #dropOldest(): void {
-    const first = this.#sessions.keys().next();
-    if (!first.done) this.#sessions.delete(first.value);
-  }
+  #dropOldest(): void { const first = this.#sessions.keys().next(); if (!first.done) this.#sessions.delete(first.value); }
 }
 
+function publicDevice(device: DeviceRecord): DeviceSummary {
+  return { id: device.id, displayName: device.displayName, tier: device.tier, createdAt: device.createdAt,
+    ...(device.lastSeenAt === undefined ? {} : { lastSeenAt: device.lastSeenAt }),
+    ...(device.revokedAt === undefined ? {} : { revokedAt: device.revokedAt }) };
+}
 function publicAuditRecord(record: OfficeAuditRecord): OfficePublicAuditRecord {
-  return {
-    occurredAt: record.occurredAt,
-    operation: record.operation,
-    outcome: record.outcome,
-    deviceName: record.deviceName,
-    local: record.local,
-  };
+  return { occurredAt: record.occurredAt, operation: record.operation, outcome: record.outcome, deviceName: record.deviceName, local: record.local };
 }
-
 function publicSession(session: StoredSession): OfficeAuthSession {
-  return {
-    principal: { ...session.principal },
-    csrfToken: session.csrfToken,
-    expiresAt: session.expiresAt,
-  };
+  return { principal: { ...session.principal }, csrfToken: session.csrfToken, expiresAt: session.expiresAt };
 }
-
-function serializeCookie(token: string, request: IncomingMessage): string {
-  const forwardedProto = request.headers["x-forwarded-proto"];
-  const secure = ("encrypted" in request.socket && request.socket.encrypted === true) || forwardedProto === "https";
-  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1_000)}${secure ? "; Secure" : ""}`;
+function serializeSessionCookie(token: string, request: IncomingMessage, proxyHops: number): string {
+  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1_000)}${isSecureRequest(request, proxyHops) ? "; Secure" : ""}`;
 }
-
+function serializeDeviceCookie(token: string, request: IncomingMessage, proxyHops: number): string {
+  return `${DEVICE_COOKIE_NAME}=${token}; Path=/api/v1/auth/device; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(DEVICE_TTL_MS / 1_000)}${isSecureRequest(request, proxyHops) ? "; Secure" : ""}`;
+}
+function expireCookie(name: string): string { return `${name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`; }
+function isSecureRequest(request: IncomingMessage, proxyHops: number): boolean {
+  return ("encrypted" in request.socket && request.socket.encrypted === true)
+    || (proxyHops > 0 && isLoopbackAddress(request.socket.remoteAddress) && request.headers["x-forwarded-proto"] === "https");
+}
 function readCookie(header: string | undefined, name: string): string | undefined {
   if (header === undefined || header.length > 4_096) return undefined;
   for (const part of header.split(";")) {
     const separator = part.indexOf("=");
-    if (separator < 1) continue;
-    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+    if (separator >= 1 && part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
   }
   return undefined;
 }
-
-function tokenDigest(token: string): string {
-  return createHash("sha256").update(token).digest("base64url");
-}
-
-function secretDigest(token: string): Buffer {
-  return createHash("sha256").update(token, "utf8").digest();
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
+function tokenDigest(token: string): string { return createHash("sha256").update(token).digest("base64url"); }
+function secretDigest(token: string): Buffer { return createHash("sha256").update(token, "utf8").digest(); }
+function safeEqual(left: string, right: string): boolean { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); }
+function safeBufferEqual(left: Buffer, right: Buffer): boolean { return left.length === right.length && timingSafeEqual(left, right); }
 function isLoopbackAddress(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  const normalized = value.toLowerCase();
+  const normalized = value?.toLowerCase();
   return normalized === "127.0.0.1" || normalized === "::1" || normalized === "::ffff:127.0.0.1";
 }
-
+function forwardedClientKey(header: string | string[] | undefined, trustedHops: number): string | undefined {
+  if (trustedHops < 1 || typeof header !== "string" || header.length > 1_024) return undefined;
+  const chain = header.split(",").map((part) => part.trim()).filter(Boolean);
+  if (chain.length < trustedHops) return undefined;
+  const raw = chain[chain.length - trustedHops]!;
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(raw);
+  const ipv4WithPort = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/.exec(raw);
+  const value = bracketed?.[1] ?? ipv4WithPort?.[1] ?? raw;
+  return value.length <= 64 && isIP(value) !== 0 ? value.toLowerCase() : undefined;
+}
 function isTrustedLocalRequest(request: IncomingMessage): boolean {
-  if (!isLoopbackAddress(request.socket.remoteAddress)) return false;
-  if (!isTrustedLocalOrigin(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
-  return request.headers.forwarded === undefined
-    && request.headers["x-forwarded-for"] === undefined
-    && request.headers["x-forwarded-host"] === undefined
-    && request.headers["x-real-ip"] === undefined;
+  if (!isLoopbackAddress(request.socket.remoteAddress) || !isTrustedLocalOrigin(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  return request.headers.forwarded === undefined && request.headers["x-forwarded-for"] === undefined && request.headers["x-forwarded-host"] === undefined && request.headers["x-real-ip"] === undefined;
 }
-
 function isTrustedDesktopRequest(request: IncomingMessage, allowedOrigins: ReadonlySet<string>): boolean {
-  if (!isLoopbackAddress(request.socket.remoteAddress)) return false;
-  if (request.headers.origin === undefined || !allowedOrigins.has(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
-  return request.headers.forwarded === undefined
-    && request.headers["x-forwarded-for"] === undefined
-    && request.headers["x-forwarded-host"] === undefined
-    && request.headers["x-real-ip"] === undefined;
+  if (!isLoopbackAddress(request.socket.remoteAddress) || request.headers.origin === undefined || !allowedOrigins.has(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  return request.headers.forwarded === undefined && request.headers["x-forwarded-for"] === undefined && request.headers["x-forwarded-host"] === undefined && request.headers["x-real-ip"] === undefined;
 }
-
 function validateDesktopOrigins(values: readonly string[]): ReadonlySet<string> {
   const origins = new Set<string>();
-  for (const value of values) {
-    if (!isTrustedLocalOrigin(value)) throw new Error("Desktop origins must be explicit trusted local origins.");
-    origins.add(value);
-  }
+  for (const value of values) { if (!isTrustedLocalOrigin(value)) throw new Error("Desktop origins must be explicit trusted local origins."); origins.add(value); }
   if (origins.size === 0) throw new Error("At least one desktop origin is required.");
   return origins;
 }
-
 function readDesktopCapability(request: IncomingMessage): string | undefined {
   const header = request.headers[DESKTOP_CAPABILITY_HEADER];
   if (typeof header === "string") return header;
   const protocol = request.headers["sec-websocket-protocol"];
   if (typeof protocol !== "string" || protocol.length > 512) return undefined;
-  for (const candidate of protocol.split(",").map((value) => value.trim())) {
-    if (candidate.startsWith(DESKTOP_PROTOCOL_PREFIX)) return candidate.slice(DESKTOP_PROTOCOL_PREFIX.length);
-  }
+  for (const candidate of protocol.split(",").map((value) => value.trim())) if (candidate.startsWith(DESKTOP_PROTOCOL_PREFIX)) return candidate.slice(DESKTOP_PROTOCOL_PREFIX.length);
   return undefined;
 }
-
-function isValidDesktopCapability(value: string): boolean {
-  return value.length >= 32 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value);
-}
-
+function isValidDesktopCapability(value: string): boolean { return value.length >= 32 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value); }
 function isTrustedLocalHost(value: string | undefined): boolean {
   if (value === undefined || value.length > 256) return false;
-  try {
-    const parsed = new URL(`http://${value}`);
-    return parsed.username === ""
-      && parsed.password === ""
-      && parsed.pathname === "/"
-      && (parsed.hostname === "localhost"
-        || parsed.hostname === "127.0.0.1"
-        || parsed.hostname === "tauri.localhost");
-  } catch {
-    return false;
-  }
+  try { const parsed = new URL(`http://${value}`); return parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname); }
+  catch { return false; }
 }
-
 function isTrustedLocalOrigin(value: string | undefined): boolean {
   if (value === undefined) return false;
   if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
-  try {
-    const origin = new URL(value);
-    return (origin.protocol === "http:" || origin.protocol === "https:")
-      && (origin.hostname === "localhost" || origin.hostname === "127.0.0.1")
-      && origin.username === ""
-      && origin.password === ""
-      && origin.pathname === "/"
-      && origin.search === ""
-      && origin.hash === "";
-  } catch {
-    return false;
-  }
+  try { const origin = new URL(value); return (origin.protocol === "http:" || origin.protocol === "https:") && ["localhost", "127.0.0.1"].includes(origin.hostname) && origin.username === "" && origin.password === "" && origin.pathname === "/" && origin.search === "" && origin.hash === ""; }
+  catch { return false; }
 }
-
-function normalizeDeviceName(value: string): string | undefined {
-  const name = value.trim();
-  if (name.length < 1 || name.length > 64 || /[\u0000-\u001f\u007f]/.test(name)) return undefined;
-  return name;
+function normalizeDeviceName(value: string): string | undefined { const name = value.trim(); return name.length >= 1 && name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(name) ? name : undefined; }
+function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isInteger(value) || value < min || value > max ? fallback : value; }
+function normalizeRegistryPath(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isAbsolute(value) || value.includes("\0") || value.length > 4_096) throw new Error("Device registry path must be an absolute safe path.");
+  return value;
 }
+function parseStoredDevice(value: unknown): DeviceRecord | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.id !== "string" || !/^device-[a-f0-9]{24}$/.test(value.id)) return undefined;
+  if (typeof value.displayName !== "string" || normalizeDeviceName(value.displayName) === undefined) return undefined;
+  if (!isPermissionTier(value.tier) || typeof value.credentialDigest !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.credentialDigest)) return undefined;
+  if (typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))) return undefined;
+  if (typeof value.expiresAtMs !== "number" || !Number.isSafeInteger(value.expiresAtMs) || value.expiresAtMs <= 0) return undefined;
+  if (value.lastSeenAt !== undefined && (typeof value.lastSeenAt !== "string" || Number.isNaN(Date.parse(value.lastSeenAt)))) return undefined;
+  if (value.revokedAt !== undefined && (typeof value.revokedAt !== "string" || Number.isNaN(Date.parse(value.revokedAt)))) return undefined;
+  return {
+    id: value.id, displayName: value.displayName, tier: value.tier, credentialDigest: value.credentialDigest,
+    createdAt: value.createdAt, expiresAtMs: value.expiresAtMs,
+    ...(value.lastSeenAt === undefined ? {} : { lastSeenAt: value.lastSeenAt as string }),
+    ...(value.revokedAt === undefined ? {} : { revokedAt: value.revokedAt as string }),
+  };
+}
+function isPermissionTier(value: unknown): value is PermissionTier { return value === "viewer" || value === "operator" || value === "manager" || value === "owner"; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

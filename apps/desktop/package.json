@@ -2,6 +2,12 @@
   "name": "@hermes-office/desktop",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinocode-jp/hermes-office.git",
+    "directory": "apps/desktop"
+  },
   "type": "module",
   "scripts": {
     "tauri:dev": "tauri dev",

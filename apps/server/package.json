@@ -2,9 +2,16 @@
   "name": "@hermes-office/server",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinocode-jp/hermes-office.git",
+    "directory": "apps/server"
+  },
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22 <23",
+    "npm": ">=10 <11"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -1,5 +1,7 @@
 import { createOfficeServer } from "./server.js";
 import { HermesBackend } from "./hermes-backend.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const host = process.env.HERMES_OFFICE_HOST ?? "127.0.0.1";
 const configuredPort = Number.parseInt(process.env.HERMES_OFFICE_PORT ?? "4317", 10);
@@ -12,6 +14,10 @@ const desktopOrigins = process.env.HERMES_OFFICE_DESKTOP_ORIGINS
   ?.split(",")
   .map((origin) => origin.trim())
   .filter((origin) => origin.length > 0);
+const parsedTrustedProxyHops = Number.parseInt(process.env.HERMES_OFFICE_TRUSTED_PROXY_HOPS ?? "0", 10);
+const trustedProxyHops = Number.isInteger(parsedTrustedProxyHops) && parsedTrustedProxyHops >= 0 && parsedTrustedProxyHops <= 8
+  ? parsedTrustedProxyHops
+  : 0;
 
 const hermesMode = process.env.HERMES_OFFICE_HERMES_MODE ?? "managed";
 const runtimeSource = hermesMode === "demo"
@@ -29,6 +35,8 @@ const server = createOfficeServer({
   port,
   ...(configuredOrigins === undefined ? {} : { allowedOrigins: configuredOrigins }),
   allowNonLoopback: process.env.HERMES_OFFICE_ALLOW_NON_LOOPBACK === "true",
+  trustedProxyHops,
+  deviceRegistryPath: process.env.HERMES_OFFICE_DEVICE_REGISTRY_PATH ?? join(homedir(), ".hermes-office", "devices.json"),
   ...(process.env.HERMES_OFFICE_REMOTE_TOKEN === undefined ? {} : { remoteToken: process.env.HERMES_OFFICE_REMOTE_TOKEN }),
   ...(process.env.HERMES_OFFICE_DESKTOP_CAPABILITY === undefined ? {} : { desktopCapability: process.env.HERMES_OFFICE_DESKTOP_CAPABILITY }),
   ...(desktopOrigins === undefined ? {} : { desktopOrigins }),

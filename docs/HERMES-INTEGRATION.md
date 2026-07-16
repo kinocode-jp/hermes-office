@@ -1,5 +1,11 @@
 # Hermes integration boundary
 
+> **Document status:** This records pinned upstream research, the current
+> adapter boundary, and recommended compatibility behavior. Statements using
+> “should”, “must”, “production”, or “future” are design requirements rather
+> than guarantees that the current pre-1.0 implementation satisfies them. See
+> the root README for the implemented product surface.
+
 Checked against Hermes Agent `main` at commit
 [`1f89f310`](https://github.com/NousResearch/hermes-agent/tree/1f89f3102f701dea3a2706d174197ecbefac20be)
 on 2026-07-16. The locally installed Hermes 0.18.2 checkout was also inspected,

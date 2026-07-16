@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "A lightweight visual control plane for Hermes Agent"
 authors = ["Hermes Office contributors"]
 edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/kinocode-jp/hermes-office"
 
 [lib]
 name = "hermes_office_lib"

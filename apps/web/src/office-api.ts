@@ -273,7 +273,18 @@ async function bootstrapLocalSession(serverUrl: string): Promise<OfficeClientSes
     credentials: "include",
     headers: { Accept: "application/json" }
   });
-  if (response.status === 403 && !isLocalOfficeClient(location)) throw new OfficeDeviceAuthRequiredError();
+  if (response.status === 403 && !isLocalOfficeClient(location)) {
+    const renewal = await fetch(`${serverUrl}/api/v1/auth/device/renew`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json" }
+    });
+    if (renewal.ok) {
+      const renewed = parseOfficeSession(await renewal.json() as unknown);
+      if (renewed) return renewed;
+    }
+    throw new OfficeDeviceAuthRequiredError();
+  }
   if (!response.ok) throw new Error(`Office local authentication failed with HTTP ${response.status}.`);
   const body = await response.json() as unknown;
   const session = parseOfficeSession(body);

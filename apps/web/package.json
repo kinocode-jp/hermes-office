@@ -2,6 +2,12 @@
   "name": "@hermes-office/web",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinocode-jp/hermes-office.git",
+    "directory": "apps/web"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",

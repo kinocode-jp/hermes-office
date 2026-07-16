@@ -1,125 +1,135 @@
 # Hermes Office architecture
 
-## Product boundary
+## Document status
 
-Hermes Office is a standalone control plane and user interface for Hermes Agent. A profile is represented by one office character; a profile may own many concurrent chat sessions. The office scene is navigation and status visualization, while chat, settings, memory, skills, and Kanban use accessible DOM-based views.
+This document separates the current pre-1.0 implementation from future design
+goals. It is not a claim that every roadmap security control exists.
 
-The first-class clients are:
-
-- Tauri 2 desktop, including native lifecycle and local runtime integration;
-- a responsive web/PWA client served by the same Office Server;
-- a future Expo mobile client using the same protocol, not shared desktop layouts.
-
-## System shape
+## Current system
 
 ```text
-Tauri desktop ─┐
-Web / PWA ─────┼── HTTPS + WebSocket ── Office Server ── Hermes adapter ── Hermes
-Future Expo ───┘                         │                  runtime
-                                        ├── profile/global config
-                                        ├── auth, devices, policy
-                                        ├── event journal
-                                        └── audit log
+Tauri WebView ─┐
+Browser / PWA ─┼── HTTP + WebSocket ── Office Server ── loopback ── Hermes Agent
+               │                         │
+               └── same Preact UI        ├── global settings state
+                                         ├── Profile backend pool
+                                         └── bounded in-memory auth/audit state
 ```
 
-Clients never connect directly to Hermes. Office Server owns protocol normalization, redaction, authorization, concurrency control, and audit. This keeps the UI independent of the installed Hermes version and applies an identical policy to desktop and remote clients.
+### Web interface
 
-## Components
+`apps/web` contains the shared Preact/Vite UI and PWA shell. It renders an
+office/profile roster, chat workspaces, Kanban, settings, and responsive mobile
+navigation. The character atlas contains six base characters and directional
+frames; profile order selects the base character and later profile groups use a
+deterministic hue shift. A profile can override its portrait with browser-local
+image data.
 
-### UI clients
-
-The UI consumes snapshot endpoints for initial state and a resumable WebSocket event stream for changes. It keeps the office renderer separate from feature views:
-
-- Canvas renders low-frequency character/activity animation and pauses when hidden.
-- DOM renders virtualized chat history, split panes, settings, memory, skills, and Kanban.
-- The mobile layout replaces the large scene with a profile list when space or power is constrained.
-
-The UI contains no provider credentials, Hermes environment variables, OIDC client secrets, runtime filesystem paths, or raw process output. Read models contain only redacted secret metadata.
+The interface talks to Office Server, not directly to Hermes. Hermes backend
+tokens and backend URLs are not part of the public browser DTOs.
 
 ### Office Server
 
-One native Office Server process is the authoritative boundary. It may be embedded in the desktop installation, but remains a separately testable service. Its responsibilities are:
+`apps/server` is a Node.js HTTP/WebSocket process. It:
 
-1. authenticate browser, desktop, and mobile connections;
-2. calculate device permissions and enforce operation policies;
-3. expose versioned HTTP DTOs and ordered WebSocket events;
-4. adapt Hermes concepts into profiles, sessions, skills, memory, and Kanban;
-5. serialize conflicting writes with revisions and idempotency keys;
-6. store secrets using the operating-system credential store or an encrypted server-side store;
-7. journal security-relevant mutations without recording prompts, memory bodies, or secrets.
+1. serves the production web assets;
+2. authenticates local/Tauri or optional remote-token sessions;
+3. validates and bounds Office HTTP/WebSocket input;
+4. translates supported Profile, chat, settings, and Kanban operations;
+5. supervises a managed loopback Hermes backend or adopts an explicitly
+   configured loopback backend;
+6. starts Profile-pinned Hermes processes for process-scoped settings calls;
+7. stores the Office-owned global skill/shared-context state.
 
-The protocol starts at version 1. API additions should be backward compatible within a major version. Unknown event topics and fields are ignored by clients. A server reports capabilities before feature routes are enabled.
+Authentication sessions, enrolled devices, rate-limit windows, one-time-token
+consumption state, and the bounded authentication audit feed are currently in
+memory and reset with the server. The project does not currently implement a
+general multi-user identity provider, persistent device registry, or
+public-internet deployment mode.
 
-### Hermes adapter and runtime manager
+### Hermes adapter and runtime
 
-The adapter is the only component coupled to Hermes transport or file formats. It performs a startup compatibility handshake and converts Hermes output into stable Office events. Unsupported Hermes versions enter `incompatible`; the server does not guess at write semantics.
+The Office adapter deliberately uses a small part of the stock `hermes serve`
+REST/WebSocket surface. Hermes Profiles remain separate Hermes home directories.
+Chat can use an explicitly selected Profile. Settings endpoints that are
+process-scoped are routed through a lazily created Profile-pinned backend.
 
-Two local runtime modes are supported:
+Managed mode starts a user-installed Hermes executable and supervises it. The
+desktop shell starts the bundled Office Server JavaScript using a Node runtime
+available on the machine. These are local runtime integrations, not bundled,
+signed Hermes or Node distributions.
 
-- `managed-sidecar`: Office Server launches a pinned, integrity-checked Hermes runtime, supplies a private data directory and environment, captures output, and stops the child process on shutdown. Platform packaging may bundle it or download a signed release through a native updater.
-- `existing-local`: Office Server connects to a user-installed Hermes endpoint. The endpoint must resolve to loopback, pass the compatibility handshake, and be protected from accidental use by other local users. Office Server never forwards the Hermes endpoint to clients.
+The exact upstream research and known compatibility uncertainties are in
+[`HERMES-INTEGRATION.md`](HERMES-INTEGRATION.md).
 
-Only one runtime manager owns a managed runtime. A lock file with process identity prevents duplicate launch. Crash restart uses bounded exponential backoff and surfaces the terminal state to the UI.
+### Desktop shell
 
-A remote client connects to a remote Office Server, not to a remote raw Hermes runtime. This preserves profiles, policy, event order, and auditing at the machine where tools execute.
+`apps/desktop` is a small Tauri 2 wrapper. Production builds bundle the generated
+Office Server module and web assets. At launch, the shell generates a random
+capability, starts Office Server on loopback, and makes that capability available
+to its WebView through Tauri IPC. Development uses an explicit fixed local-only
+capability from the Tauri development command.
 
-## Data model and inheritance
+Local builds are developer artifacts. A signed/notarized project release and
+release provenance pipeline do not exist yet; see [`RELEASING.md`](RELEASING.md).
 
-```text
-Global settings
-  ├── defaults and shared context
-  └── shared skill registry
-          ↓ explicit inherit / override / disable
-Profile (one character)
-  ├── profile settings, memory, skills
-  ├── chat session 1
-  ├── chat session 2
-  └── assigned Kanban cards
-```
-
-Global and profile memory are separate documents. They are composed into a session context by the server; multiple profiles never concurrently rewrite one shared Hermes memory file. Every UI field identifies whether its effective value is inherited or overridden.
-
-Kanban is server-owned shared state. Assigning a card to a profile and posting a comment are normal operations; an automation that starts agent work is a distinct explicit command so drag-and-drop cannot accidentally execute tools.
-
-## API behavior
-
-HTTP handles snapshots and commands. WebSocket handles deltas only. Every mutation has:
-
-- a client-generated request ID and idempotency key;
-- an explicit operation name;
-- an optional expected aggregate revision;
-- a server-derived actor, device, network exposure, and permission tier.
-
-The server rejects stale writes with the current revision. Chat sends use a stable client message ID to prevent duplicate prompts after reconnect. Events have a monotonically increasing server sequence. A client reconnects with its last sequence; if retention has elapsed, it receives `resync.required` and reloads snapshots.
-
-Hermes streaming chunks are coalesced before broadcast to avoid rendering and network pressure. Slow clients receive a resync marker instead of an unbounded queue.
-
-## Deployment modes
-
-### Local desktop
-
-Office Server listens on an ephemeral loopback port. Tauri starts it and obtains a single-use bootstrap capability over native IPC. The browser view exchanges that capability for a short-lived, HttpOnly session; it does not persist bearer tokens in local storage. Local-only operations additionally require a verified Tauri/native channel.
-
-### Tailnet
-
-The server remains loopback-only behind Tailscale Serve where possible. HTTPS terminates on the tailnet and Tailscale identity is verified server-side. Tailnet membership identifies a subject but does not automatically grant `owner`; the subject and device receive an explicit tier.
-
-### Public internet
-
-Prefer an outbound server tunnel or a hardened reverse proxy so the workstation has no open inbound port. Public mode requires HTTPS and OIDC Authorization Code with PKCE. Office Server validates issuer, audience, signature, nonce/state, and redirect URI. Browser sessions use Secure, HttpOnly, SameSite cookies and CSRF protection. Public mode refuses to start when OIDC or trusted-proxy configuration is incomplete.
-
-## Repository direction
-
-Recommended ownership boundaries are:
+## Current data model
 
 ```text
-apps/desktop       Tauri shell only
-apps/web           shared desktop/PWA UI
-apps/mobile        future Expo client
-apps/server        Office Server and persistence
-packages/protocol  dependency-free wire contracts
-packages/domain    client-safe state and use cases
-packages/ui        shared DOM UI where form factor permits
+Office global layer
+  ├── selected installed skills
+  └── shared context for new sessions
+          ↓ explicit synchronization
+Hermes Profile (one office character)
+  ├── installed skills / SOUL / memory provider
+  ├── live and stored chat sessions
+  └── assigned shared Kanban cards
 ```
 
-The Tauri shell remains small. Process control, credential-store access, filesystem grants, updater behavior, and local-only proof live in native code. Product behavior remains in the server so remote clients observe the same state.
+The Office global layer is not a Hermes “global profile”. It is Office-owned
+state synchronized through the supported Profile endpoints with recorded
+ownership so a later global change does not claim an independently enabled
+Profile skill. Shared context is injected only when Office creates a new chat
+session.
+
+## Current deployment modes
+
+### Local desktop or browser
+
+Loopback is the supported default. Local browser bootstrap is restricted by
+socket address, Host, Origin, and forwarded-header checks. The Tauri path also
+requires its launch-scoped capability.
+
+### Private-network remote access (experimental)
+
+The same trusted operator may put the loopback listener behind an authenticated
+HTTPS private-network proxy with an exact trusted-hop count. Office can spend a
+configured token once to enroll one in-memory `operator` device, then uses a
+separate device cookie and short-lived HttpOnly session cookie. Cookie mutations
+require CSRF. A local owner can list/revoke the device and active sockets close.
+The server restart boundary resets all of this state. This is not durable device
+administration, general multi-user identity, or a tenant boundary.
+
+### Public internet (unsupported)
+
+OIDC, trusted proxy identity, durable device grants/revocation, recovery, and a
+reviewed public exposure mode are roadmap items. Do not interpret their mention
+in design documents as an implemented feature.
+
+## Roadmap architecture (not implemented contract)
+
+Possible future work includes:
+
+- persistent device identities and configurable viewer/operator/manager/owner
+  grants (the current remote enrollment always creates an `operator`);
+- reauthentication/step-up and native local-presence proof for high-risk work;
+- persistent, append-oriented audit storage;
+- OIDC Authorization Code with PKCE and explicit trusted-proxy identity;
+- version/integrity verification for managed Hermes and Node runtimes;
+- operating-system credential-store integration and local one-shot secret entry;
+- resumable ordered event journals with permission-filtered subscriptions;
+- signed/notarized releases, checksums, SBOMs, and attestations;
+- a separate native mobile client if the responsive PWA becomes insufficient.
+
+Roadmap controls must fail closed and receive a security review before README or
+release notes describe them as supported.

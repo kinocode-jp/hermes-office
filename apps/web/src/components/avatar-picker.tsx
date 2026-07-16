@@ -70,7 +70,13 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
               aria-pressed={selected.kind === "creature" && selected.index === index}
               onClick={() => { setCreatureAvatar(profileId, index); onClose(); }}
             >
-              <CharacterPortrait profileId={profileId} profileName={t("avatar.creature", { number: index + 1 })} profileIndex={profileIndex} characterIndex={index} decorative />
+              <CharacterPortrait
+                profileId={profileId}
+                profileName={t("avatar.creature", { number: index + 1 })}
+                characterIndex={index}
+                decorative
+                {...(profileIndex === undefined ? {} : { profileIndex })}
+              />
             </button>
           ))}
         </div>

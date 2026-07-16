@@ -1,13 +1,13 @@
 import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { EventEnvelope, EventTopic, ProtocolError } from "@hermes-office/protocol";
+import type { EventEnvelope, EventTopic, Operation, ProtocolError } from "@hermes-office/protocol";
 import { WebSocket, WebSocketServer } from "ws";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { OfficeAuth, type OfficeAuditRecord } from "./office-auth.js";
-import { HERMES_CHAT_METHODS, type HermesChatMethod } from "./hermes-chat.js";
 import { isKanbanHttpPath, isKanbanMutation, routeKanbanHttp } from "./kanban-http.js";
 import { isSettingsHttpPath, isSettingsMutation, routeSettingsHttp } from "./settings-http.js";
 import { DeviceAuthBodyError, readDeviceAuthBody } from "./device-auth-http.js";
+import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
 import { StaticWebAssets, type StaticWebAsset } from "./static-web.js";
 import {
   OFFICE_PROTOCOL_VERSION,
@@ -28,6 +28,8 @@ export interface OfficeServerOptions {
   port?: number;
   allowedOrigins?: readonly string[];
   allowNonLoopback?: boolean;
+  trustedProxyHops?: number;
+  deviceRegistryPath?: string;
   maxJsonBytes?: number;
   maxEventBytes?: number;
   maxWebSocketClients?: number;
@@ -63,16 +65,13 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     ...(options.remoteToken === undefined ? {} : { remoteToken: options.remoteToken }),
     ...(options.desktopCapability === undefined ? {} : { desktopCapability: options.desktopCapability }),
     ...(options.desktopOrigins === undefined ? {} : { desktopOrigins: options.desktopOrigins }),
+    ...(options.trustedProxyHops === undefined ? {} : { trustedProxyHops: options.trustedProxyHops }),
+    ...(options.deviceRegistryPath === undefined ? {} : { deviceRegistryPath: options.deviceRegistryPath }),
     onAudit: (record) => publishAudit(record),
   });
 
   if (!isLoopbackHost(host)) {
-    if (!options.allowNonLoopback) {
-      throw new Error(`Refusing non-loopback bind (${host}) without allowNonLoopback.`);
-    }
-    if (!auth.remoteEnabled) {
-      throw new Error(`Refusing non-loopback bind (${host}) without a remote access token.`);
-    }
+    throw new Error(`Refusing direct non-loopback bind (${host}); use a trusted HTTPS reverse proxy to the loopback listener.`);
   }
 
   let sequence = 0;
@@ -90,6 +89,9 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   });
   const eventSocketPrincipals = new WeakMap<WebSocket, string>();
   const chatSocketPrincipals = new WeakMap<WebSocket, string>();
+  const chatSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
+  const sessionBindings = new Map<string, string>();
+  const chatDeviceLimiter = new ChatDeviceRateLimiter();
   publishAudit = (record) => {
     const publicRecord = {
       occurredAt: record.occurredAt,
@@ -154,6 +156,12 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         if (result.outcome === "success") writeJson(response, 200, result.session, maxJsonBytes);
         else if (result.outcome === "rate_limited") {
           writeError(response, 429, "rate_limited", "Too many device authentication attempts.", maxJsonBytes, { "Retry-After": "60" });
+        } else if (result.outcome === "insecure_transport") {
+          writeError(response, 403, "forbidden", "Remote enrollment requires a configured trusted HTTPS proxy.", maxJsonBytes);
+        } else if (result.outcome === "enrollment_consumed") {
+          writeError(response, 409, "conflict", "The one-time enrollment token has already been used.", maxJsonBytes);
+        } else if (result.outcome === "storage_unavailable") {
+          writeError(response, 503, "internal_error", "Device enrollment could not be persisted.", maxJsonBytes);
         } else {
           writeError(response, 401, "unauthenticated", "Device credentials are invalid.", maxJsonBytes);
         }
@@ -167,13 +175,22 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       return;
     }
 
+    if (request.method === "POST" && requestUrl.pathname === "/api/v1/auth/device/renew") {
+      if (requestHasBody(request)) { request.resume(); writeError(response, 413, "bad_request", "Renewal request bodies are not accepted.", maxJsonBytes); return; }
+      const result = auth.renewDevice(request, response);
+      if (result.outcome === "success") writeJson(response, 200, result.session, maxJsonBytes);
+      else if (result.outcome === "insecure_transport") writeError(response, 403, "forbidden", "Remote renewal requires a configured trusted HTTPS proxy.", maxJsonBytes);
+      else writeError(response, 401, "unauthenticated", "Device credential is invalid or revoked.", maxJsonBytes);
+      return;
+    }
+
     if (request.method === "POST" && requestUrl.pathname === "/api/v1/auth/logout") {
       if (requestHasBody(request)) {
         request.resume();
         writeError(response, 413, "bad_request", "Logout request bodies are not accepted.", maxJsonBytes);
       } else if (auth.authenticate(request) === undefined) {
         writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
-      } else if (auth.authorizeMutation(request) === undefined) {
+      } else if (!auth.authorizeOperation(request, "state.read", true).allowed) {
         writeError(response, 403, "forbidden", "A valid Office session and CSRF token are required.", maxJsonBytes);
       } else if (!auth.revoke(request, response)) {
         writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
@@ -194,16 +211,8 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (isKanbanHttpPath(requestUrl.pathname)) {
-      if (auth.authenticate(request) === undefined) {
-        request.resume();
-        writeError(response, 401, "unauthenticated", "Office session is required.", maxJsonBytes);
-        return;
-      }
-      if (isKanbanMutation(request.method) && auth.authorizeMutation(request) === undefined) {
-        request.resume();
-        writeError(response, 403, "forbidden", "A valid CSRF token is required.", maxJsonBytes);
-        return;
-      }
+      const access = auth.authorizeOperation(request, kanbanOperation(request.method, requestUrl.pathname), isKanbanMutation(request.method));
+      if (!access.allowed) { request.resume(); writeAuthorizationError(response, access.reason, maxJsonBytes); return; }
       if (request.method === "GET" && requestHasBody(request)) {
         request.resume();
         writeError(response, 413, "bad_request", "GET request bodies are not accepted.", maxJsonBytes);
@@ -232,16 +241,8 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (isSettingsHttpPath(requestUrl.pathname)) {
-      if (auth.authenticate(request) === undefined) {
-        request.resume();
-        writeError(response, 401, "unauthenticated", "Office session is required.", maxJsonBytes);
-        return;
-      }
-      if (isSettingsMutation(request.method) && auth.authorizeMutation(request) === undefined) {
-        request.resume();
-        writeError(response, 403, "forbidden", "A valid CSRF token is required.", maxJsonBytes);
-        return;
-      }
+      const access = auth.authorizeOperation(request, settingsOperation(request.method, requestUrl.pathname), isSettingsMutation(request.method));
+      if (!access.allowed) { request.resume(); writeAuthorizationError(response, access.reason, maxJsonBytes); return; }
       if (request.method === "GET" && requestHasBody(request)) {
         request.resume();
         writeError(response, 413, "bad_request", "GET request bodies are not accepted.", maxJsonBytes);
@@ -269,6 +270,21 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         const event = makeEvent(++sequence, "profile.changed", result.changed, aggregateId);
         for (const client of websocketServer.clients) sendBoundedEvent(client, event, maxEventBytes);
       }
+      return;
+    }
+
+    const revokeDeviceMatch = /^\/api\/v1\/devices\/([^/]+)\/revoke$/.exec(requestUrl.pathname);
+    if (request.method === "POST" && revokeDeviceMatch !== null) {
+      if (requestHasBody(request)) { request.resume(); writeError(response, 413, "bad_request", "Device revocation request bodies are not accepted.", maxJsonBytes); return; }
+      const access = auth.authorizeOperation(request, "device.revoke", true);
+      if (!access.allowed) { writeAuthorizationError(response, access.reason, maxJsonBytes); return; }
+      let deviceId: string;
+      try { deviceId = decodeURIComponent(revokeDeviceMatch[1]!); }
+      catch { writeError(response, 400, "bad_request", "Device identifier is malformed.", maxJsonBytes); return; }
+      if (!auth.revokeDevice(access.session, deviceId)) { writeError(response, 404, "not_found", "Active device was not found.", maxJsonBytes); return; }
+      for (const client of websocketServer.clients) if (eventSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
+      for (const client of chatWebSocketServer.clients) if (chatSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
+      writeJson(response, 200, { ok: true }, maxJsonBytes);
       return;
     }
 
@@ -319,16 +335,26 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       return;
     }
 
-    const authenticatedSession = auth.authenticate(request);
-    if (authenticatedSession === undefined) {
-      writeError(response, 401, "unauthenticated", "Office session is required.", maxJsonBytes);
+    const readAccess = auth.authorizeOperation(request, "state.read", false);
+    if (!readAccess.allowed) {
+      writeAuthorizationError(response, readAccess.reason, maxJsonBytes);
+      return;
+    }
+    const authenticatedSession = readAccess.session;
+
+    if (requestUrl.pathname === "/api/v1/audit") {
+      const auditAccess = auth.authorizeOperation(request, "audit.read", false);
+      const audit = auditAccess.allowed ? auth.readAudit(auditAccess.session) : undefined;
+      if (audit === undefined) writeError(response, 403, "forbidden", "Owner access is required.", maxJsonBytes);
+      else writeJson(response, 200, audit, maxJsonBytes);
       return;
     }
 
-    if (requestUrl.pathname === "/api/v1/audit") {
-      const audit = auth.readAudit(authenticatedSession);
-      if (audit === undefined) writeError(response, 403, "forbidden", "Owner access is required.", maxJsonBytes);
-      else writeJson(response, 200, audit, maxJsonBytes);
+    if (requestUrl.pathname === "/api/v1/devices") {
+      const deviceAccess = auth.authorizeOperation(request, "device.revoke", false);
+      const devices = deviceAccess.allowed ? auth.listDevices(deviceAccess.session) : undefined;
+      if (devices === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
+      else writeJson(response, 200, devices, maxJsonBytes);
       return;
     }
 
@@ -338,9 +364,16 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         writeError(response, 503, "runtime_unavailable", "Hermes runtime is unavailable.", maxJsonBytes);
         return;
       }
+      let sessionId: string;
+      try { sessionId = decodeURIComponent(historyMatch[1]!); }
+      catch { writeError(response, 400, "bad_request", "Session identifier is malformed.", maxJsonBytes); return; }
+      if (!authenticatedSession.principal.local && sessionBindings.get(sessionId) !== authenticatedSession.principal.id) {
+        writeError(response, 404, "not_found", "Chat history was not found.", maxJsonBytes);
+        return;
+      }
       try {
         const history = await runtimeSource.chat().fetchHistory({
-          sessionId: decodeURIComponent(historyMatch[1]!),
+          sessionId,
           profile: requestUrl.searchParams.get("profile") ?? "default",
           limit: 200,
           offset: 0,
@@ -401,6 +434,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
 
     targetServer.handleUpgrade(request, socket, head, (websocket) => {
       (isChat ? chatSocketPrincipals : eventSocketPrincipals).set(websocket, authenticatedSession.principal.id);
+      if (isChat) chatSocketSessions.set(websocket, authenticatedSession);
       const expiryDelay = Math.max(1, Date.parse(authenticatedSession.expiresAt) - Date.now());
       const expiryTimer = setTimeout(() => websocket.close(1008, "Session expired"), expiryDelay);
       websocket.once("close", () => clearTimeout(expiryTimer));
@@ -426,58 +460,11 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
 
   chatWebSocketServer.on("connection", (client) => {
     if (runtimeSource === undefined) { client.close(1013, "Hermes runtime unavailable"); return; }
-    let chatTransport: ReturnType<HermesRuntimeSource["chat"]>;
-    try {
-      chatTransport = runtimeSource.chat();
-    } catch {
-      client.close(1013, "Hermes runtime unavailable");
-      return;
-    }
-    const queued: string[] = [];
-    let upstream: Awaited<ReturnType<ReturnType<HermesRuntimeSource["chat"]>["connect"]>> | undefined;
-    let closed = false;
-
-    const send = (value: unknown): void => {
-      if (client.readyState !== WebSocket.OPEN) return;
-      const body = serializeJson(value, maxJsonBytes);
-      if (body !== undefined) client.send(body);
-    };
-    const processFrame = async (body: string): Promise<void> => {
-      let frame: unknown;
-      try { frame = JSON.parse(body); } catch { client.close(1007, "Invalid JSON"); return; }
-      if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
-      try {
-        const seed = frame.method === "session.create"
-          ? await runtimeSource.globalInheritance?.().sessionCreateContext()
-          : undefined;
-        const result = await upstream!.request(
-          { method: frame.method, ...(frame.params === undefined ? {} : { params: frame.params }) },
-          seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
-        );
-        send({ jsonrpc: "2.0", id: frame.id, result: result.value });
-      } catch {
-        send({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message: "Hermes request failed." } });
-      }
-    };
-    client.on("message", (data, isBinary) => {
-      if (isBinary) { client.close(1003, "Text frames only"); return; }
-      const body = data.toString();
-      if (upstream === undefined) {
-        if (queued.length >= 8) client.close(1013, "Chat is starting");
-        else queued.push(body);
-      } else void processFrame(body);
+    const officeSession = chatSocketSessions.get(client);
+    if (officeSession === undefined) { client.close(1008, "Office session unavailable"); return; }
+    handleOfficeChatConnection(client, {
+      auth, officeSession, runtimeSource, sessionBindings, maxJsonBytes, deviceLimiter: chatDeviceLimiter,
     });
-    client.on("close", () => { closed = true; void upstream?.close(); });
-    client.on("error", () => { closed = true; void upstream?.close(); });
-
-    void chatTransport.connect((event) => {
-      send({ jsonrpc: "2.0", method: "event", params: event });
-    }).then(async (connection) => {
-      upstream = connection;
-      if (closed) { await connection.close(); return; }
-      send({ jsonrpc: "2.0", method: "office.ready", params: {} });
-      for (const body of queued.splice(0)) await processFrame(body);
-    }).catch(() => client.close(1013, "Hermes chat unavailable"));
   });
 
   return {
@@ -537,10 +524,37 @@ function defaultOriginsForPort(port: number): readonly string[] {
   ];
 }
 
-function isRpcRequest(value: unknown): value is { id: string | number; method: HermesChatMethod; params?: Record<string, unknown> } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const frame = value as Record<string, unknown>;
-  return frame.jsonrpc === "2.0" && (typeof frame.id === "string" || typeof frame.id === "number") && typeof frame.method === "string" && HERMES_CHAT_METHODS.includes(frame.method as HermesChatMethod) && (frame.params === undefined || (typeof frame.params === "object" && frame.params !== null && !Array.isArray(frame.params)));
+function kanbanOperation(method: string | undefined, pathname: string): Operation {
+  if (method === "POST" && pathname.endsWith("/comments")) return "kanban.card.comment";
+  if (method === "POST") return "kanban.card.create";
+  if (method === "PATCH") return "kanban.card.update";
+  return "state.read";
+}
+
+function settingsOperation(method: string | undefined, pathname: string): Operation {
+  if (method === "GET") return "state.read";
+  if (pathname === "/api/v1/settings/global") return "global-settings.update";
+  if (/\/skills\/[^/]+\/content$/.test(pathname)) return "skill.install";
+  if (/\/skills\/[^/]+$/.test(pathname)) return "skill.enable";
+  if (pathname.endsWith("/soul")) return "profile.update";
+  if (pathname.includes("/memory/")) return "memory.update";
+  return "profile.update";
+}
+
+function writeAuthorizationError(
+  response: import("node:http").ServerResponse,
+  reason: "unauthenticated" | "csrf" | "tier" | "step_up_required" | "local_only",
+  maxBytes: number,
+): void {
+  if (reason === "unauthenticated") {
+    writeError(response, 401, "unauthenticated", "Office session is required.", maxBytes);
+    return;
+  }
+  const message = reason === "csrf" ? "A valid CSRF token is required."
+    : reason === "step_up_required" ? "This operation requires verified local access because remote step-up is not available."
+      : reason === "local_only" ? "This operation is local-only."
+        : "The device permission tier does not allow this operation.";
+  writeError(response, 403, "forbidden", message, maxBytes);
 }
 
 export function makeOriginAllowlist(origins: readonly string[]): ReadonlySet<string> {

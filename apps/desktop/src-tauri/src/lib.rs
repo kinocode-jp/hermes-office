@@ -14,6 +14,11 @@ const OFFICE_HOST: &str = "127.0.0.1";
 const OFFICE_PORT: u16 = 4317;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_VERSION_OUTPUT: u64 = 4096;
+const SUPPORTED_NODE_MAJOR: u64 = 22;
+const SUPPORTED_HERMES_MAJOR: u64 = 0;
+const SUPPORTED_HERMES_MINOR: u64 = 18;
 #[cfg(debug_assertions)]
 const DEBUG_DESKTOP_CAPABILITY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
@@ -70,16 +75,23 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
     }
 
     let home = env::var_os("HOME").map(PathBuf::from);
-    let node = find_executable("HERMES_OFFICE_NODE", &node_candidates(home.as_deref()))
-        .ok_or("Node.js was not found in Hermes or a known absolute install path.")?;
-    let hermes = find_executable(
+    let node = find_compatible_executable(
+        "HERMES_OFFICE_NODE",
+        &node_candidates(home.as_deref()),
+        node_version_is_compatible,
+    )?
+    .ok_or("An eligible Node.js 22.x local runtime was not found.")?;
+    let hermes = find_compatible_executable(
         "HERMES_OFFICE_HERMES_EXECUTABLE",
         &hermes_candidates(home.as_deref()),
-    )
-    .ok_or("Hermes Agent was not found in a known absolute install path.")?;
+        hermes_version_is_compatible,
+    )?
+    .ok_or("An eligible, compatible Hermes Agent 0.18.x local runtime was not found.")?;
     let desktop_capability = app.state::<DesktopCapability>().0.clone();
 
     let mut command = Command::new(node);
+    command.env_clear();
+    inherit_safe_environment(&mut command);
     command
         .arg(script)
         .env("HERMES_OFFICE_HOST", OFFICE_HOST)
@@ -196,34 +208,144 @@ fn send_terminate(child: &mut Child) {
     let _ = child.kill();
 }
 
-fn find_executable(override_name: &str, candidates: &[PathBuf]) -> Option<PathBuf> {
+fn find_compatible_executable(
+    override_name: &str,
+    candidates: &[PathBuf],
+    version_is_compatible: fn(&str) -> bool,
+) -> Result<Option<PathBuf>, String> {
     if let Some(value) = env::var_os(override_name).filter(|value| !value.is_empty()) {
         let path = PathBuf::from(value);
-        if path.is_absolute() && is_executable_file(&path) {
-            return Some(path);
+        let executable = validated_local_executable(&path).ok_or_else(|| {
+            format!("{override_name} must identify an eligible absolute executable")
+        })?;
+        let version = run_version_command(&executable)?;
+        if !version_is_compatible(&version) {
+            return Err(format!("{override_name} has an unsupported version"));
+        }
+        return Ok(Some(executable));
+    }
+    for path in candidates {
+        let Some(executable) = validated_local_executable(path) else {
+            continue;
+        };
+        let Ok(version) = run_version_command(&executable) else {
+            continue;
+        };
+        if version_is_compatible(&version) {
+            return Ok(Some(executable));
         }
     }
-    candidates
-        .iter()
-        .find(|path| path.is_absolute() && is_executable_file(path))
-        .cloned()
+    Ok(None)
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
+// This validates a local-install boundary; it does not attest publisher identity
+// or protect against replacement by the same OS user who owns the executable.
+fn validated_local_executable(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let metadata = canonical.metadata().ok()?;
     if !metadata.is_file() {
-        return false;
+        return None;
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = metadata.permissions().mode();
+        let owner = metadata.uid();
+        let effective_user = unsafe { libc::geteuid() };
+        if mode & 0o111 == 0 || mode & 0o022 != 0 || (owner != 0 && owner != effective_user) {
+            return None;
+        }
     }
-    #[cfg(not(unix))]
-    {
-        true
+    Some(canonical)
+}
+
+fn run_version_command(path: &Path) -> Result<String, String> {
+    let mut command = Command::new(path);
+    command
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    inherit_safe_environment(&mut command);
+    let mut child = command.spawn().map_err(|_| "runtime version probe failed".to_owned())?;
+    let stdout = child.stdout.take().ok_or_else(|| "runtime version output unavailable".to_owned())?;
+    let stderr = child.stderr.take().ok_or_else(|| "runtime version output unavailable".to_owned())?;
+    let stdout_reader = thread::spawn(move || read_limited(stdout));
+    let stderr_reader = thread::spawn(move || read_limited(stderr));
+    let deadline = Instant::now() + VERSION_TIMEOUT;
+    let status = loop {
+        match child.try_wait().map_err(|_| "runtime version probe failed".to_owned())? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("runtime version probe timed out".to_owned());
+            }
+        }
+    };
+    let stdout = stdout_reader.join().map_err(|_| "runtime version probe failed".to_owned())??;
+    let stderr = stderr_reader.join().map_err(|_| "runtime version probe failed".to_owned())??;
+    if !status.success() {
+        return Err("runtime version probe failed".to_owned());
+    }
+    let output = if stdout.is_empty() { stderr } else { stdout };
+    String::from_utf8(output)
+        .map(|value| value.trim().to_owned())
+        .map_err(|_| "runtime version output is not UTF-8".to_owned())
+}
+
+fn read_limited(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_VERSION_OUTPUT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "runtime version output could not be read".to_owned())?;
+    if bytes.len() as u64 > MAX_VERSION_OUTPUT {
+        return Err("runtime version output exceeded its limit".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn node_version_is_compatible(output: &str) -> bool {
+    parse_leading_version(output.strip_prefix('v').unwrap_or(output))
+        .is_some_and(|(major, _, _)| major == SUPPORTED_NODE_MAJOR)
+}
+
+fn hermes_version_is_compatible(output: &str) -> bool {
+    let Some(version) = output.lines().find_map(|line| line.strip_prefix("Hermes Agent v")) else {
+        return false;
+    };
+    parse_leading_version(version).is_some_and(|(major, minor, _)| {
+        major == SUPPORTED_HERMES_MAJOR && minor == SUPPORTED_HERMES_MINOR
+    })
+}
+
+fn parse_leading_version(value: &str) -> Option<(u64, u64, u64)> {
+    let version = value.split_whitespace().next()?;
+    let core = version.split(['-', '+']).next()?;
+    let mut components = core.split('.');
+    let result = (
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+    );
+    (components.next().is_none()).then_some(result)
+}
+
+fn inherit_safe_environment(command: &mut Command) {
+    for key in [
+        "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
+        "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "LANG", "LANGUAGE",
+        "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+    ] {
+        if let Some(value) = env::var_os(key).filter(|value| !value.is_empty()) {
+            command.env(key, value);
+        }
     }
 }
 
@@ -265,6 +387,48 @@ mod tests {
         assert!(hermes_candidates(None)
             .iter()
             .all(|path| path.is_absolute()));
+    }
+
+    #[test]
+    fn runtime_versions_are_fail_closed() {
+        assert!(node_version_is_compatible("v22.17.0"));
+        assert!(!node_version_is_compatible("v23.0.0"));
+        assert!(!node_version_is_compatible("v24.0.1"));
+        assert!(!node_version_is_compatible("v21.9.0"));
+        assert!(!node_version_is_compatible("not-node"));
+        assert!(hermes_version_is_compatible("Hermes Agent v0.18.2"));
+        assert!(!hermes_version_is_compatible("Hermes Agent v0.19.0"));
+        assert!(!hermes_version_is_compatible("0.18.2"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn executable_validation_canonicalizes_and_rejects_writable_files() {
+        use std::fs;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = env::temp_dir().join(format!(
+            "hermes-office-runtime-validation-{}-{}",
+            std::process::id(),
+            random_desktop_capability(),
+        ));
+        fs::create_dir(&directory).expect("create fixture directory");
+        let executable = directory.join("runtime");
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").expect("write fixture executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+        let link = directory.join("runtime-link");
+        symlink(&executable, &link).expect("create fixture symlink");
+
+        assert_eq!(
+            validated_local_executable(&link),
+            Some(executable.canonicalize().expect("canonical fixture path")),
+        );
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o777))
+            .expect("make fixture writable");
+        assert_eq!(validated_local_executable(&link), None);
+
+        fs::remove_dir_all(directory).expect("remove fixture directory");
     }
 
     #[test]

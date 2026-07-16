@@ -2,9 +2,12 @@ import { spawn } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_CLI_OUTPUT_BYTES = 8 * 1024;
+const SUPPORTED_HERMES_MAJOR = 0;
+const SUPPORTED_HERMES_MINOR = 18;
 
 export type HermesRuntimeState = "incompatible" | "ready" | "unavailable";
-export type HermesCliState = "available" | "not_configured" | "unavailable";
+export type HermesCliState = "available" | "incompatible" | "not_configured" | "unavailable";
 
 export type HermesRuntimeReason =
   | "invalid_response"
@@ -12,7 +15,8 @@ export type HermesRuntimeReason =
   | "ready"
   | "response_too_large"
   | "timed_out"
-  | "unexpected_status";
+  | "unexpected_status"
+  | "unsupported_version";
 
 export interface HermesRuntimeConfig {
   /** Explicit operator-configured Hermes origin. Credentials are forbidden. */
@@ -130,7 +134,7 @@ export async function probeHermesCli(
 
   return await new Promise((resolve) => {
     let settled = false;
-    let stdout = "";
+    let output = "";
     const finish = (result: HermesCliHealth): void => {
       if (settled) return;
       settled = true;
@@ -139,8 +143,9 @@ export async function probeHermesCli(
     };
     const child = spawn(executable, ["--version"], {
       shell: false,
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      env: createVersionProbeEnvironment(),
     });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -148,22 +153,48 @@ export async function probeHermesCli(
     }, boundedTimeout);
     timer.unref();
 
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      if (stdout.length < 8_192) stdout += chunk.slice(0, 8_192 - stdout.length);
-    });
+    const capture = (chunk: Buffer): void => {
+      if (output.length >= MAX_CLI_OUTPUT_BYTES) return;
+      output += chunk.toString("utf8", 0, MAX_CLI_OUTPUT_BYTES - output.length);
+    };
+    child.stdout.on("data", capture);
+    child.stderr.on("data", capture);
     child.on("error", () => finish({ state: "unavailable" }));
     child.on("close", (code) => {
       if (code !== 0) {
         finish({ state: "unavailable" });
         return;
       }
-      const match = /^Hermes Agent v([^\s]+)/m.exec(stdout);
-      finish(match?.[1] === undefined
-        ? { state: "unavailable" }
-        : { state: "available", version: match[1] });
+      const match = /^Hermes Agent v([^\s]+)/m.exec(output);
+      if (match?.[1] === undefined) {
+        finish({ state: "unavailable" });
+        return;
+      }
+      finish(isSupportedHermesVersion(match[1])
+        ? { state: "available", version: match[1] }
+        : { state: "incompatible", version: match[1] });
     });
   });
+}
+
+export function isSupportedHermesVersion(version: string): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version);
+  if (match === null) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  return Number.isSafeInteger(major) && Number.isSafeInteger(minor) && Number.isSafeInteger(patch)
+    && major === SUPPORTED_HERMES_MAJOR
+    && minor === SUPPORTED_HERMES_MINOR;
+}
+
+function createVersionProbeEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const key of ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"] as const) {
+    const value = source[key];
+    if (value !== undefined && value !== "" && !value.includes("\0")) environment[key] = value;
+  }
+  return environment;
 }
 
 async function probeStatus(
@@ -196,6 +227,9 @@ async function probeStatus(
 
     const status = parseHermesStatus(body);
     if (status === undefined) return { state: "incompatible", reason: "invalid_response" };
+    if (!isSupportedHermesVersion(status.version)) {
+      return { state: "incompatible", reason: "unsupported_version" };
+    }
 
     return {
       state: "ready",

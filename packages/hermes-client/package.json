@@ -2,6 +2,12 @@
   "name": "@hermes-office/hermes-client",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinocode-jp/hermes-office.git",
+    "directory": "packages/hermes-client"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
