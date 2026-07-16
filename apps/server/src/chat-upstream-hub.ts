@@ -138,6 +138,12 @@ export class ChatUpstreamHub {
       this.discardBufferedSession(sessionId);
       return result;
     }
+    if (lease.liveSessionIds.length === 0) {
+      // A durable-only lease represents create/resume I/O that has not yet
+      // returned its authoritative live id. Closing nothing must not release
+      // that pending claim or report a synthetic success.
+      throw new Error(lease.pending ? "Hermes session identity is still pending." : "Hermes live session is unavailable.");
+    }
     const outcome = await this.#closeLease(owner, lease, 2, sessionId);
     if (!outcome.completed) throw new Error("Hermes session close could not be confirmed.");
     return outcome.targetResult ?? { method: "session.close", value: { closed: true } };
@@ -163,6 +169,10 @@ export class ChatUpstreamHub {
     } finally {
       this.#coordinator.finishUnownedLiveClose(liveSessionId, closeToken);
     }
+  }
+
+  resetAmbiguousSessionResult(): void {
+    this.#resetGeneration(this.#generation);
   }
 
   async #closeLease(

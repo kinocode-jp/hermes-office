@@ -165,6 +165,24 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     }
   };
 
+  const cleanupRejectedSessionResult = async (
+    binding: "conflict" | "invalid",
+    liveSessionId: string | undefined,
+  ): Promise<boolean> => {
+    if (liveSessionId === undefined) {
+      if (binding === "invalid") chatHub.resetAmbiguousSessionResult();
+      return false;
+    }
+    chatHub.discardBufferedSession(liveSessionId);
+    if (sessionCoordinator.ownerForLive(liveSessionId) !== undefined) return true;
+    try {
+      await chatHub.closeDuplicateSession(liveSessionId);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const processFrame = async (body: string, receivedAt: number, receivedOrder: number): Promise<void> => {
     let frame: unknown;
     try { frame = JSON.parse(body); } catch { client.close(1007, "Invalid JSON"); return; }
@@ -236,17 +254,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         const binding = sessionCoordinator.bind(sessionClaim, identities, frame.method === "session.create");
         if (binding !== "bound") {
           sessionCoordinator.releaseFailedClaim(sessionClaim);
-          if (binding === "conflict" && identities.liveSessionId !== undefined) {
-            // A different live id is a separate Hermes session, not a pane
-            // alias. Never route its early events to the established pane.
-            chatHub.discardBufferedSession(identities.liveSessionId);
-            if (sessionCoordinator.ownerForLive(identities.liveSessionId) === undefined) {
-              try { await chatHub.closeDuplicateSession(identities.liveSessionId); }
-              catch { return; }
-            }
-          } else if (identities.liveSessionId !== undefined) {
-            chatHub.discardBufferedSession(identities.liveSessionId);
-          }
+          if (!await cleanupRejectedSessionResult(binding, identities.liveSessionId)) return;
           if (!closed && binding === "conflict") sendSessionInUse(send, frame.id);
           else if (!closed) sendRpcError(send, frame.id, -32000, "Hermes returned an invalid session identity.");
           return;

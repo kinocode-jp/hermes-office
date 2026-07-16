@@ -237,6 +237,8 @@ test("disconnect cleanup releases absent sessions but retains transport-failed c
   invalid.rpc(34, "session.create", { profile: "coder", title: "Invalid identity" });
   await settle();
   assert.equal(invalid.errorCode(34), -32000);
+  assert.equal(hermes.sessionCloseRequests.includes("live-invalid"), true);
+  assert.equal(hermes.isLive("live-invalid"), false, "invalid create identities must not leave an unowned Hermes live session");
   invalid.rpc(35, "session.resume", { session_id: "invalid-reuse", profile: "coder" });
   await settle();
   assert.equal(invalid.errorCode(35), undefined);
@@ -611,7 +613,7 @@ class LegacyMultiLiveCoordinator extends ChatSessionCoordinator {
   }
 
   #snapshot(): ChatSessionLeaseSnapshot {
-    return { token: this.#token, owner: this.#owner, liveSessionIds: [...this.#liveIds] };
+    return { token: this.#token, owner: this.#owner, liveSessionIds: [...this.#liveIds], pending: false };
   }
 }
 

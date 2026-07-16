@@ -12,6 +12,7 @@ export type ChatSessionLeaseSnapshot = {
   readonly token: symbol;
   readonly owner: ChatSessionOwner;
   readonly liveSessionIds: readonly string[];
+  readonly pending: boolean;
 };
 
 type Lease = {
@@ -202,7 +203,7 @@ export class ChatSessionCoordinator {
   }
 
   #snapshot(lease: Lease): ChatSessionLeaseSnapshot {
-    return { token: lease.token, owner: lease.owner, liveSessionIds: [...lease.liveIds] };
+    return { token: lease.token, owner: lease.owner, liveSessionIds: [...lease.liveIds], pending: lease.pending.size > 0 };
   }
 
   #leaseFor(claim: ChatSessionClaim): Lease | undefined {
