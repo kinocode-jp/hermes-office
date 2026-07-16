@@ -2,6 +2,7 @@ import { useMemo } from "preact/hooks";
 import { t } from "../i18n";
 import { activeSessionId, mobileInspectorOpen, mobileWorkspaceOpen, openSession, profileList, sessions, openSessionIds } from "../store";
 import { ChatPane } from "./chat-pane";
+import { InfoTip } from "./info-tip";
 
 export function ChatWorkspace() {
   const openSessions = useMemo(
@@ -13,7 +14,7 @@ export function ChatWorkspace() {
     return (
       <section class="workspace-empty">
         <span>{t("workspace.emptyKicker")}</span>
-        <p>{t("workspace.empty")}</p>
+        <InfoTip text={t("workspace.empty")} />
       </section>
     );
   }

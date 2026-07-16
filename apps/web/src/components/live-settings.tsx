@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import type { SettingsTab } from "../domain";
 import { localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { AccessAudit } from "./access-audit";
+import { InfoTip } from "./info-tip";
 import {
   SettingsApiError,
   loadGlobalSettings,
@@ -256,7 +257,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
             <textarea value={globalSkills} onInput={(event) => setGlobalSkills(event.currentTarget.value)} rows={7} spellcheck={false} placeholder={"browser\ncoding\nresearch"} />
           </div>
           <div class="settings-ledger settings-ledger--wide">
-            <SectionHead code="UTIL-03" title={t("settings.sharedContext")} note={t("settings.noSecrets")} />
+            <SectionHead code="UTIL-03" title={t("settings.sharedContext")} info={t("settings.noSecrets")} />
             <textarea value={globalContext} onInput={(event) => setGlobalContext(event.currentTarget.value)} rows={8} placeholder={t("settings.contextPlaceholder")} />
             <ActionBar dirty={globalDirty} retryPending={global?.skillSync.state === "pending"} busy={busy === "global"} onSave={saveGlobal} />
           </div>
@@ -290,18 +291,16 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
         </div>
       ) : visibleTab === "soul" ? (
         <div class="settings-ledger settings-ledger--editor">
-          <SectionHead code="IDENTITY" title={`${profile.profile} / SOUL.md`} note={`revision ${shortRevision(profile.soul.revision)}`} />
+          <SectionHead code="IDENTITY" title={`${profile.profile} / SOUL.md`} note={`revision ${shortRevision(profile.soul.revision)}`} info={t("settings.soulNote")} />
           {profile.soul.redacted && <p class="settings-warning">{t("settings.redacted")}</p>}
           <textarea value={soulDraft} onInput={(event) => setSoulDraft(event.currentTarget.value)} rows={18} disabled={profile.soul.redacted} spellcheck={false} />
-          <p class="settings-footnote">{t("settings.soulNote")}</p>
           <ActionBar dirty={soulDirty && !profile.soul.redacted} busy={busy === "soul"} onSave={saveSoul} />
         </div>
       ) : (
         <div class="live-settings__memory">
           <div class="memory-gauge">
-            <p>{t("settings.builtinMemory")}</p>
+            <p>{t("settings.builtinMemory")} <InfoTip text={t("settings.memoryReadOnly")} align="start" /></p>
             <div><span><b>{formatBytes(profile.memory.builtin.memoryBytes)}</b>MEMORY.md</span><i /><span><b>{formatBytes(profile.memory.builtin.userBytes)}</b>USER.md</span></div>
-            <small>{t("settings.memoryReadOnly")}</small>
           </div>
           <div class="settings-ledger">
             <SectionHead code="MEM-01" title={t("settings.memoryProvider")} note={profile.memory.activeProvider || t("settings.builtin")} />
@@ -342,12 +341,18 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
   );
 }
 
-function SectionHead({ code, title, note }: { code: string; title: string; note: string }) {
-  return <header class="settings-section-head"><span>{code}</span><h2>{title}</h2><small>{note}</small></header>;
+function SectionHead({ code, title, note, info }: { code: string; title: string; note?: string; info?: string }) {
+  return (
+    <header class="settings-section-head">
+      <span>{code}</span>
+      <h2>{title}{info && <> <InfoTip text={info} align="end" /></>}</h2>
+      {note && <small>{note}</small>}
+    </header>
+  );
 }
 
 function SwitchRow({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange(value: boolean): void }) {
-  return <label class="settings-switch"><span><b>{label}</b><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.currentTarget.checked)} /></label>;
+  return <label class="settings-switch"><span><b>{label} <InfoTip text={detail} align="start" /></b></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.currentTarget.checked)} /></label>;
 }
 
 function ActionBar({ dirty, retryPending = false, busy, onSave }: { dirty: boolean; retryPending?: boolean; busy: boolean; onSave(): void }) {

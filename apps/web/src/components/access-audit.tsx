@@ -6,6 +6,7 @@ import {
   type AccessAuditSnapshot,
 } from "../audit-api";
 import { locale, t, type TranslationKey } from "../i18n";
+import { InfoTip } from "./info-tip";
 import "./access-audit.css";
 
 const operationLabels: Record<AccessAuditEntry["operation"], TranslationKey> = {
@@ -60,7 +61,7 @@ export function AccessAudit() {
         <div class={`access-audit__signal is-${accessMode.toLowerCase()}`} aria-hidden="true"><span /></div>
         <div class="access-audit__title">
           <p>{t("audit.eyebrow")}</p>
-          <h2 id="access-audit-title">{t("audit.title")}</h2>
+          <h2 id="access-audit-title">{t("audit.title")} <InfoTip text={t("audit.footer")} align="start" side="bottom" /></h2>
         </div>
         <div class="access-audit__current">
           <span>SESSION · {accessMode}</span>
@@ -92,7 +93,6 @@ export function AccessAudit() {
         )}
       </div>
 
-      <footer>{t("audit.footer")}</footer>
     </section>
   );
 }

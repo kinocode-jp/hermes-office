@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { avatarForProfile, resetProfileAvatar, setCreatureAvatar, setCustomAvatar } from "../avatar-preferences";
 import { CharacterPortrait } from "./character-portrait";
+import { InfoTip } from "./info-tip";
 import { t } from "../i18n";
 
 type AvatarPickerProps = {
@@ -51,10 +52,13 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section ref={dialogRef} class="avatar-picker" role="dialog" aria-modal="true" aria-labelledby="avatar-picker-title" aria-describedby="avatar-picker-description">
         <header>
-          <div><small>{t("avatar.kicker")}</small><h3 id="avatar-picker-title">{t("avatar.title", { name: profileName })}</h3></div>
+          <div>
+            <small>{t("avatar.kicker")}</small>
+            <h3 id="avatar-picker-title">{t("avatar.title", { name: profileName })} <InfoTip text={`${t("avatar.description")} ${t("avatar.note")}`} align="end" /></h3>
+          </div>
           <button type="button" onClick={onClose} aria-label={t("common.close")}>×</button>
         </header>
-        <p id="avatar-picker-description">{t("avatar.description")}</p>
+        <p id="avatar-picker-description" class="visually-hidden">{t("avatar.description")}</p>
         <div class="avatar-choice-grid">
           {Array.from({ length: 12 }, (_, index) => (
             <button
@@ -75,7 +79,6 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
           <button type="button" class="avatar-reset-button" onClick={() => { resetProfileAvatar(profileId); onClose(); }}>{t("avatar.reset")}</button>
         </div>
         {error && <p class="avatar-picker-error" role="alert">{error}</p>}
-        <small class="avatar-picker-note">{t("avatar.note")}</small>
       </section>
     </div>
   );

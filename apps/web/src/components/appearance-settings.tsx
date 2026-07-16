@@ -9,6 +9,7 @@ import {
   type Theme,
 } from "../appearance";
 import { locale } from "../i18n";
+import { InfoTip } from "./info-tip";
 
 const themeDetails: Record<Theme, { name: string; ja: string; en: string }> = {
   paper: { name: "Paper", ja: "白", en: "Pure white" },
@@ -27,14 +28,14 @@ export function AppearanceSettings() {
     title: "表示",
     theme: "テーマ",
     textSize: "文字サイズ",
-    hint: "画面全体の文字と操作要素を、この端末向けに保存します。",
+    hint: "文字の大きさをこの端末向けに保存します。オフィスの配置は変わりません。",
   } : {
     trigger: "Appearance settings",
     close: "Close",
     title: "Appearance",
     theme: "Theme",
     textSize: "Text size",
-    hint: "The whole workspace is resized and saved on this device.",
+    hint: "Text size is saved on this device without changing the office layout.",
   };
 
   useEffect(() => {
@@ -104,7 +105,7 @@ export function AppearanceSettings() {
 
             <section aria-labelledby="font-heading">
               <div class="appearance-section-title">
-                <h3 id="font-heading">{copy.textSize}</h3>
+                <h3 id="font-heading">{copy.textSize} <InfoTip text={copy.hint} align="start" /></h3>
                 <output>{Math.round(activeFontScale.value * 100)}%</output>
               </div>
               <div class="font-size-choices" role="group" aria-label={copy.textSize}>
@@ -121,7 +122,6 @@ export function AppearanceSettings() {
                   </button>
                 ))}
               </div>
-              <p class="appearance-hint">{copy.hint}</p>
             </section>
           </aside>
         </>

@@ -60,8 +60,13 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             <p>{session.historyState === "loading" ? t("chat.loadingSaved") : !canSend ? t("chat.connectingLive") : t("chat.firstInstruction", { name: profile.name })}</p>
           </div>
         ) : session.messages.map((message) => (
-          <div key={message.id} class={`message message-${message.from} message-${message.status ?? "complete"}`}>
-            <span class="message-source">{message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
+          <div
+            key={message.id}
+            class={`message message-${message.from} message-${message.status ?? "complete"}`}
+            style={message.from === "agent" ? { "--agent-color": profile.color } : undefined}
+          >
+            <span class="visually-hidden">{message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
+            {message.from === "tool" && <span class="message-tool-mark" aria-hidden="true">⚙</span>}
             <p>{message.body || (message.status === "streaming" ? "…" : "")}</p>
             <time>{message.at}</time>
           </div>

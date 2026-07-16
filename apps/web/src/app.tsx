@@ -5,11 +5,12 @@ import { OfficeScene } from "./components/office-scene";
 import { ProfilePanel } from "./components/profile-panel";
 import { DeviceLogin } from "./components/device-login";
 import { AppearanceSettings } from "./components/appearance-settings";
+import { ProfileCommand } from "./components/profile-command";
 import { isLocalOfficeClient } from "./auth-state";
 import { logoutRemoteDevice } from "./office-api";
 import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
 import type { Surface } from "./domain";
-import { activeSurface, mobileWorkspaceOpen, officeAccess, officeConnection, profileList, selectedProfile, settingsTab } from "./store";
+import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, officeAccess, officeConnection, openSessionIds, profileList, selectedProfile, settingsTab } from "./store";
 
 const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
   { id: "office", glyph: "⌂", label: "nav.office" },
@@ -25,14 +26,14 @@ export function App() {
     ? (connection.eventStream === "open" ? t("connection.live") : t("connection.connected"))
     : connection.state === "error" ? t("connection.fallback") : connection.state;
   return (
-    <div class="app-shell">
+    <div class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}>
       <header class="topbar">
         <a class="brand" href="#" aria-label={t("app.home")}>
           <span class="brand-mark">H</span>
           <span><b>Hermes</b><small>Office</small></span>
         </a>
         <div class={`runtime-status runtime-${connection.state}`} title={localizeRuntimeMessage(connection.message)}>
-          <i />Office Server <span>{connectionLabel}</span>
+          <i /><span class="rt-label">Office Server</span> <span class="rt-state">{connectionLabel}</span>
         </div>
         <div class="top-actions">
           <AppearanceSettings />
@@ -45,7 +46,15 @@ export function App() {
           >
             {locale.value === "ja" ? "EN" : "日本語"}
           </button>
-          <button class="quiet-button">⌘ K</button>
+          <ProfileCommand />
+          <button
+            class="quiet-button compact-inspector-button"
+            type="button"
+            aria-label={t("profile.details")}
+            onClick={() => { mobileInspectorOpen.value = true; }}
+          >
+            ◧
+          </button>
           {isLocalOfficeClient(location)
             ? <button class="user-button" title={t("app.localOwner")}>KO</button>
             : <button class="user-button" type="button" aria-label={t("app.logout")} onClick={() => void logoutRemoteDevice().then(() => location.reload())}>⇥</button>}
@@ -80,7 +89,7 @@ export function App() {
       </main>
 
       <ProfilePanel />
-      <div class={`workspace-drawer ${mobileWorkspaceOpen.value ? "is-mobile-open" : ""}`}><ChatWorkspace /></div>
+      <div class={`workspace-drawer ${openSessionIds.value.length === 0 ? "is-empty" : ""} ${mobileWorkspaceOpen.value ? "is-mobile-open" : ""}`}><ChatWorkspace /></div>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { authenticateRemoteDevice } from "../office-api";
 import { localizeRuntimeMessage, t } from "../i18n";
+import { InfoTip } from "./info-tip";
 import {
   officeAccess,
   retryOfficeServer,
@@ -59,7 +60,7 @@ export function DeviceLogin() {
               <input name="device-name" type="text" defaultValue="My device" minLength={1} maxLength={64} autoComplete="off" required />
             </label>
             <label>
-              <span>{t("login.token")}</span>
+              <span>{t("login.token")} <InfoTip text={t("login.tokenNote")} align="start" /></span>
               <input name="access-token" type="password" minLength={1} maxLength={4096} autoComplete="off" autoCapitalize="none" spellcheck={false} required />
             </label>
             <button type="submit" disabled={submitting || retrySeconds > 0}>
@@ -71,7 +72,6 @@ export function DeviceLogin() {
         {access.state === "unavailable" && (
           <button class="device-retry-button" type="button" onClick={retryOfficeServer}>{t("login.reconnect")}</button>
         )}
-        <p class="device-login-note">{t("login.tokenNote")}</p>
       </section>
     </main>
   );

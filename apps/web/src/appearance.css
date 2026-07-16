@@ -15,7 +15,12 @@
   --surface-strong: #e7edf1;
   --shadow: rgba(38, 54, 72, .13);
   --font-scale: 1;
-  --font-scale-inverse: 1;
+  --text-utility: calc(13px * var(--font-scale));
+  --text-label: calc(14px * var(--font-scale));
+  --text-body: calc(15px * var(--font-scale));
+  --text-chat: calc(16px * var(--font-scale));
+  --target-desktop: 40px;
+  --target-mobile: 44px;
 }
 
 :root[data-theme="mint"] {
@@ -52,17 +57,11 @@
   --shadow: rgba(0, 0, 0, .28);
 }
 
-:root[data-font-scale="0-9"] { --font-scale: .9; --font-scale-inverse: 1.111111; }
-:root[data-font-scale="1"] { --font-scale: 1; --font-scale-inverse: 1; }
-:root[data-font-scale="1-1"] { --font-scale: 1.1; --font-scale-inverse: .909091; }
-:root[data-font-scale="1-2"] { --font-scale: 1.2; --font-scale-inverse: .833333; }
-
 html, body { height: 100%; }
 #app {
-  width: calc(100% * var(--font-scale-inverse));
-  height: calc(100% * var(--font-scale-inverse));
-  min-width: calc(320px * var(--font-scale-inverse));
-  zoom: var(--font-scale);
+  width: 100%;
+  height: 100%;
+  min-width: 320px;
 }
 .app-shell { height: 100%; }
 
@@ -79,21 +78,11 @@ html, body { height: 100%; }
 :root:not([data-theme="midnight"]) .side-rail button.is-active,
 :root:not([data-theme="midnight"]) .mobile-chat-tabs button.is-active { color: var(--night); background: var(--paper); }
 
-:root:not([data-theme="midnight"]) .office-floor {
-  border-color: color-mix(in srgb, var(--aqua) 24%, var(--line));
-  background: color-mix(in srgb, var(--surface) 80%, #dfeff5);
-  box-shadow: inset 0 0 50px color-mix(in srgb, var(--aqua) 7%, transparent), 0 12px 34px var(--shadow);
-}
-:root:not([data-theme="midnight"]) .floor-grid { opacity: .13; }
-:root:not([data-theme="midnight"]) .window-wall { border-color: var(--surface-strong); background: var(--surface-raised); }
-:root:not([data-theme="midnight"]) .window-wall span { border-color: var(--line); background: linear-gradient(165deg, #dff7f2, #eaf1f7 55%, #fff1cf); }
-:root:not([data-theme="midnight"]) .meeting-table { color: var(--muted); border-color: #b8c9d5; background: #d9e5ec; }
-:root:not([data-theme="midnight"]) .library-shelf { border-color: #a9bcc7; background: #d4e1e7; }
-:root:not([data-theme="midnight"]) .desk { background: #a9bcc8; box-shadow: 0 9px 0 #778e9d; }
-:root:not([data-theme="midnight"]) .desk-edge { background: #8499a7; }
-:root:not([data-theme="midnight"]) .monitor { border-color: #506775; background: #dff1ed; box-shadow: 0 4px 0 #506775; }
-:root:not([data-theme="midnight"]) .profile-pod { color: var(--paper); }
-:root:not([data-theme="midnight"]) .office-legend { background: color-mix(in srgb, var(--surface-raised) 92%, transparent); box-shadow: 0 5px 18px var(--shadow); }
+:root:not([data-theme="midnight"]) .ow-wall { border-color: var(--surface-strong); background: var(--surface-raised); }
+:root:not([data-theme="midnight"]) .ow-wall > span:not(.ow-board) { border-color: var(--line); background: linear-gradient(165deg, #dff7f2, #eaf1f7 55%, #fff1cf); }
+:root:not([data-theme="midnight"]) .ow-board { background: color-mix(in srgb, var(--amber) 10%, var(--surface-raised)); }
+:root:not([data-theme="midnight"]) .ow-char-name { color: var(--paper); background: color-mix(in srgb, var(--surface-raised) 80%, transparent); box-shadow: 0 1px 6px var(--shadow); }
+:root:not([data-theme="midnight"]) .info-tip__bubble { box-shadow: 0 10px 30px var(--shadow); }
 
 :root:not([data-theme="midnight"]) .profile-panel,
 :root:not([data-theme="midnight"]) .workspace-drawer,
@@ -125,7 +114,6 @@ html, body { height: 100%; }
 :root:not([data-theme="midnight"]) .device-login-shell { background: var(--night); }
 :root:not([data-theme="midnight"]) .device-login-card { background: var(--surface-raised); box-shadow: 14px 14px 0 var(--surface-strong), 0 28px 70px var(--shadow); }
 :root:not([data-theme="midnight"]) .device-login-form input { color: var(--paper); background: var(--surface); }
-:root:not([data-theme="midnight"]) .device-login-note { color: var(--muted); }
 
 :root:not([data-theme="midnight"]) .live-settings { background: linear-gradient(125deg, color-mix(in srgb, var(--aqua) 5%, transparent), transparent 38%), var(--night); }
 :root:not([data-theme="midnight"]) .settings-ledger,
@@ -206,7 +194,6 @@ html, body { height: 100%; }
 .font-size-choices button.is-active { color: var(--night); background: var(--paper); }
 .font-size-choices button span { font-family: Georgia, serif; font-weight: 800; }
 .font-size-choices button small { font: 600 7px/1 ui-monospace, monospace; }
-.appearance-hint { margin: 10px 0 0; color: var(--muted); font-size: 8px; line-height: 1.55; }
 
 @media (max-width: 767px) {
   .appearance-panel { inset: auto 0 0; width: 100%; max-height: min(76vh, 570px); padding: 18px max(16px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); border-width: 1px 0 0; box-shadow: 0 -18px 48px rgba(16, 29, 44, .22); }
@@ -214,4 +201,115 @@ html, body { height: 100%; }
 
 @media (prefers-reduced-motion: reduce) {
   .appearance-panel, .appearance-trigger { transition: none; }
+}
+
+/* Readable operational typography. Pixel geometry stays fixed; text scales independently. */
+body { font-size: var(--text-body); line-height: 1.5; }
+
+.runtime-status,
+.quiet-button,
+.side-rail button,
+.eyebrow,
+.profile-panel-head p,
+.panel-tabs button,
+.profile-live-route > span,
+.profile-live-route dt,
+.profile-live-route dd,
+.session-list small,
+.tag-list i,
+.workspace-empty span,
+.kanban-sync,
+.kanban-column header span,
+.kanban-column header strong,
+.task-id,
+.task-saving,
+.task-assignee-select,
+.task-card footer,
+.scope-badge,
+.card-kicker,
+.connection-protocol,
+.snapshot-facts span,
+.appearance-panel > header p,
+.profile-command > header span,
+.appearance-section-title small,
+.appearance-section-title output,
+.font-size-choices button small {
+  font-size: var(--text-utility);
+}
+
+.profile-live-route p,
+.memory-card p,
+.chat-header b,
+.chat-connection-note,
+.chat-connection-note button,
+.chat-interaction pre,
+.interaction-actions button,
+.clarify-answer button,
+.clarify-answer input,
+.interaction-error,
+.interaction-note,
+.empty-chat p,
+.kanban-column header b,
+.task-summary,
+.task-assignee-select select,
+.task-comment-form input,
+.task-comment-form button,
+.column-empty,
+.connection-row span,
+.theme-choice b,
+.theme-choice small,
+.profile-command-list small,
+.profile-command-list small {
+  font-size: var(--text-label);
+}
+
+.message p,
+.composer textarea,
+.control-card textarea,
+.memory-card textarea { font-size: var(--text-chat); line-height: 1.65; }
+.profile-command > input { font-size: var(--text-chat); }
+
+.task-card h3,
+.chat-interaction h3,
+.appearance-section-title h3 { font-size: var(--text-body); }
+
+.quiet-button,
+.user-button,
+.icon-button,
+.panel-tabs button,
+.profile-live-route button,
+.new-chat-button,
+.primary-button,
+.secondary-button,
+.session-list button,
+.interaction-actions button,
+.clarify-answer button,
+.composer button,
+.kanban-sync button,
+.task-comment-form button,
+.appearance-trigger,
+.appearance-panel > header button { min-height: var(--target-desktop); }
+
+:root[lang="ja"] .runtime-status,
+:root[lang="ja"] .quiet-button,
+:root[lang="ja"] .side-rail button,
+:root[lang="ja"] .shift-readout,
+:root[lang="ja"] .panel-tabs button,
+:root[lang="ja"] .session-list small,
+:root[lang="ja"] .kanban-sync,
+:root[lang="ja"] .task-assignee-select {
+  font-family: "IBM Plex Sans JP", system-ui, sans-serif;
+  letter-spacing: 0;
+}
+
+@media (max-width: 767px) {
+  .side-rail button,
+  .mobile-close,
+  .mobile-workspace-bar button,
+  .mobile-chat-tabs button,
+  .appearance-trigger,
+  .language-button { min-height: var(--target-mobile); }
+  .mobile-workspace-bar button,
+  .mobile-workspace-bar b,
+  .mobile-chat-tabs button { font-size: var(--text-utility); }
 }

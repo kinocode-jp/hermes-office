@@ -199,7 +199,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, serverUrl: string)
     return {
       id: live.id,
       name: live.name,
-      role: previous?.role ?? "Hermes Profile",
+      role: previous?.role ?? "",
       status: activityToStatus(live.activity),
       color: previous?.color ?? palette[index % palette.length]!,
       sessions: sessionCounts.get(live.id) ?? live.activeSessionCount,

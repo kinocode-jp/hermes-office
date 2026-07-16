@@ -3,7 +3,7 @@ import { signal } from "@preact/signals";
 export const APPEARANCE_STORAGE_KEY = "hermes-office:appearance:v1";
 
 export const themes = ["paper", "mint", "midnight"] as const;
-export const fontScales = [0.9, 1, 1.1, 1.2] as const;
+export const fontScales = [1, 1.125, 1.25, 1.5] as const;
 
 export type Theme = (typeof themes)[number];
 export type FontScale = (typeof fontScales)[number];
@@ -41,7 +41,7 @@ function readPreferences(): AppearancePreferences {
     const candidate = JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? "null") as Partial<AppearancePreferences> | null;
     return {
       theme: isTheme(candidate?.theme) ? candidate.theme : defaults.theme,
-      fontScale: isFontScale(candidate?.fontScale) ? candidate.fontScale : defaults.fontScale,
+      fontScale: normalizeFontScale(candidate?.fontScale),
     };
   } catch {
     return defaults;
@@ -76,6 +76,14 @@ function isTheme(value: unknown): value is Theme {
 
 function isFontScale(value: unknown): value is FontScale {
   return typeof value === "number" && (fontScales as readonly number[]).includes(value);
+}
+
+function normalizeFontScale(value: unknown): FontScale {
+  if (isFontScale(value)) return value;
+  if (value === 0.9) return 1;
+  if (value === 1.1) return 1.125;
+  if (value === 1.2) return 1.25;
+  return defaults.fontScale;
 }
 
 function themeColor(theme: Theme): string {

@@ -76,7 +76,6 @@
 .avatar-picker-actions input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
 .avatar-picker-actions button { min-height: 40px; padding: 0 10px; border: 1px solid var(--line); background: transparent; font-size: 10px; font-weight: 750; cursor: pointer; }
 .avatar-picker-actions .avatar-upload-button { color: var(--night); border-color: var(--aqua); background: var(--aqua); }
-.avatar-picker-note { display: block; margin-top: 9px; color: var(--muted); font-size: 8px; line-height: 1.5; }
 .avatar-picker-error { margin: 10px 0 0; padding: 8px 10px; color: var(--coral); border-left: 2px solid var(--coral); background: color-mix(in srgb, var(--coral) 8%, transparent); font-size: 10px; line-height: 1.5; }
 
 @media (max-width: 540px) {

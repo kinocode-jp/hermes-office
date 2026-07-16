@@ -13,6 +13,7 @@ import {
 import { StatusPill } from "./status-pill";
 import { CharacterPortrait } from "./character-portrait";
 import { AvatarPicker } from "./avatar-picker";
+import { InfoTip } from "./info-tip";
 import { useState } from "preact/hooks";
 import { t, type TranslationKey } from "../i18n";
 
@@ -80,15 +81,13 @@ function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
     <div class="panel-section">
       <article class="profile-live-route">
         <span>{copy.code}</span>
-        <h3>{t(copy.title)}</h3>
-        <p>{t(copy.description)}</p>
+        <h3>{t(copy.title)} <InfoTip text={`${t(copy.description)} ${t("profile.liveNote")}`} align="end" side="bottom" /></h3>
         <dl>
           <div><dt>{t("profile.target")}</dt><dd>{profile.name}</dd></div>
           <div><dt>{t("profile.id")}</dt><dd>{profile.id}</dd></div>
         </dl>
         <button type="button" onClick={() => openLiveSettings(tab)}>{t("profile.openLive")}</button>
       </article>
-      <p class="setting-note">{t("profile.liveNote")}</p>
     </div>
   );
 }
@@ -105,7 +104,7 @@ export function ProfilePanel() {
           <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--panel" decorative />
           <span>{t("profile.change")}</span>
         </button>
-        <div><h2>{profile.name}</h2><p>{profile.role}</p></div>
+        <div><h2>{profile.name}</h2>{profile.role && <p>{profile.role}</p>}</div>
         <StatusPill status={profile.status} />
       </header>
       <nav class="panel-tabs" aria-label={t("profile.settings")}>
