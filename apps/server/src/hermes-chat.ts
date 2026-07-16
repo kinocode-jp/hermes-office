@@ -73,12 +73,6 @@ export interface HermesHistorySummary {
   total: number;
 }
 
-export interface HermesCanonicalSession {
-  requestedSessionId: string;
-  sessionId: string;
-  path: string[];
-}
-
 export type HermesHistoryRole = "assistant" | "system" | "tool" | "user";
 
 export interface HermesHistoryMessageDto {
@@ -107,8 +101,7 @@ export interface HermesHistoryDto {
 }
 
 export interface HermesChatTransport {
-  connect(onEvent: (event: HermesChatEvent) => void): Promise<HermesChatConnection>;
-  resolveSessionTip(request: Pick<HermesHistoryRequest, "sessionId" | "profile">): Promise<HermesCanonicalSession>;
+  connect(onEvent: (event: HermesChatEvent) => void, onClosed?: () => void): Promise<HermesChatConnection>;
   inspectHistory(request: Pick<HermesHistoryRequest, "sessionId" | "profile">): Promise<HermesHistorySummary>;
   fetchHistory(request: HermesHistoryRequest): Promise<HermesHistoryDto>;
 }
@@ -140,8 +133,7 @@ export function createHermesChatTransport(
 ): HermesChatTransport {
   const config = normalizeOptions(options);
   return {
-    connect: async (onEvent) => await openConnection(config, onEvent),
-    resolveSessionTip: async (request) => await resolveSessionTip(config, request),
+    connect: async (onEvent, onClosed) => await openConnection(config, onEvent, onClosed),
     inspectHistory: async (request) => await inspectHistory(config, request),
     fetchHistory: async (request) => await fetchHistory(config, request),
   };
@@ -166,6 +158,7 @@ interface PendingRequest {
 async function openConnection(
   config: NormalizedOptions,
   onEvent: (event: HermesChatEvent) => void,
+  onClosed?: () => void,
 ): Promise<HermesChatConnection> {
   const target = new URL("/api/ws", config.baseUrl);
   target.protocol = "ws:";
@@ -188,6 +181,7 @@ async function openConnection(
       item.reject(error);
     }
     pending.clear();
+    try { onClosed?.(); } catch { /* A lifecycle listener cannot break transport cleanup. */ }
   };
 
   websocket.on("message", (data, isBinary) => {
@@ -291,43 +285,6 @@ async function openConnection(
       });
     },
   };
-}
-
-async function resolveSessionTip(
-  config: NormalizedOptions,
-  request: Pick<HermesHistoryRequest, "sessionId" | "profile">,
-): Promise<HermesCanonicalSession> {
-  const sessionId = requiredId(request.sessionId, "sessionId");
-  const profile = requiredProfile(request.profile);
-  const target = new URL(`/api/sessions/${encodeURIComponent(sessionId)}/latest-descendant`, config.baseUrl);
-  target.searchParams.set("profile", profile);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  timer.unref();
-  try {
-    const response = await fetch(target, {
-      headers: { Accept: "application/json", "X-Hermes-Session-Token": config.sessionToken },
-      redirect: "error",
-      signal: controller.signal,
-    });
-    if (!response.ok) throw publicError("backend_rejected", response.status === 404 ? "Chat session was not found." : "Hermes rejected the session lookup.");
-    const raw = JSON.parse(await readBoundedText(response, config.maxHistoryBytes)) as unknown;
-    const canonicalSessionId = isRecord(raw) ? safeId(raw.session_id) : undefined;
-    if (!isRecord(raw) || raw.requested_session_id !== sessionId || canonicalSessionId === undefined
-      || !Array.isArray(raw.path) || raw.path.length === 0 || raw.path.length > 256
-      || raw.path.some((item) => safeId(item) === undefined)
-      || raw.path[0] !== sessionId || raw.path.at(-1) !== raw.session_id
-      || new Set(raw.path).size !== raw.path.length) {
-      throw publicError("backend_rejected", "Hermes returned an invalid canonical session identity.");
-    }
-    return { requestedSessionId: sessionId, sessionId: canonicalSessionId, path: raw.path as string[] };
-  } catch (error) {
-    if (error instanceof HermesChatTransportError) throw error;
-    if (isAbortError(error)) throw publicError("timed_out", "Chat session lookup timed out.");
-    throw publicError("backend_rejected", "Unable to resolve the chat session.");
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 async function inspectHistory(

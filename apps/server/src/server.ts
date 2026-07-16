@@ -9,6 +9,7 @@ import { isSettingsHttpPath, isSettingsMutation, routeSettingsHttp } from "./set
 import { DeviceAuthBodyError, readDeviceAuthBody } from "./device-auth-http.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
 import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
+import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
 import { routeInventoryHttp } from "./inventory-http.js";
 import { StaticWebAssets, type StaticWebAsset } from "./static-web.js";
@@ -98,6 +99,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const chatSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
   const chatDeviceLimiter = new ChatDeviceRateLimiter();
   const chatSessionCoordinator = new ChatSessionCoordinator();
+  const chatUpstreamHub = runtimeSource === undefined ? undefined : new ChatUpstreamHub(runtimeSource, chatSessionCoordinator, maxJsonBytes);
   publishAudit = (record) => {
     const publicRecord = {
       occurredAt: record.occurredAt,
@@ -478,11 +480,11 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   });
 
   chatWebSocketServer.on("connection", (client) => {
-    if (runtimeSource === undefined) { client.close(1013, "Hermes runtime unavailable"); return; }
+    if (runtimeSource === undefined || chatUpstreamHub === undefined) { client.close(1013, "Hermes runtime unavailable"); return; }
     const officeSession = chatSocketSessions.get(client);
     if (officeSession === undefined) { client.close(1008, "Office session unavailable"); return; }
     handleOfficeChatConnection(client, {
-      auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter, sessionCoordinator: chatSessionCoordinator,
+      auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter, sessionCoordinator: chatSessionCoordinator, chatHub: chatUpstreamHub,
     });
   });
 
@@ -523,6 +525,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
           });
         });
       }).then(async () => {
+        await chatUpstreamHub?.close();
         await auth.flushRegistryWrites();
         await runtimeSource?.close();
       }),

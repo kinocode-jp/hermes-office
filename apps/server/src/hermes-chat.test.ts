@@ -12,84 +12,6 @@ import {
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
-test("resolveSessionTip authenticates a read-only exact-ID lookup and returns the full canonical path", async (t) => {
-  let observedUrl = "";
-  let observedToken = "";
-  const server = createServer((request, response) => {
-    observedUrl = request.url ?? "";
-    observedToken = String(request.headers["x-hermes-session-token"] ?? "");
-    writeJson(response, {
-      requested_session_id: "ancestor-1",
-      session_id: "rotated-tip-3",
-      path: ["ancestor-1", "tip-2", "rotated-tip-3"],
-      changed: true,
-    });
-  });
-  const origin = await listen(server);
-  t.after(() => server.close());
-
-  const identity = await createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN }).resolveSessionTip({
-    sessionId: "ancestor-1",
-    profile: "coder",
-  });
-
-  assert.equal(observedToken, TOKEN);
-  assert.equal(observedUrl, "/api/sessions/ancestor-1/latest-descendant?profile=coder");
-  assert.deepEqual(identity, {
-    requestedSessionId: "ancestor-1",
-    sessionId: "rotated-tip-3",
-    path: ["ancestor-1", "tip-2", "rotated-tip-3"],
-  });
-});
-
-test("resolveSessionTip rejects aliases and malformed canonical paths", async (t) => {
-  const server = createServer((request, response) => {
-    const id = request.url?.split("/")[3];
-    if (id === "title-alias") {
-      writeJson(response, { requested_session_id: "full-session-id", session_id: "full-session-id", path: ["full-session-id"] });
-      return;
-    }
-    if (id === "broken-path") {
-      writeJson(response, { requested_session_id: "broken-path", session_id: "tip-2", path: ["broken-path"] });
-      return;
-    }
-    writeJson(response, { requested_session_id: "duplicate-path", session_id: "duplicate-path", path: ["duplicate-path", "duplicate-path"] });
-  });
-  const origin = await listen(server);
-  t.after(() => server.close());
-  const transport = createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN });
-
-  for (const sessionId of ["title-alias", "broken-path", "duplicate-path"]) {
-    await assert.rejects(
-      transport.resolveSessionTip({ sessionId, profile: "coder" }),
-      (error: unknown) => error instanceof HermesChatTransportError
-        && error.code === "backend_rejected"
-        && error.message === "Hermes returned an invalid canonical session identity.",
-    );
-  }
-});
-
-test("resolveSessionTip fails closed on partial and timed-out lookups", async (t) => {
-  const partial = createServer((_request, response) => {
-    response.writeHead(200, { "Content-Type": "application/json" });
-    response.end('{"requested_session_id":"partial-id"');
-  });
-  const partialOrigin = await listen(partial);
-  t.after(() => partial.close());
-  await assert.rejects(
-    createHermesChatTransport({ baseUrl: partialOrigin, sessionToken: TOKEN }).resolveSessionTip({ sessionId: "partial-id", profile: "coder" }),
-    (error: unknown) => error instanceof HermesChatTransportError && error.code === "backend_rejected",
-  );
-
-  const timedOut = createServer(() => undefined);
-  const timeoutOrigin = await listen(timedOut);
-  t.after(() => timedOut.close());
-  await assert.rejects(
-    createHermesChatTransport({ baseUrl: timeoutOrigin, sessionToken: TOKEN, timeoutMs: 250 }).resolveSessionTip({ sessionId: "slow-id", profile: "coder" }),
-    (error: unknown) => error instanceof HermesChatTransportError && error.code === "timed_out",
-  );
-});
-
 test("fetchHistory authenticates internally and returns a bounded secret-safe DTO", async (t) => {
   const observedUrls: string[] = [];
   let observedToken = "";
@@ -286,6 +208,35 @@ test("chat boundary returns public errors without reflecting Hermes details", as
     (error: unknown) => error instanceof HermesChatTransportError && error.message === "Hermes rejected the chat request." && !error.message.includes("private"),
   );
   await connection.close();
+});
+
+test("chat transport reports one lifecycle close and rejects pending RPC", async (t) => {
+  let terminateUpstream!: () => void;
+  let closedCount = 0;
+  const http = createServer((_request, response) => { response.writeHead(404).end(); });
+  const sockets = new WebSocketServer({ noServer: true });
+  http.on("upgrade", (request, socket, head) => sockets.handleUpgrade(request, socket, head, (websocket) => sockets.emit("connection", websocket, request)));
+  sockets.on("connection", (websocket) => { terminateUpstream = () => websocket.terminate(); });
+  const origin = await listen(http);
+  t.after(() => {
+    for (const client of sockets.clients) client.terminate();
+    sockets.close();
+    http.close();
+  });
+
+  const connection = await createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN }).connect(
+    () => undefined,
+    () => { closedCount += 1; },
+  );
+  const pending = connection.request({ method: "session.interrupt", params: { session_id: "live-pending" } });
+  terminateUpstream();
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof HermesChatTransportError && error.code === "backend_closed",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closedCount, 1);
+  assert.equal(connection.closed, true);
 });
 
 async function listen(server: ReturnType<typeof createServer>): Promise<string> {

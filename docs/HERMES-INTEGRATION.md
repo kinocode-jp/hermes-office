@@ -72,9 +72,18 @@ UI code must preserve two session identities:
   used by REST history, rename, archive, export, and later resume.
 
 Treating those ids as interchangeable creates reconnect and compression bugs.
-Hermes can rotate a stored id during compression; REST exposes
-`/api/sessions/{id}/latest-descendant`, and `session.resume` resolves the live
-continuation tip.
+Hermes can rotate a stored id during compression. Office forwards the exact
+inventory id to native `session.resume` and learns the authoritative durable and
+live identities from its response. Do not rewrite resume through
+`/api/sessions/{id}/latest-descendant`: that REST traversal also follows newer
+branch, delegate, and tool children that native resume intentionally excludes.
+
+Office Server multiplexes every Browser Chat WebSocket over one Hermes gateway
+connection. This keeps Hermes' process-global live transport stable while
+Office routes each normalized live event only to the Browser socket that owns
+that live id. A Browser disconnect explicitly closes only its owned live
+sessions; only Server shutdown or shared-upstream failure closes the Hermes
+connection and reaps all `close_on_disconnect` sessions.
 
 ## Live chat contract
 

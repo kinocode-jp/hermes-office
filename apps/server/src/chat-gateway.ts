@@ -5,6 +5,7 @@ import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { HERMES_CHAT_METHODS, type HermesChatEvent, type HermesChatMethod } from "./hermes-chat.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
 import { ChatSessionCoordinator, type ChatSessionClaim } from "./chat-session-coordinator.js";
+import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 
 const MAX_IN_FLIGHT = 4;
 const MAX_QUEUE = 16;
@@ -44,6 +45,7 @@ export interface ChatGatewayDependencies {
   limits?: Partial<ChatGatewayLimits>;
   now?: () => number;
   sessionCoordinator: ChatSessionCoordinator;
+  chatHub: ChatUpstreamHub;
 }
 
 type PendingResponseState = "pending" | "claimed" | "consumed";
@@ -95,9 +97,9 @@ export class ChatDeviceRateLimiter {
 }
 
 export function handleOfficeChatConnection(client: WebSocket, dependencies: ChatGatewayDependencies): void {
-  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter, sessionCoordinator } = dependencies;
-  if (!(sessionCoordinator instanceof ChatSessionCoordinator)) {
-    client.close(1011, "Chat session coordinator unavailable");
+  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter, sessionCoordinator, chatHub } = dependencies;
+  if (!(sessionCoordinator instanceof ChatSessionCoordinator) || !(chatHub instanceof ChatUpstreamHub)) {
+    client.close(1011, "Chat session hub unavailable");
     return;
   }
   const canApprovePermanently = auth.effectiveAccess(officeSession).allowedOperations.includes("chat.approval.permanent");
@@ -108,19 +110,22 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     ...dependencies.limits,
     maxBufferedBytes: Math.max(maxJsonBytes, dependencies.limits?.maxBufferedBytes ?? MAX_BUFFERED_BYTES),
   };
-  let chatTransport: ReturnType<HermesRuntimeSource["chat"]>;
-  try { chatTransport = runtimeSource.chat({ maxEventBytes: maxJsonBytes }); }
-  catch { client.close(1013, "Hermes runtime unavailable"); return; }
-
   const queued: Array<{ body: string; receivedAt: number; receivedOrder: number }> = [];
   const pendingApprovals = new Map<string, PendingApproval[]>();
   const pendingClarifications = new Map<string, PendingResponse>();
-  let upstream: Awaited<ReturnType<ReturnType<HermesRuntimeSource["chat"]>["connect"]>> | undefined;
+  let hubReady = false;
   let closed = false;
   let inFlight = 0;
   let chronology = 0;
   let rateTokens = limits.socketRateCapacity;
   let rateUpdatedAt = now();
+  let cleanupChain = Promise.resolve();
+
+  const cleanupOwnedSessions = (): void => {
+    cleanupChain = cleanupChain.then(async () => { await chatHub.closeOwnerSessions(sessionOwner); }, async () => {
+      await chatHub.closeOwnerSessions(sessionOwner);
+    });
+  };
 
   const closeForBackpressure = (): void => {
     if (!closed && client.readyState === WebSocket.OPEN) {
@@ -166,12 +171,12 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
     let claim: PendingClaim | undefined;
     let sessionClaim: ChatSessionClaim | undefined;
-    let canonicalResumeId: string | undefined;
     try {
       const access = auth.authorizeSession(officeSession, chatOperation(frame.method));
       if (!access.allowed) { sendRpcError(send, frame.id, -32003, "Operation is not permitted for this device."); return; }
       const targetId = chatTargetId(frame.method, frame.params);
-      if (frame.method !== "session.resume" && targetId !== undefined && sessionCoordinator.isLiveOwnedByAnother(sessionOwner, targetId)) {
+      if (frame.method !== "session.resume" && frame.method !== "approval.respond"
+        && targetId !== undefined && sessionCoordinator.isOwnedByAnother(sessionOwner, targetId)) {
         sendSessionInUse(send, frame.id);
         return;
       }
@@ -211,38 +216,52 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       }
       if (frame.method === "session.resume" && typeof frame.params?.session_id === "string") {
         const profile = typeof frame.params.profile === "string" ? frame.params.profile : "default";
-        const identity = await chatTransport.resolveSessionTip({ sessionId: frame.params.session_id, profile });
-        if (closed) return;
-        sessionClaim = sessionCoordinator.claimResume(sessionOwner, profile, identity);
+        sessionClaim = sessionCoordinator.claimResume(sessionOwner, profile, frame.params.session_id);
         if (sessionClaim === undefined) { sendSessionInUse(send, frame.id); return; }
-        canonicalResumeId = identity.sessionId;
       }
       const seed = frame.method === "session.create"
         ? await runtimeSource.globalInheritance?.().sessionCreateContext()
         : undefined;
-      if (closed) return;
-      const result = await upstream!.request(
-        { method: frame.method, ...upstreamRequestParams(frame.method, frame.params, canonicalResumeId) },
+      if (closed) { sessionCoordinator.releaseFailedClaim(sessionClaim); return; }
+      const result = await chatHub.request(
+        sessionOwner,
+        { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
         seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
       );
-      if (closed) return;
+      let boundLiveId: string | undefined;
       if (sessionClaim !== undefined) {
-        const binding = sessionCoordinator.bind(sessionClaim, sessionIdentities(result.value), frame.method === "session.create");
+        const identities = sessionIdentities(result.value);
+        const binding = sessionCoordinator.bind(sessionClaim, identities, frame.method === "session.create");
         if (binding !== "bound") {
-          if (binding === "conflict") sendSessionInUse(send, frame.id);
-          else sendRpcError(send, frame.id, -32000, "Hermes returned an invalid session identity.");
-          client.close(1013, "Session ownership conflict");
+          sessionCoordinator.releaseFailedClaim(sessionClaim);
+          if (!closed && binding === "conflict") sendSessionInUse(send, frame.id);
+          else if (!closed) sendRpcError(send, frame.id, -32000, "Hermes returned an invalid session identity.");
+          if (binding === "conflict" && identities.liveSessionId !== undefined) {
+            // A native resume can reveal a new live alias for a lease that an
+            // existing pane already owns. The duplicate caller stays rejected,
+            // but any pre-response events belong to that established owner.
+            chatHub.flushLiveSession(identities.liveSessionId);
+          } else if (identities.liveSessionId !== undefined) {
+            chatHub.discardBufferedSession(identities.liveSessionId);
+          }
           return;
         }
+        boundLiveId = identities.liveSessionId;
       }
       if (frame.method === "session.close" && result.value.closed === true && typeof frame.params?.session_id === "string") {
         sessionCoordinator.releaseSession(sessionOwner, frame.params.session_id);
+        chatHub.discardBufferedSession(frame.params.session_id);
       }
       const promoted = consumeClaim(claim, pendingApprovals, pendingClarifications);
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
-      send({ jsonrpc: "2.0", id: frame.id, result: result.value });
+      if (!closed) {
+        send({ jsonrpc: "2.0", id: frame.id, result: result.value });
+        if (boundLiveId !== undefined) chatHub.flushLiveSession(boundLiveId);
+      } else {
+        cleanupOwnedSessions();
+      }
     } catch {
-      if (!closed) sessionCoordinator.releaseFailedClaim(sessionClaim);
+      sessionCoordinator.releaseFailedClaim(sessionClaim);
       const promoted = restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       sendRpcError(send, frame.id, -32000, "Hermes request failed.");
@@ -250,7 +269,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   };
 
   const drain = (): void => {
-    while (!closed && upstream !== undefined && inFlight < limits.maxInFlight && queued.length > 0) {
+    while (!closed && hubReady && inFlight < limits.maxInFlight && queued.length > 0) {
       const { body, receivedAt, receivedOrder } = queued.shift()!;
       inFlight += 1;
       void processFrame(body, receivedAt, receivedOrder).finally(() => { inFlight -= 1; drain(); });
@@ -276,34 +295,14 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     queued.length = 0;
     pendingApprovals.clear();
     pendingClarifications.clear();
-    if (upstream === undefined) {
-      sessionCoordinator.releaseOwner(sessionOwner);
-      return;
-    }
-    try {
-      // A failed or hung upstream close keeps the lease fail-closed until process restart.
-      // Releasing on a timer could let another socket steal a transport that is still live.
-      void upstream.close().then(
-        () => sessionCoordinator.releaseOwner(sessionOwner),
-        () => undefined,
-      );
-    } catch { /* Retain ownership when close cannot be proven. */ }
+    chatHub.detach(sessionOwner);
+    cleanupOwnedSessions();
   };
   client.on("close", shutdown);
   client.on("error", shutdown);
 
-  void chatTransport.connect((event) => {
+  const handleUpstreamEvent = (event: HermesChatEvent): void => {
     if (closed) return;
-    if (event.sessionId !== undefined && sessionCoordinator.isLiveOwnedByAnother(sessionOwner, event.sessionId)) {
-      client.close(1013, "Session ownership conflict");
-      return;
-    }
-    if (event.type === "session.info" && event.sessionId !== undefined && typeof event.payload.storedSessionId === "string") {
-      if (sessionCoordinator.bindLiveSessionAlias(sessionOwner, event.sessionId, event.payload.storedSessionId) === "conflict") {
-        client.close(1013, "Session ownership conflict");
-        return;
-      }
-    }
     if (event.type === "approval.request" && event.sessionId !== undefined) {
       const normalizedEvent = normalizeApprovalEvent(event, canApprovePermanently);
       const choices = Array.isArray(normalizedEvent.payload.choices)
@@ -334,9 +333,23 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       trimOldest(pendingClarifications, 128);
     }
     sendWire(serializeOfficeChatEvent(event, maxJsonBytes));
-  }).then(async (connection) => {
-    upstream = connection;
-    if (closed) { await connection.close(); return; }
+  };
+
+  void chatHub.attach(sessionOwner, {
+    onEvent: handleUpstreamEvent,
+    onUnavailable: (liveSessionIds) => {
+      if (closed) return;
+      for (const liveId of liveSessionIds) {
+        sendWire(serializeOfficeChatEvent({
+          type: "error", sessionId: liveId,
+          payload: { status: "resync_required", message: "Hermes chat restarted. Reload session history." },
+        }, maxJsonBytes));
+      }
+      client.close(1013, "Hermes chat restarted; reload history");
+    },
+  }).then(() => {
+    if (closed) { chatHub.detach(sessionOwner); return; }
+    hubReady = true;
     send({ jsonrpc: "2.0", method: "office.ready", params: {} });
     drain();
   }).catch(() => client.close(1013, "Hermes chat unavailable"));
@@ -431,12 +444,10 @@ function expireApproval(approvals: Map<string, PendingApproval[]>, key: string, 
 function upstreamRequestParams(
   method: HermesChatMethod,
   params: Record<string, unknown> | undefined,
-  canonicalResumeId?: string,
 ): { params?: Record<string, unknown> } {
   if (params === undefined) return {};
   if (method === "session.create" || method === "session.resume") return { params: {
     ...params,
-    ...(method === "session.resume" && canonicalResumeId !== undefined ? { session_id: canonicalResumeId } : {}),
     close_on_disconnect: true,
   } };
   if (method !== "approval.respond") return { params };
