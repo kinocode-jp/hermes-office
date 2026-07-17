@@ -120,6 +120,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .quiet-button, .user-button, .icon-button { min-width: 36px; min-height: 36px; border: 1px solid var(--line); background: transparent; cursor: pointer; }
 .quiet-button { color: var(--muted); font: 600 11px/1 ui-monospace, monospace; }
 .user-button { color: var(--night); background: var(--paper); font-weight: 800; }
+.user-button--display { display: grid; place-items: center; cursor: default; }
 
 .side-rail {
   grid-area: rail;
@@ -426,7 +427,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   }
   .topbar { gap: 10px; padding: env(safe-area-inset-top) max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left)); }
   .profile-command-trigger { display: none; }
-  .brand { min-width: 0; }
+  .brand { min-width: var(--target-mobile); min-height: var(--target-mobile); }
   .runtime-status { margin-left: auto; gap: 0; }
   .runtime-status span, .quiet-button { display: none; }
   /* Anchored bubbles overflow a 375px viewport; show them as a banner under the topbar. */
@@ -443,9 +444,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .main-stage { padding-bottom: env(safe-area-inset-bottom); }
   .profile-panel { position: fixed; inset: 0; display: none; z-index: 80; border: 0; }
   .profile-panel.is-mobile-open { display: block; }
-  .profile-panel-head { grid-template-columns: 36px 58px minmax(0, 1fr) auto; min-height: 82px; }
+  .profile-panel-head { grid-template-columns: 44px 58px minmax(0, 1fr) auto; min-height: 82px; }
   .character-portrait--panel { width: 56px; height: 56px; }
-  .mobile-close { display: block; min-width: 34px; min-height: 34px; border: 1px solid var(--line); background: transparent; }
+  .mobile-close { display: block; min-width: var(--target-mobile); min-height: var(--target-mobile); border: 1px solid var(--line); background: transparent; }
   .workspace-drawer { position: fixed; inset: calc(52px + env(safe-area-inset-top)) 0 calc(84px + env(safe-area-inset-bottom)); display: none; z-index: 70; }
   .workspace-drawer.is-mobile-open { display: block; }
   .chat-workspace-shell { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }

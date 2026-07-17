@@ -162,6 +162,61 @@ test("a failed explicit close preserves ordered live events and interaction stat
   assert.deepEqual(hermes.sessionCloseRequests, ["live-owner", "live-owner"]);
 });
 
+test("an accepted approval ACK crossing a failed close consumes only the original pending approval", async () => {
+  const hermes = new CloseSettlementFakeHermes({ failSessionClose: true });
+  const approvalGate = deferred<void>();
+  const closeGate = deferred<void>();
+  hermes.delayFirstApprovalResponse(approvalGate.promise);
+  hermes.delayFirstSessionClose(closeGate.promise);
+  const { coordinator, dependencies } = setup(hermes);
+  const owner = new FakeWebSocket();
+  handleOfficeChatConnection(owner as unknown as WebSocket, dependencies);
+  await settle(4);
+  owner.rpc(30, "session.resume", { session_id: "owner", profile: "coder" });
+  await settle(6);
+
+  hermes.emitEvent({
+    type: "approval.request", sessionId: "live-owner",
+    payload: { choices: ["once", "deny"], allowPermanent: false },
+  });
+  await settle(2);
+  const firstApprovalId = owner.approvalId("live-owner");
+  owner.rpc(31, "approval.respond", {
+    session_id: "live-owner", approval_id: firstApprovalId, choice: "once",
+  });
+  await waitFor(() => hermes.approvalChoices.length === 1);
+
+  hermes.emitEvent({
+    type: "approval.request", sessionId: "live-owner",
+    payload: { choices: ["once", "deny"], allowPermanent: false },
+  });
+  owner.rpc(32, "session.close", { session_id: "live-owner" });
+  await waitFor(() => hermes.sessionCloseRequests.length === 1);
+  assert.equal(coordinator.liveLeaseToken(coordinator.ownerForLive("live-owner")!, "live-owner"), undefined);
+
+  approvalGate.resolve();
+  await waitFor(() => owner.hasResult(31) && owner.approvalIds("live-owner").length === 2);
+  const secondApprovalId = owner.approvalIds("live-owner")[1]!;
+  assert.notEqual(secondApprovalId, firstApprovalId);
+  assert.deepEqual(hermes.approvalChoices, ["once"]);
+
+  closeGate.resolve();
+  await waitFor(() => owner.errorCode(32) === -32000);
+  assert.ok(coordinator.ownerForLive("live-owner"), "the failed close retains the original routing lease");
+
+  owner.rpc(33, "approval.respond", {
+    session_id: "live-owner", approval_id: firstApprovalId, choice: "deny",
+  });
+  await waitFor(() => owner.errorCode(33) === -32004);
+  assert.deepEqual(hermes.approvalChoices, ["once"], "the consumed Office ID cannot reach the next Hermes approval");
+
+  owner.rpc(34, "approval.respond", {
+    session_id: "live-owner", approval_id: secondApprovalId, choice: "deny",
+  });
+  await waitFor(() => owner.hasResult(34));
+  assert.deepEqual(hermes.approvalChoices, ["once", "deny"]);
+});
+
 function setup(hermes: CloseSettlementFakeHermes) {
   const coordinator = new ChatSessionCoordinator();
   const runtime = hermes.runtime();
@@ -180,12 +235,14 @@ function setup(hermes: CloseSettlementFakeHermes) {
 class CloseSettlementFakeHermes {
   readonly sessionCloseRequests: string[] = [];
   readonly interactionRequests: string[] = [];
+  readonly approvalChoices: string[] = [];
   connectionCloseCount = 0;
   readonly #closedValue: boolean;
   readonly #failSessionClose: boolean;
   readonly #live = new Set<string>();
   #onEvent: ((event: HermesChatEvent) => void) | undefined;
   #firstSessionCloseGate: Promise<void> | undefined;
+  #firstApprovalResponseGate: Promise<void> | undefined;
   #connectionCloseGate: Promise<void> | undefined;
   #connectionClosed = false;
 
@@ -220,6 +277,7 @@ class CloseSettlementFakeHermes {
   }
 
   delayFirstSessionClose(gate: Promise<void>): void { this.#firstSessionCloseGate = gate; }
+  delayFirstApprovalResponse(gate: Promise<void>): void { this.#firstApprovalResponseGate = gate; }
   delayConnectionClose(gate: Promise<void>): void { this.#connectionCloseGate = gate; }
   emit(liveSessionId: string, text: string): void {
     this.#onEvent?.({ type: "message.delta", sessionId: liveSessionId, payload: { text } });
@@ -246,6 +304,12 @@ class CloseSettlementFakeHermes {
     }
     if (request.method === "approval.respond" || request.method === "clarify.respond") {
       this.interactionRequests.push(request.method);
+      if (request.method === "approval.respond") {
+        this.approvalChoices.push(String(request.params?.choice));
+        const gate = this.#firstApprovalResponseGate;
+        this.#firstApprovalResponseGate = undefined;
+        await gate;
+      }
       return request.method === "approval.respond"
         ? { method: request.method, value: { resolved: true } }
         : { method: request.method, value: { status: "ok" } };
@@ -273,6 +337,14 @@ class FakeWebSocket extends EventEmitter {
   hasMethod(method: string): boolean { return this.frames().some((frame) => frame.method === method); }
   errorCode(id: number): number | undefined {
     return (this.frames().find((frame) => frame.id === id)?.error as { code?: number } | undefined)?.code;
+  }
+  hasResult(id: number): boolean {
+    return this.frames().some((frame) => frame.id === id && frame.result !== undefined);
+  }
+  approvalId(liveSessionId: string): string { return this.approvalIds(liveSessionId).at(-1) ?? ""; }
+  approvalIds(liveSessionId: string): string[] {
+    return this.events(liveSessionId).flatMap((event) => event.type === "approval.request"
+      && typeof event.payload?.approvalId === "string" ? [event.payload.approvalId] : []);
   }
   events(liveSessionId: string): Array<{ type?: string; payload?: Record<string, unknown> }> {
     return this.frames().flatMap((frame) => {

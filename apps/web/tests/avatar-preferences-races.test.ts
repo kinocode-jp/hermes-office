@@ -26,6 +26,13 @@ test("avatar picker keyboard focus skips the transparent file input", async () =
   assert.match(source, /onClick=\{\(\) => inputRef\.current\?\.click\(\)\}/, "the visible upload button remains the file-picker entry point");
 });
 
+test("avatar picker initially focuses close instead of opening the information tooltip", async () => {
+  const source = await readFile(new URL("../src/components/avatar-picker.tsx", import.meta.url), "utf8");
+  assert.match(source, /const closeButtonRef = useRef<HTMLButtonElement>\(null\)/);
+  assert.match(source, /if \(closeButtonRef\.current\) closeButtonRef\.current\.focus\(\)/);
+  assert.match(source, /<button ref=\{closeButtonRef\} type="button"/);
+});
+
 test("upload followed by a creature choice cannot restore stale custom state", async () => {
   const store = new DeferredAvatarStore();
   store.blockNext("put");

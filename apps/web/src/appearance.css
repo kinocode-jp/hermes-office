@@ -353,6 +353,12 @@ body { font-size: var(--text-body); line-height: 1.5; }
 @media (max-width: 767px) {
   .side-rail button,
   .mobile-close,
+  .panel-tabs button,
+  .profile-live-route button,
+  .new-chat-button,
+  .session-list button,
+  .avatar-picker header > button,
+  .avatar-picker-actions button,
   .mobile-workspace-bar button,
   .mobile-chat-tabs button,
   .task-assignee-select select,
@@ -367,6 +373,8 @@ body { font-size: var(--text-body); line-height: 1.5; }
   .compact-inspector-button,
   .user-button,
   .device-login-language { min-height: var(--target-mobile); }
+  .mobile-close,
+  .avatar-picker header > button { min-width: var(--target-mobile); }
   .mobile-workspace-bar button,
   .mobile-workspace-bar b,
   .mobile-chat-tabs button { font-size: var(--text-utility); }

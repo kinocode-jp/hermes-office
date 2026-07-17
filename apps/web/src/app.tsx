@@ -12,6 +12,8 @@ import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } fro
 import type { Surface } from "./domain";
 import { surfaceAriaCurrent } from "./navigation-state";
 import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, navigateToSurface, officeAccess, officeConnection, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
+import { rememberSurfaceScroll, restoreSurfaceScroll, type SurfaceScrollPosition } from "./surface-scroll";
+import { useLayoutEffect, useRef } from "preact/hooks";
 
 const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
   { id: "office", glyph: "⌂", label: "nav.office" },
@@ -21,6 +23,11 @@ const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
 ];
 
 export function App() {
+  const mainStageRef = useRef<HTMLElement>(null);
+  const surfaceScrollPositions = useRef(new Map<Surface, SurfaceScrollPosition>());
+  useLayoutEffect(() => {
+    if (mainStageRef.current) restoreSurfaceScroll(surfaceScrollPositions.current, activeSurface.value, mainStageRef.current);
+  }, [activeSurface.value]);
   if (officeAccess.value.state !== "authenticated") return <DeviceLogin />;
   const connection = officeConnection.value;
   const connectionLabel = connection.state === "connected"
@@ -31,7 +38,7 @@ export function App() {
   return (
     <div class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}>
       <header class="topbar" data-mobile-route-chrome>
-        <a class="brand" href="#" aria-label={t("app.home")}>
+        <a class="brand" href="#" aria-label={t("app.home")} onClick={(event) => { event.preventDefault(); navigateToSurface("office"); }}>
           <span class="brand-mark">H</span>
           <span><b>Hermes</b><small>Office</small></span>
         </a>
@@ -59,7 +66,7 @@ export function App() {
             ◧
           </button>
           {isLocalOfficeClient(location)
-            ? <button class="user-button" title={t("app.localOwner")}>KO</button>
+            ? <span class="user-button user-button--display" role="note" aria-label={t("app.localOwner")} title={t("app.localOwner")}>KO</span>
             : <button class="user-button" type="button" aria-label={t("app.logout")} onClick={() => void logoutRemoteDevice().then(() => location.reload())}>⇥</button>}
         </div>
       </header>
@@ -77,7 +84,11 @@ export function App() {
         ))}
       </nav>
 
-      <main class="main-stage">
+      <main
+        ref={mainStageRef}
+        class="main-stage"
+        onScroll={(event) => rememberSurfaceScroll(surfaceScrollPositions.current, activeSurface.value, event.currentTarget)}
+      >
         {connection.state === "error" && (
           <div class="runtime-error-banner" role="alert">
             <span>{localizeRuntimeMessage(connection.message)}</span>

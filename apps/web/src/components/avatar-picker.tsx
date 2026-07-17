@@ -20,6 +20,7 @@ export function canDismissAvatarPicker(uploading: boolean, resetting: boolean): 
 export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -33,7 +34,8 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     const dialog = dialogRef.current;
     const unregister = dialog ? registerModal(dialog) : undefined;
     const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button, input:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])') ?? [])];
-    focusable()[0]?.focus();
+    if (closeButtonRef.current) closeButtonRef.current.focus();
+    else focusable()[0]?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isTopmostModal(dialogRef.current)) return;
       if (event.key === "Escape") { event.preventDefault(); if (!busyRef.current) onClose(); return; }
@@ -90,7 +92,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
               <InfoTip text={`${t("avatar.description")} ${t("avatar.note")}`} align="end" />
             </div>
           </div>
-          <button type="button" disabled={busy} onClick={onClose} aria-label={t("common.close")}>×</button>
+          <button ref={closeButtonRef} type="button" disabled={busy} onClick={onClose} aria-label={t("common.close")}>×</button>
         </header>
         <p id="avatar-picker-description" class="visually-hidden">{t("avatar.description")}</p>
         <div class="avatar-choice-grid">

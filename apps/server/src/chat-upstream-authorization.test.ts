@@ -147,6 +147,85 @@ test("durable alias convergence preserves the live lease token", async () => {
   await hub.close();
 });
 
+test("owned mutation acknowledgements settle against the routing lease while close fences new commands", async () => {
+  const pending = new Map<HermesChatRequest["method"], ReturnType<typeof deferred>>();
+  const connection: HermesChatConnection = {
+    closed: false,
+    request: async (request) => {
+      const gate = deferred();
+      pending.set(request.method, gate);
+      await gate.promise;
+      return { method: request.method, value: { status: "ok", resolved: true } };
+    },
+    close: async () => undefined,
+  };
+  const coordinator = new ChatSessionCoordinator();
+  const owner = {};
+  const claim = coordinator.claimResume(owner, "coder", "stored");
+  assert.ok(claim);
+  assert.equal(coordinator.bind(claim, { storedSessionId: "stored", liveSessionId: "live" }, false), "bound");
+  const token = coordinator.liveLeaseToken(owner, "live");
+  const lease = coordinator.leaseForSession(owner, "live");
+  assert.ok(token);
+  assert.ok(lease);
+  const hub = new ChatUpstreamHub(runtimeWithConnect(async () => connection), coordinator, 64 * 1024);
+  await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
+
+  const requests: HermesChatRequest[] = [
+    { method: "prompt.submit", params: { session_id: "live", text: "run" } },
+    { method: "session.steer", params: { session_id: "live", text: "adjust" } },
+    { method: "session.interrupt", params: { session_id: "live" } },
+    { method: "approval.respond", params: { session_id: "live", choice: "once" } },
+    { method: "clarify.respond", params: { request_id: "question", answer: "yes" } },
+  ];
+  const results = requests.map((request) => hub.requestOwnedSession(owner, "live", token, request));
+  await waitFor(() => pending.size === requests.length);
+  const closeToken = coordinator.claimOwnedLeaseClose(owner, lease);
+  assert.ok(closeToken);
+  assert.equal(coordinator.liveLeaseToken(owner, "live"), undefined, "close fences fresh commands");
+  for (const gate of pending.values()) gate.resolve();
+
+  await Promise.all(results);
+  coordinator.finishOwnedLeaseClose(lease, closeToken);
+  assert.equal(coordinator.liveLeaseToken(owner, "live"), token);
+  await hub.close();
+});
+
+test("owned mutation settlement fails closed across same-owner live-id lease reuse", async () => {
+  const gate = deferred();
+  const connection: HermesChatConnection = {
+    closed: false,
+    request: async (request) => {
+      await gate.promise;
+      return { method: request.method, value: { resolved: true } };
+    },
+    close: async () => undefined,
+  };
+  const coordinator = new ChatSessionCoordinator();
+  const owner = {};
+  const first = coordinator.claimResume(owner, "coder", "stored-old");
+  assert.ok(first);
+  assert.equal(coordinator.bind(first, { storedSessionId: "stored-old", liveSessionId: "live" }, false), "bound");
+  const oldToken = coordinator.liveLeaseToken(owner, "live");
+  assert.ok(oldToken);
+  const hub = new ChatUpstreamHub(runtimeWithConnect(async () => connection), coordinator, 64 * 1024);
+  await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
+  const response = hub.requestOwnedSession(owner, "live", oldToken, {
+    method: "approval.respond", params: { session_id: "live", choice: "once" },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(coordinator.releaseLease(owner, oldToken), true);
+  const replacement = coordinator.claimResume(owner, "coder", "stored-new");
+  assert.ok(replacement);
+  assert.equal(coordinator.bind(replacement, { storedSessionId: "stored-new", liveSessionId: "live" }, false), "bound");
+  assert.notEqual(coordinator.liveLeaseToken(owner, "live"), oldToken);
+  gate.resolve();
+
+  await assert.rejects(response, /ownership changed/);
+  await hub.close();
+});
+
 function runtimeWithConnect(connect: () => Promise<HermesChatConnection>): HermesRuntimeSource {
   return {
     chat: () => ({
@@ -155,4 +234,18 @@ function runtimeWithConnect(connect: () => Promise<HermesChatConnection>): Herme
       fetchHistory: async () => { throw new Error("unused"); },
     }),
   } as unknown as HermesRuntimeSource;
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Condition was not reached.");
 }

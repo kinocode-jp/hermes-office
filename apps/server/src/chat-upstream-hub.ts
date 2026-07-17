@@ -184,11 +184,18 @@ export class ChatUpstreamHub {
     if (!this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken)) {
       throw new Error("Hermes live session is not owned by this Office connection.");
     }
+    const authorizeCommand = (): boolean => this.#subscribers.has(owner)
+      && this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken)
+      && (authorize?.() ?? true);
+    // Once Hermes has received a mutation, close may fence new commands without
+    // changing its route. Accept that authoritative ACK only for the exact
+    // routing lease; release, reuse, or ownership transfer still fails closed.
+    const authorizeSettlement = (): boolean => this.#coordinator.routingLeaseToken(owner, liveSessionId)
+      === expectedLeaseToken;
     return await this.#requestUnchecked(
       request, undefined,
-      () => this.#subscribers.has(owner)
-        && this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken)
-        && (authorize?.() ?? true),
+      authorizeCommand,
+      authorizeSettlement,
     );
   }
 
@@ -196,6 +203,7 @@ export class ChatUpstreamHub {
     request: HermesChatRequest,
     internal?: HermesChatInternalRequestOptions,
     authorize?: () => boolean,
+    authorizeSettlement: (() => boolean) | undefined = authorize,
   ): Promise<HermesChatResult> {
     const connection = await this.#ensureConnection();
     if (authorize !== undefined && !authorize()) throw new Error("Hermes live session ownership changed.");
@@ -206,7 +214,8 @@ export class ChatUpstreamHub {
         if (request.method === "prompt.submit") throw new ChatCommitUnconfirmedError();
         throw new Error("Hermes chat generation changed.");
       }
-      if (authorize !== undefined && OWNED_SESSION_REQUEST_METHODS.has(request.method) && !authorize()) {
+      if (authorizeSettlement !== undefined && OWNED_SESSION_REQUEST_METHODS.has(request.method)
+        && !authorizeSettlement()) {
         if (request.method === "prompt.submit") {
           this.#resetGeneration(generation);
           throw new ChatCommitUnconfirmedError();

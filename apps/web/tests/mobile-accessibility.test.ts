@@ -297,7 +297,8 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
 });
 
 test("small phones preserve scaled primary navigation, safe areas, and touch targets", async () => {
-  const [styles, appearance] = await Promise.all([
+  const [app, styles, appearance] = await Promise.all([
+    readFile(new URL("../src/app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
     readFile(new URL("../src/appearance.css", import.meta.url), "utf8"),
   ]);
@@ -307,14 +308,18 @@ test("small phones preserve scaled primary navigation, safe areas, and touch tar
   assert.match(styles, /\.side-rail button \{[^}]*min-height: 68px[^}]*overflow-wrap: anywhere/);
   assert.match(styles, /@media \(max-width: 359px\) \{\s*\.brand > span:last-child \{ display: none; \}/);
   assert.match(styles, /\.brand > span:last-child \{[^}]*overflow: hidden/);
+  assert.match(styles, /\.brand \{[^}]*min-width: var\(--target-mobile\)[^}]*min-height: var\(--target-mobile\)/);
   assert.match(styles, /\.workspace-drawer \{[^}]*safe-area-inset-top[^}]*safe-area-inset-bottom/);
   assert.match(styles, /\.info-tip__trigger \{[^}]*min-height: var\(--target-mobile\) !important/);
   assert.match(appearance, /\.compact-inspector-button,[\s\S]*\.user-button,[\s\S]*min-height: var\(--target-mobile\)/);
 
   const mobileTargets = selectorsUsing(appearance, "min-height: var(--target-mobile)");
-  for (const selector of [".side-rail button", ".appearance-trigger", ".language-button", ".compact-inspector-button", ".user-button"]) {
+  for (const selector of [".side-rail button", ".mobile-close", ".panel-tabs button", ".profile-live-route button", ".new-chat-button", ".session-list button", ".avatar-picker header > button", ".avatar-picker-actions button", ".appearance-trigger", ".language-button", ".compact-inspector-button", ".user-button"]) {
     assert.match(mobileTargets, new RegExp(escapeRegExp(selector)), `${selector} must keep a mobile touch target`);
   }
+  assert.match(appearance, /\.mobile-close,[\s\S]*\.avatar-picker header > button \{ min-width: var\(--target-mobile\); \}/);
+  assert.match(app, /<span class="user-button user-button--display" role="note" aria-label=\{t\("app\.localOwner"\)\}/);
+  assert.doesNotMatch(app, /<button[^>]*>KO<\/button>/);
 
   const audit = await readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8");
   assert.match(audit, /@media \(max-width: 400px\) \{[\s\S]*\.access-audit__gate \{ grid-template-columns: auto minmax\(0, 1fr\); \}/);
