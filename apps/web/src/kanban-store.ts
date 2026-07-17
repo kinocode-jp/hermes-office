@@ -18,6 +18,7 @@ export const kanbanState = signal<KanbanState>({
 });
 export const unconfirmedTaskCreation = signal<UnconfirmedSubmission | undefined>(undefined);
 export const unconfirmedTaskComments = signal<Record<string, UnconfirmedSubmission>>({});
+export const taskCreationBusy = signal(false);
 
 let kanbanApi: KanbanApi | undefined;
 let liveKanbanApi: KanbanApi | undefined;
@@ -33,6 +34,7 @@ let boardError: RuntimeMessage | undefined;
 let mutationError: { runtime: number; operation: number; message: RuntimeMessage } | undefined;
 const currentOperations = new Map<string, number>();
 const pendingMutations = new Map<number, MutationContext>();
+let taskCreationFlight: { runtime: number; operation: number } | undefined;
 let updateProfileTaskCounts = (_counts: ReadonlyMap<string, number>) => {};
 
 const taskComments = createTaskCommentController(() => kanbanApi);
@@ -64,6 +66,8 @@ function activateRuntime(api: KanbanApi | undefined): void {
   kanbanApi = api;
   currentOperations.clear();
   pendingMutations.clear();
+  taskCreationFlight = undefined;
+  taskCreationBusy.value = false;
   boardError = undefined;
   mutationError = undefined;
   unconfirmedTaskCreation.value = undefined;
@@ -198,7 +202,11 @@ export async function createTask(title: string): Promise<KanbanSubmissionOutcome
   const api = kanbanApi;
   if (!trimmed || !api) return "rejected";
   if (unconfirmedTaskCreation.value) return "commit-unknown";
+  if (taskCreationFlight?.runtime === runtimeGeneration) return "rejected";
   const context = beginMutation(api, officeMessage("runtime.kanban.creating"));
+  const flight = { runtime: context.runtime, operation: context.operation };
+  taskCreationFlight = flight;
+  taskCreationBusy.value = true;
   const temporaryId = `pending-${crypto.randomUUID()}`;
   const startedAtBoard = boardGeneration;
   tasks.value = [...tasks.value, { id: temporaryId, title: trimmed, status: "triage", priority: "normal", comments: 0, pending: true }];
@@ -224,6 +232,11 @@ export async function createTask(title: string): Promise<KanbanSubmissionOutcome
     }
     failMutation(context, errorRuntimeMessage(error));
     return "rejected";
+  } finally {
+    if (taskCreationFlight === flight) {
+      taskCreationFlight = undefined;
+      taskCreationBusy.value = false;
+    }
   }
 }
 
@@ -301,17 +314,22 @@ export async function confirmUnconfirmedComment(taskId: string): Promise<boolean
   const pending = unconfirmedTaskComments.value[taskId];
   const runtime = runtimeGeneration;
   if (!pending || pending.checking) return false;
+  const detailRevision = taskComments.successRevision();
   unconfirmedTaskComments.value = updateUnconfirmedComment(taskId, { ...pending, checking: true });
   await refreshKanbanBoard();
-  let succeeded = expandedTaskId.value === taskId
-    && taskCommentDetail.value.cardId === taskId
-    && taskCommentDetail.value.state === "ready";
+  if (!isCurrentUnconfirmedComment(taskId, pending, runtime)) return false;
+  let succeeded = taskComments.hasSuccessfulLoadAfter(taskId, detailRevision);
   if (!succeeded && expandedTaskId.value === taskId) {
     succeeded = await taskComments.refreshIfExpanded(taskId) === true;
   }
-  if (runtime !== runtimeGeneration || unconfirmedTaskComments.value[taskId]?.input !== pending.input) return false;
+  if (!isCurrentUnconfirmedComment(taskId, pending, runtime)) return false;
   unconfirmedTaskComments.value = updateUnconfirmedComment(taskId, { ...pending, checked: succeeded, checking: false });
   return succeeded;
+}
+
+function isCurrentUnconfirmedComment(taskId: string, pending: UnconfirmedSubmission, runtime: number): boolean {
+  const current = unconfirmedTaskComments.value[taskId];
+  return runtime === runtimeGeneration && current?.operation === pending.operation && current.input === pending.input;
 }
 
 export function allowUnconfirmedCommentResend(taskId: string): void {

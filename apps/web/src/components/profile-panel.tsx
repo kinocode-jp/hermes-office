@@ -16,7 +16,7 @@ import { CharacterPortrait } from "./character-portrait";
 import { AvatarPicker } from "./avatar-picker";
 import { InfoTip } from "./info-tip";
 import { useState } from "preact/hooks";
-import { chatSessionTitle, t, type TranslationKey } from "../i18n";
+import { chatSessionTitle, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { loadMoreSessions, sessionInventoryState } from "../inventory";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
@@ -74,7 +74,7 @@ function ChatList() {
       </div>
       {inventory.hasMore && <button class="secondary-button inventory-more" disabled={inventory.loading} onClick={() => void loadMoreSessions()}>{inventory.loading ? t("inventory.loading") : t("inventory.showMore")}</button>}
       {inventory.truncated && !inventory.hasMore && <small class="inventory-note">{t("inventory.truncated")}</small>}
-      {inventory.error && <small class="inventory-note inventory-note--error">{inventory.error}</small>}
+      {inventory.error && <small class="inventory-note inventory-note--error">{localizeRuntimeMessage(inventory.error)}</small>}
     </div>
   );
 }

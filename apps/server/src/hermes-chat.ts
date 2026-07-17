@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import { isGlobalContextWithinBudget } from "@hermes-office/protocol";
+import { redactSecrets } from "./secret-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_FRAME_BYTES = 256 * 1024;
@@ -519,13 +520,7 @@ function sanitizeText(value: string | undefined, maxBytes: number): string | und
   if (value === undefined) return undefined;
   // Redact before truncation so a size boundary cannot cut off the closing
   // delimiter of a credential (notably a PEM block) and defeat the matcher.
-  let output = value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-  output = output
-    .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?(?:-----END [^-]+PRIVATE KEY-----|$)/gi, "[REDACTED PRIVATE KEY]")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]")
-    .replace(/([?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+/gi, "$1[REDACTED]")
-    .replace(/\b((?:api_?key|password|secret|token)\s*[:=]\s*)[\"']?[^\s,;\"']{8,}/gi, "$1[REDACTED]");
-  return truncateUtf8(output, maxBytes);
+  return truncateUtf8(redactSecrets(value).value, maxBytes);
 }
 
 function contentText(value: unknown): string {

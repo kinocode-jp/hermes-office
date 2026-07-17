@@ -20,6 +20,7 @@ import {
   allowUnconfirmedTaskResend,
   confirmUnconfirmedComment,
   confirmUnconfirmedTaskCreation,
+  taskCreationBusy,
   unconfirmedTaskComments,
   unconfirmedTaskCreation
 } from "../kanban-store";
@@ -191,8 +192,8 @@ export function KanbanBoard() {
           <button type="button" onClick={() => void refreshKanbanBoard({ acknowledgeErrors: true })} disabled={boardState.state === "loading"}>{t("kanban.reload")}</button>
         </div>
         <form class="task-create" onSubmit={submitTask}>
-          <input name="task-title" aria-label={t("kanban.newTask")} placeholder={t("kanban.newTaskPlaceholder")} maxLength={240} required />
-          <button class="primary-button" type="submit" disabled={boardState.state === "loading" || Boolean(unconfirmedTaskCreation.value)}>{t("kanban.add")}</button>
+          <input name="task-title" aria-label={t("kanban.newTask")} placeholder={t("kanban.newTaskPlaceholder")} maxLength={240} required disabled={taskCreationBusy.value || Boolean(unconfirmedTaskCreation.value)} />
+          <button class="primary-button" type="submit" disabled={boardState.state === "loading" || taskCreationBusy.value || Boolean(unconfirmedTaskCreation.value)}>{t("kanban.add")}</button>
         </form>
         {unconfirmedTaskCreation.value && (
           <UnconfirmedSubmissionNotice

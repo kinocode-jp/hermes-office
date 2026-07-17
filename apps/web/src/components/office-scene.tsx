@@ -1,7 +1,7 @@
 import { signal } from "@preact/signals";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Profile } from "../domain";
-import { t, type TranslationKey } from "../i18n";
+import { localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import {
   CELL,
   cellCenter,
@@ -289,7 +289,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
       <OfficeList profiles={profiles} />
       {inventory.hasMore && <button class="secondary-button inventory-more" disabled={inventory.loading} onClick={() => void loadMoreProfiles()}>{inventory.loading ? t("inventory.loading") : t("inventory.showMore")}</button>}
       {inventory.truncated && !inventory.hasMore && <small class="inventory-note">{t("inventory.truncated")}</small>}
-      {inventory.error && <small class="inventory-note inventory-note--error">{inventory.error}</small>}
+      {inventory.error && <small class="inventory-note inventory-note--error">{localizeRuntimeMessage(inventory.error)}</small>}
     </section>
   );
 }

@@ -21,6 +21,7 @@ import {
   confirmUnconfirmedTaskCreation,
   loadKanbanDemoRuntime,
   resetKanbanRuntimeState,
+  taskCreationBusy,
   unconfirmedTaskComments,
   unconfirmedTaskCreation
 } from "../src/kanban-store.ts";
@@ -235,14 +236,29 @@ test("runtime switches also invalidate delayed non-idempotent POST completions",
 
   let demoReads = 0;
   const demoCard = { ...CARD, id: "demo-after-create" };
-  loadKanbanDemoRuntime(fakeApi({ fetchBoard: async () => { demoReads += 1; return board([demoCard]); } }));
+  const replacementCreate = deferred<WorkTask>();
+  let demoCards = [demoCard];
+  let replacementCreateCalls = 0;
+  loadKanbanDemoRuntime(fakeApi({
+    fetchBoard: async () => { demoReads += 1; return board(demoCards); },
+    createCard: async () => { replacementCreateCalls += 1; return replacementCreate.promise; }
+  }));
   await refreshKanbanBoard();
+  const replacementCreating = createTask("new demo task");
+  assert.equal(replacementCreateCalls, 1);
+  assert.equal(taskCreationBusy.value, true);
   const readsBeforeCreateFailure = demoReads;
   createRequest.reject(new DOMException("old response lost", "AbortError"));
   assert.equal(await creating, "stale");
   assert.equal(demoReads, readsBeforeCreateFailure);
+  assert.equal(taskCreationBusy.value, true, "the stale flight must not clear the replacement runtime's busy state");
   assert.equal(unconfirmedTaskCreation.value, undefined);
-  assert.deepEqual(tasks.value.map((task) => task.id), [demoCard.id]);
+  const replacementCard = { ...CARD, id: "demo-new", title: "new demo task" };
+  demoCards = [...demoCards, replacementCard];
+  replacementCreate.resolve(replacementCard);
+  assert.equal(await replacementCreating, "success");
+  assert.equal(taskCreationBusy.value, false);
+  assert.deepEqual(tasks.value.map((task) => task.id), [demoCard.id, replacementCard.id]);
 
   const commentRequest = deferred<void>();
   const oldDemoCard = { ...CARD, id: "demo-comment-old" };
@@ -403,11 +419,54 @@ test("commit-unknown comments are never blindly resent and use GET-only confirma
   await toggleTaskComments(CARD.id);
 });
 
+test("comment confirmation requires a successful detail GET started after confirmation", async (context) => {
+  const cases = [
+    { name: "board and detail both fail", boardFails: true, detailFails: true, expected: false, expectedDetailReads: 1 },
+    { name: "board succeeds but detail fails", boardFails: false, detailFails: true, expected: false, expectedDetailReads: 2 },
+    { name: "board fails but explicit detail succeeds", boardFails: true, detailFails: false, expected: true, expectedDetailReads: 1 }
+  ] as const;
+
+  for (const scenario of cases) await context.test(scenario.name, async () => {
+    resetKanbanRuntimeState();
+    let failBoard = false;
+    let failDetail = false;
+    let detailReads = 0;
+    registerKanbanRuntime(fakeApi({
+      fetchBoard: async () => {
+        if (failBoard) throw new Error("board offline");
+        return board([CARD]);
+      },
+      fetchCard: async () => {
+        detailReads += 1;
+        if (failDetail) throw new Error("detail offline");
+        return detail(CARD.id, []);
+      },
+      addComment: async () => { throw new DOMException("response lost", "AbortError"); }
+    }));
+    await refreshKanbanBoard();
+    await toggleTaskComments(CARD.id);
+    assert.equal(taskCommentDetail.value.state, "ready");
+    assert.equal(await addTaskComment(CARD.id, "maybe committed"), "commit-unknown");
+
+    const readsBeforeConfirmation = detailReads;
+    failBoard = scenario.boardFails;
+    failDetail = scenario.detailFails;
+    assert.equal(await confirmUnconfirmedComment(CARD.id), scenario.expected);
+    assert.equal(detailReads - readsBeforeConfirmation, scenario.expectedDetailReads);
+    assert.equal(unconfirmedTaskComments.value[CARD.id]?.checked, scenario.expected);
+
+    allowUnconfirmedCommentResend(CARD.id);
+    assert.equal(unconfirmedTaskComments.value[CARD.id] === undefined, scenario.expected);
+  });
+});
+
 test("commit-unknown card creation is blocked until an authoritative board check", async () => {
   const source = await readFile(new URL("../src/components/kanban-board.tsx", import.meta.url), "utf8");
   assert.match(source, /Boolean\(unconfirmedTaskCreation\.value\)/);
   assert.match(source, /confirmUnconfirmedTaskCreation/);
   assert.match(source, /allowUnconfirmedTaskResend/);
+  assert.match(source, /<input[^>]+disabled=\{taskCreationBusy\.value \|\| Boolean\(unconfirmedTaskCreation\.value\)\}/);
+  assert.match(source, /type="submit"[^>]+taskCreationBusy\.value/);
 
   resetKanbanRuntimeState();
   let cards = [{ ...CARD }];
@@ -436,6 +495,34 @@ test("commit-unknown card creation is blocked until an authoritative board check
   allowUnconfirmedTaskResend();
   assert.equal(unconfirmedTaskCreation.value, undefined);
   assert.equal(kanbanState.value.state, "ready");
+});
+
+test("card creation is runtime-scoped single-flight and cannot overwrite commit-unknown state", async () => {
+  resetKanbanRuntimeState();
+  const request = deferred<WorkTask>();
+  let postCalls = 0;
+  registerKanbanRuntime(fakeApi({
+    fetchBoard: async () => board([CARD]),
+    createCard: async () => { postCalls += 1; return request.promise; }
+  }));
+  await refreshKanbanBoard();
+
+  const first = createTask("first title");
+  assert.equal(postCalls, 1);
+  assert.equal(taskCreationBusy.value, true);
+  assert.deepEqual(tasks.value.filter((task) => task.id.startsWith("pending-")).map((task) => task.title), ["first title"]);
+
+  assert.equal(await createTask("second title"), "rejected");
+  assert.equal(postCalls, 1);
+  assert.deepEqual(tasks.value.filter((task) => task.id.startsWith("pending-")).map((task) => task.title), ["first title"]);
+
+  request.reject(new DOMException("response lost", "AbortError"));
+  assert.equal(await first, "commit-unknown");
+  assert.equal(taskCreationBusy.value, false);
+  assert.equal(unconfirmedTaskCreation.value?.input, "first title");
+  assert.equal(await createTask("overwrite attempt"), "commit-unknown");
+  assert.equal(postCalls, 1);
+  assert.equal(unconfirmedTaskCreation.value?.input, "first title");
 });
 
 test("deterministic mutation rejection remains distinct from commit-unknown", async () => {

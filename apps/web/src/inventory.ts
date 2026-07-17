@@ -1,5 +1,6 @@
 import { signal } from "@preact/signals";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "./domain";
+import { officeMessage, type RuntimeMessage } from "./i18n";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
 import { mergeServerSessionStatus } from "./session-runtime";
@@ -12,7 +13,7 @@ type InventoryPage = {
   sessions: OfficeSnapshot["sessions"];
   pagination: OfficeInventoryPagination;
 };
-type InventoryLoadState = OfficeInventoryPagination & { loading: boolean; error?: string | undefined };
+type InventoryLoadState = OfficeInventoryPagination & { loading: boolean; error?: RuntimeMessage | undefined };
 type InventoryIdentity = OfficeSnapshotRequestIdentity & {
   inventoryGeneration: number;
   seenProfiles: Set<string>;
@@ -65,7 +66,7 @@ async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promi
     const query = new URLSearchParams({ kind, cursor, limit: "100" });
     const page = await officeFetchJson<unknown>(`/api/v1/inventory?${query}`, {}, identity.serverUrl);
     if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
-    if (!isInventoryPage(page, kind)) throw new Error("Office Serverの一覧ページに互換性がありません。");
+    if (!isInventoryPage(page, kind)) throw new InventoryLoadError("invalid-page");
     commitInventoryPage(page, identity);
     stateSignal.value = { ...page.pagination, loading: false };
   } catch (caught) {
@@ -74,16 +75,16 @@ async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promi
     if (error instanceof OfficeHttpError && error.status === 409 && !retriedAfterRefresh && refreshSnapshot) {
       try {
         const refreshed = await refreshSnapshot({ serverUrl: identity.serverUrl, connectionGeneration: identity.connectionGeneration });
-        if (!refreshed) throw new Error("Office Serverの一覧snapshotを更新できませんでした。");
+        if (!refreshed) throw new InventoryLoadError("snapshot-refresh");
         if (!isCurrentSnapshot(refreshed)) return;
         await loadMore(kind, true);
         return;
-      } catch (refreshError) {
-        error = refreshError;
+      } catch {
+        error = new InventoryLoadError("snapshot-refresh");
       }
     }
     if (!isCurrentLoad(identity, stateSignal.value, cursor)) return;
-    const message = error instanceof Error ? error.message : "一覧を取得できませんでした。";
+    const message = inventoryErrorMessage(error);
     if (caught instanceof OfficeHttpError && caught.status === 409) {
       const { nextCursor: _staleCursor, ...withoutCursor } = current;
       stateSignal.value = { ...withoutCursor, hasMore: false, loading: false, error: message };
@@ -91,6 +92,21 @@ async function loadMore(kind: InventoryKind, retriedAfterRefresh = false): Promi
       stateSignal.value = { ...current, loading: false, error: message };
     }
   }
+}
+
+class InventoryLoadError extends Error {
+  constructor(readonly kind: "invalid-page" | "snapshot-refresh") {
+    super(kind);
+    this.name = "InventoryLoadError";
+  }
+}
+
+function inventoryErrorMessage(error: unknown): RuntimeMessage {
+  if (error instanceof InventoryLoadError) {
+    return officeMessage(error.kind === "invalid-page" ? "inventory.error.invalidPage" : "inventory.error.snapshotRefresh");
+  }
+  if (error instanceof OfficeHttpError) return officeMessage("inventory.error.http", { status: error.status });
+  return officeMessage("inventory.error.load");
 }
 
 function isCurrentLoad(identity: InventoryIdentity, state: InventoryLoadState, cursor: string): boolean {

@@ -7,7 +7,9 @@ import { InfoTip } from "./info-tip";
 
 export function ChatWorkspace() {
   const openSessions = useMemo(
-    () => openSessionIds.value.map((id) => sessions.value.find((session) => session.id === id)).filter(Boolean),
+    () => openSessionIds.value
+      .map((id) => sessions.value.find((session) => session.id === id))
+      .filter((session): session is ChatSession => session !== undefined),
     [openSessionIds.value, sessions.value]
   );
 
@@ -31,7 +33,7 @@ export function ChatWorkspace() {
         {openSessions.map((session) => {
           if (!session) return null;
           const profileName = profileList.value.find((profile) => profile.id === session.profileId)?.name ?? session.profileId;
-          const tab = mobileChatTabPresentation(session, profileName);
+          const tab = mobileChatTabPresentation(session, profileName, openSessions);
           return (
             <button
               key={session.id}
@@ -59,9 +61,15 @@ export function ChatWorkspace() {
 }
 
 export function mobileChatTabPresentation(
-  session: Pick<ChatSession, "title" | "titlePresentation">,
-  profileName: string
+  session: Pick<ChatSession, "id" | "profileId" | "title" | "titlePresentation">,
+  profileName: string,
+  siblings: readonly Pick<ChatSession, "id" | "profileId" | "title" | "titlePresentation">[] = [session]
 ): { profileName: string; sessionTitle: string; accessibleLabel: string } {
   const sessionTitle = chatSessionTitle(session);
-  return { profileName, sessionTitle, accessibleLabel: `${profileName} — ${sessionTitle}` };
+  const matching = siblings.filter((candidate) => (
+    candidate.profileId === session.profileId && chatSessionTitle(candidate) === sessionTitle
+  ));
+  const ordinal = matching.findIndex((candidate) => candidate.id === session.id) + 1;
+  const disambiguatedTitle = matching.length > 1 && ordinal > 0 ? `${sessionTitle} · ${ordinal}` : sessionTitle;
+  return { profileName, sessionTitle: disambiguatedTitle, accessibleLabel: `${profileName} — ${disambiguatedTitle}` };
 }

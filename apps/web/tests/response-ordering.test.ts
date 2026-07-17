@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { OfficeSnapshot, OfficeSnapshotRequestIdentity } from "../src/domain.ts";
 import { initializeInventory, loadMoreSessions, registerInventorySnapshotRefresh, sessionInventoryState } from "../src/inventory.ts";
+import { localizeRuntimeMessage } from "../src/i18n.ts";
 import { authenticateRemoteDevice, connectOfficeApi, logoutRemoteDevice } from "../src/office-api.ts";
 import { applyOfficeSnapshot, officeSnapshot, sessions } from "../src/store.ts";
 
@@ -273,7 +274,7 @@ test("a 409 recovery retries once within the refreshed inventory generation", as
     assert.equal(inventoryCalls, 2);
     assert.equal(sessionInventoryState.value.hasMore, false);
     assert.equal(sessionInventoryState.value.loading, false);
-    assert.match(sessionInventoryState.value.error ?? "", /HTTP 409/);
+    assert.match(sessionInventoryState.value.error ? localizeRuntimeMessage(sessionInventoryState.value.error) : "", /HTTP 409/);
   } finally {
     registerInventorySnapshotRefresh(undefined);
     browser.restore();

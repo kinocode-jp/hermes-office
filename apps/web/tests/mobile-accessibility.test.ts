@@ -42,6 +42,48 @@ test("mobile tabs distinguish two sessions from one profile and select the reque
   }
 });
 
+test("mobile tabs number duplicate rendered titles by current pane order across locale changes", () => {
+  const previousLocale = locale.value;
+  const draftA = { ...session("draft-a", ""), titlePresentation: "new-chat" as const };
+  const storedA = session("stored-a", "New chat");
+  const draftB = { ...session("draft-b", ""), titlePresentation: "new-chat" as const };
+  const storedB = session("stored-b", "New chat");
+  const panes = [draftA, storedA, draftB, storedB];
+  try {
+    setLocale("en");
+    const english = panes.map((item) => mobileChatTabPresentation(item, "Theo", panes));
+    assert.deepEqual(english.map(({ sessionTitle }) => sessionTitle), [
+      "New chat · 1", "New chat · 2", "New chat · 3", "New chat · 4"
+    ]);
+    assert.equal(new Set(english.map(({ accessibleLabel }) => accessibleLabel)).size, panes.length);
+
+    setLocale("ja");
+    const japanese = panes.map((item) => mobileChatTabPresentation(item, "Theo", panes));
+    assert.deepEqual(japanese.map(({ sessionTitle }) => sessionTitle), [
+      "新しい会話 · 1", "New chat · 1", "新しい会話 · 2", "New chat · 2"
+    ]);
+    assert.equal(new Set(japanese.map(({ accessibleLabel }) => accessibleLabel)).size, panes.length);
+
+    const reordered = [storedB, draftB, storedA, draftA];
+    assert.deepEqual(reordered.map((item) => mobileChatTabPresentation(item, "Theo", reordered).sessionTitle), [
+      "New chat · 1", "新しい会話 · 1", "New chat · 2", "新しい会話 · 2"
+    ]);
+
+    sessions.value = panes;
+    openSessionIds.value = panes.map(({ id }) => id);
+    for (const item of panes) {
+      openSession(item.id);
+      assert.equal(activeSessionId.value, item.id);
+    }
+    assert.deepEqual(openSessionIds.value, panes.map(({ id }) => id));
+  } finally {
+    setLocale(previousLocale);
+    sessions.value = [];
+    openSessionIds.value = [];
+    activeSessionId.value = "";
+  }
+});
+
 test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touch targets", async () => {
   const [workspace, styles, appearance] = await Promise.all([
     readFile(new URL("../src/components/chat-workspace.tsx", import.meta.url), "utf8"),

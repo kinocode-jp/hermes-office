@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "../src/domain.ts";
-import { initializeInventory, loadMoreProfiles, loadMoreSessions } from "../src/inventory.ts";
+import { initializeInventory, loadMoreProfiles, loadMoreSessions, profileInventoryState, registerInventorySnapshotRefresh, sessionInventoryState } from "../src/inventory.ts";
+import { locale, localizeRuntimeMessage, setLocale } from "../src/i18n.ts";
 import { storedSessionClientId } from "../src/session-identity.ts";
 import { activeSessionId, applyChatGatewayEvent, applyOfficeSnapshot, interruptSession, openSessionIds, profileList, registerChatRuntime, selectedProfileId, sessions } from "../src/store.ts";
 
@@ -212,6 +214,55 @@ test("a deferred terminal from an older generation cannot prune the newer genera
     await loadMoreSessions();
     assert.equal(sessions.value.some((session) => session.id === staleId), false);
   } finally {
+    browser.restore();
+  }
+});
+
+test("profile and session continuation errors localize at render time for every known failure", async () => {
+  const browser = installBrowserGlobals();
+  const previousLocale = locale.value;
+  const [officeSceneSource, profilePanelSource] = await Promise.all([
+    readFile(new URL("../src/components/office-scene.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/profile-panel.tsx", import.meta.url), "utf8")
+  ]);
+  assert.match(officeSceneSource, /localizeRuntimeMessage\(inventory\.error\)/);
+  assert.match(profilePanelSource, /localizeRuntimeMessage\(inventory\.error\)/);
+
+  const cases = [
+    { failure: "invalid" as const, ja: "Office Serverの一覧ページに互換性がありません。", en: "The Office Server returned an incompatible inventory page." },
+    { failure: "snapshot" as const, ja: "Office Serverの一覧を更新できませんでした。もう一度お試しください。", en: "Unable to refresh the Office Server inventory. Try again." },
+    { failure: "http" as const, ja: "Office Serverから一覧を取得できませんでした（HTTP 503）。", en: "Unable to load the inventory from Office Server (HTTP 503)." }
+  ];
+  try {
+    let requestGeneration = 100;
+    for (const kind of ["profiles", "sessions"] as const) {
+      for (const current of cases) {
+        const serverUrl = `http://127.0.0.1:${56000 + requestGeneration}`;
+        globalThis.fetch = async (input) => {
+          const path = new URL(String(input)).pathname;
+          if (path === "/api/v1/auth/local") return json({ csrfToken: `${requestGeneration}23456789abcdef` });
+          if (path !== "/api/v1/inventory") return json({}, 404);
+          if (current.failure === "http") return json({}, 503);
+          if (current.failure === "snapshot") return json({}, 409);
+          return json({});
+        };
+        const first = snapshot({
+          ...(kind === "profiles" ? { profilePage: continuing(1, `${kind}-next`) } : { sessionPage: continuing(0, `${kind}-next`) })
+        });
+        initializeInventory(first, identity(serverUrl, requestGeneration++));
+        registerInventorySnapshotRefresh(current.failure === "snapshot" ? async () => undefined : undefined);
+        await (kind === "profiles" ? loadMoreProfiles() : loadMoreSessions());
+        const error = (kind === "profiles" ? profileInventoryState : sessionInventoryState).value.error;
+        assert.ok(error, `${kind}/${current.failure} must retain a typed error`);
+        setLocale("ja");
+        assert.equal(localizeRuntimeMessage(error), current.ja);
+        setLocale("en");
+        assert.equal(localizeRuntimeMessage(error), current.en);
+      }
+    }
+  } finally {
+    registerInventorySnapshotRefresh(undefined);
+    setLocale(previousLocale);
     browser.restore();
   }
 });

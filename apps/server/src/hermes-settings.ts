@@ -5,6 +5,7 @@ import {
   GLOBAL_SETTINGS_MAX_SKILLS,
   isGlobalContextWithinBudget,
 } from "@hermes-office/protocol";
+import { containsLikelySecret, redactSecrets } from "./secret-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -724,17 +725,6 @@ async function readBoundedText(response: Response, limit: number): Promise<strin
   }
 }
 
-function redactSecrets(value: string): { value: string; redacted: boolean } {
-  let output = value
-    .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?(?:-----END [^-]+PRIVATE KEY-----|$)/gi, "[REDACTED PRIVATE KEY]")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]")
-    .replace(/([?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+/gi, "$1[REDACTED]")
-    .replace(/\b((?:api_?key|password|secret|token)\s*[:=]\s*)[\"']?[^\s,;\"']{8,}/gi, "$1[REDACTED]");
-  output = output.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-  return { value: output, redacted: output !== value };
-}
-
-function containsLikelySecret(value: string): boolean { return redactSecrets(value).redacted; }
 function revisionOf(value: string): string { return createHash("sha256").update(value).digest("base64url"); }
 function requiredRevision(value: unknown): string { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) throw invalid("Settings revision is invalid."); return value; }
 function conflict(): HermesSettingsError { return new HermesSettingsError("conflict", "Hermes setting changed; refresh before saving."); }
