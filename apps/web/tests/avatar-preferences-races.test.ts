@@ -33,6 +33,13 @@ test("avatar picker initially focuses close instead of opening the information t
   assert.match(source, /<button ref=\{closeButtonRef\} type="button"/);
 });
 
+test("parent rerenders preserve focus inside the avatar picker", async () => {
+  const source = await readFile(new URL("../src/components/avatar-picker.tsx", import.meta.url), "utf8");
+  assert.match(source, /const onCloseRef = useRef\(onClose\);\s*busyRef\.current = busy;\s*onCloseRef\.current = onClose;/);
+  assert.match(source, /if \(!busyRef\.current\) onCloseRef\.current\(\)/, "Escape uses the latest parent callback without restarting the modal effect");
+  assert.match(source, /if \(closeButtonRef\.current\) closeButtonRef\.current\.focus\(\)[\s\S]*?document\.addEventListener\("keydown", handleKeyDown\);[\s\S]*?\}, \[\]\);/, "initial focus and focus restoration run only for the modal lifetime");
+});
+
 test("upload followed by a creature choice cannot restore stale custom state", async () => {
   const store = new DeferredAvatarStore();
   store.blockNext("put");

@@ -27,7 +27,9 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
   const selected = avatarForProfile(profileId);
   const busy = !canDismissAvatarPicker(uploading, resetting);
   const busyRef = useRef(busy);
+  const onCloseRef = useRef(onClose);
   busyRef.current = busy;
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -38,7 +40,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     else focusable()[0]?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isTopmostModal(dialogRef.current)) return;
-      if (event.key === "Escape") { event.preventDefault(); if (!busyRef.current) onClose(); return; }
+      if (event.key === "Escape") { event.preventDefault(); if (!busyRef.current) onCloseRef.current(); return; }
       if (event.key !== "Tab") return;
       const controls = focusable();
       if (controls.length === 0) return;
@@ -49,7 +51,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => { unregister?.(); document.removeEventListener("keydown", handleKeyDown); if (canRestoreModalFocus(previousFocus)) previousFocus?.focus(); };
-  }, [onClose]);
+  }, []);
 
   async function loadCustomImage(file?: File): Promise<void> {
     setError(null);
