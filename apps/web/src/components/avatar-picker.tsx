@@ -26,7 +26,7 @@ export function containAvatarPickerTabFocus(dialog: HTMLElement, event: AvatarPi
   }
   const first = controls[0]!;
   const last = controls[controls.length - 1]!;
-  if (!activeElement || !dialog.contains(activeElement)) {
+  if (!activeElement || !controls.includes(activeElement as HTMLElement)) {
     event.preventDefault();
     (event.shiftKey ? last : first).focus();
     return true;

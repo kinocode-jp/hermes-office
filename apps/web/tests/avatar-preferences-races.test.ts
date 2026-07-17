@@ -31,13 +31,16 @@ test("avatar picker contains Tab focus when controls are unavailable or focus es
   const focused: string[] = [];
   const first = { focus: () => focused.push("first") };
   const last = { focus: () => focused.push("last") };
+  const disabledDescendant = {};
   let controls: unknown[] = [];
-  const dialog = {
+  let dialog: HTMLElement;
+  const descendants = new Set<unknown>([first, last, disabledDescendant]);
+  dialog = {
     querySelectorAll: (selector: string) => {
       assert.match(selector, /button:not\(\[disabled\]\)/, "disabled buttons must not enter the focus ring");
       return controls;
     },
-    contains: (element: unknown) => controls.includes(element),
+    contains: (element: unknown) => element === dialog || descendants.has(element),
     focus: () => focused.push("dialog"),
   } as unknown as HTMLElement;
   const tab = (activeElement: Element | null, shiftKey = false) => {
@@ -50,11 +53,17 @@ test("avatar picker contains Tab focus when controls are unavailable or focus es
   tab({} as Element);
   assert.deepEqual(focused, ["dialog"], "an all-disabled dialog retains focus on its focusable container");
   controls = [first, last];
+  tab(dialog, true);
+  tab(disabledDescendant as Element);
   tab({} as Element);
   tab({} as Element, true);
   tab(last as unknown as Element);
   tab(first as unknown as Element, true);
-  assert.deepEqual(focused, ["dialog", "first", "last", "first", "last"], "escaped and boundary focus returns to the appropriate edge");
+  assert.deepEqual(
+    focused,
+    ["dialog", "last", "first", "first", "last", "first", "last"],
+    "dialog, disabled descendant, escaped, and boundary focus returns to the appropriate edge",
+  );
 });
 
 test("avatar picker initially focuses close instead of opening the information tooltip", async () => {
