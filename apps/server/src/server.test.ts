@@ -38,12 +38,12 @@ test("snapshot is bounded, explicit, and does not expose secret-shaped fields", 
     const base = `http://127.0.0.1:${address.port}`;
     const bootstrap = await fetch(`${base}/api/v1/auth/local`, {
       method: "POST",
-      headers: { Origin: "http://localhost:4173" },
+      headers: { Origin: base },
     });
     assert.equal(bootstrap.status, 200);
     const cookie = bootstrap.headers.get("set-cookie") ?? "";
     const response = await fetch(`${base}/api/v1/snapshot`, {
-      headers: { Origin: "http://localhost:4173", Cookie: cookie },
+      headers: { Origin: base, Cookie: cookie },
     });
     assert.equal(response.status, 200);
     const body = await response.text();
@@ -89,10 +89,16 @@ test("launch-scoped desktop capability authenticates Tauri HTTP and WebSocket re
     assert.equal(authenticated.status, 200);
     assert.equal((await authenticated.json() as { capabilities: { access: { authentication: string } } }).capabilities.access.authentication, "desktop-capability");
 
-    const wrongOrigin = await fetch(`${base}/api/v1/snapshot`, {
-      headers: { Origin: "http://localhost:4173", "X-Hermes-Office-Desktop-Capability": desktopCapability },
-    });
-    assert.equal(wrongOrigin.status, 401);
+    for (const devOrigin of ["http://localhost:4173", "http://127.0.0.1:4173"]) {
+      const wrongOrigin = await fetch(`${base}/api/v1/snapshot`, {
+        headers: { Origin: devOrigin, "X-Hermes-Office-Desktop-Capability": desktopCapability },
+      });
+      assert.equal(wrongOrigin.status, 403);
+      assert.equal((await fetch(`${base}/api/v1/auth/local`, {
+        method: "POST",
+        headers: { Origin: devOrigin },
+      })).status, 403);
+    }
 
     const preflight = await fetch(`${base}/api/v1/snapshot`, { method: "OPTIONS", headers: { Origin: origin } });
     assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /X-Hermes-Office-Desktop-Capability/);
@@ -123,6 +129,7 @@ test("desktop development origin is explicit and cannot be widened to a remote s
   const server = createOfficeServer({
     port: 0,
     desktopCapability,
+    allowedOrigins: ["http://localhost:4173"],
     desktopOrigins: ["http://localhost:4173"],
   });
   const address = await server.listen();
@@ -134,12 +141,40 @@ test("desktop development origin is explicit and cannot be widened to a remote s
         "X-Hermes-Office-Desktop-Capability": desktopCapability,
       },
     })).status, 200);
+    assert.equal((await fetch(`${base}/api/v1/auth/local`, {
+      method: "POST",
+      headers: { Origin: "http://localhost:4173" },
+    })).status, 200);
     assert.equal((await fetch(`${base}/api/v1/snapshot`, {
       headers: {
         Origin: "tauri://localhost",
         "X-Hermes-Office-Desktop-Capability": desktopCapability,
       },
-    })).status, 401);
+    })).status, 403);
+  } finally {
+    await server.close();
+  }
+});
+
+test("remote origins augment the actual listener origin without trusting unrelated local sites", async () => {
+  const remoteOrigin = "https://office.tailnet.example";
+  const server = createOfficeServer({ port: 0, allowedOrigins: [remoteOrigin] });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal(server.originAllowlist.has(remoteOrigin), true);
+    assert.equal(server.originAllowlist.has(base), true);
+    assert.equal(server.originAllowlist.has(`http://localhost:${address.port}`), true);
+    assert.equal((await fetch(`${base}/api/v1/auth/local`, {
+      method: "POST",
+      headers: { Origin: base },
+    })).status, 200);
+    for (const deniedOrigin of ["https://attacker.example", "http://localhost:4173", "http://127.0.0.1:4173"]) {
+      assert.equal((await fetch(`${base}/api/v1/auth/local`, {
+        method: "POST",
+        headers: { Origin: deniedOrigin },
+      })).status, 403);
+    }
   } finally {
     await server.close();
   }

@@ -76,6 +76,54 @@ test("remote origins cannot claim local bootstrap even through a loopback proxy"
   }
 });
 
+test("README remote configuration retains actual-loopback owner device revocation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-readme-remote-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath: join(directory, "devices.json"),
+  });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const remoteLogin = await deviceLogin(base, REMOTE_TOKEN);
+    assert.equal(remoteLogin.status, 200);
+    const remoteSession = await remoteLogin.json() as { principal: { id: string } };
+    const remoteCookies = responseCookies(remoteLogin);
+
+    const localLogin = await fetch(`${base}/api/v1/auth/local`, {
+      method: "POST",
+      headers: { Origin: base },
+    });
+    assert.equal(localLogin.status, 200);
+    const localSession = await localLogin.json() as { csrfToken: string };
+    const localCookie = (localLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+
+    const devices = await fetch(`${base}/api/v1/devices`, {
+      headers: { Origin: base, Cookie: localCookie },
+    });
+    assert.equal(devices.status, 200);
+    assert.equal((await devices.text()).includes(remoteSession.principal.id), true);
+
+    const revoke = await fetch(`${base}/api/v1/devices/${encodeURIComponent(remoteSession.principal.id)}/revoke`, {
+      method: "POST",
+      headers: { Origin: base, Cookie: localCookie, "X-CSRF-Token": localSession.csrfToken },
+    });
+    assert.equal(revoke.status, 200);
+    assert.equal((await renewDevice(base, remoteCookies)).status, 401);
+
+    assert.equal((await fetch(`${base}/api/v1/auth/local`, {
+      method: "POST",
+      headers: { Origin: LOCAL_ORIGIN },
+    })).status, 403);
+  } finally {
+    await server.close();
+  }
+});
+
 test("one-time enrollment creates a revocable remote operator device without exposing credentials", async () => {
   const server = createOfficeServer({
     port: 0,

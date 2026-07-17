@@ -18,6 +18,7 @@ import { InfoTip } from "./info-tip";
 import { useState } from "preact/hooks";
 import { chatSessionTitle, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { loadMoreSessions, sessionInventoryState } from "../inventory";
+import { useMobileOverlay } from "./use-mobile-overlay";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
   { id: "chat", label: "profile.chat" },
@@ -55,6 +56,7 @@ function openLiveSettings(tab: Exclude<InspectorTab, "chat">): void {
   settingsTab.value = settingsRoutes[tab];
   activeSurface.value = "settings";
   mobileInspectorOpen.value = false;
+  mobileWorkspaceOpen.value = false;
 }
 
 export function createProfileSession(profileId: string): boolean {
@@ -108,18 +110,32 @@ function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
 
 export function ProfilePanel() {
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
+  const mobileOverlay = useMobileOverlay<HTMLElement>({
+    kind: "modal",
+    open: mobileInspectorOpen.value,
+    onClose: () => { mobileInspectorOpen.value = false; },
+  });
   const profile = selectedProfile.value;
   if (!profile) return null;
   const profileIndex = profileList.value.findIndex((candidate) => candidate.id === profile.id);
+  const titleId = "mobile-profile-panel-title";
   return (
-    <aside class={`profile-panel ${mobileInspectorOpen.value ? "is-mobile-open" : ""}`} aria-label={t("profile.details")}>
+    <aside
+      ref={mobileOverlay.ref}
+      class={`profile-panel ${mobileInspectorOpen.value ? "is-mobile-open" : ""}`}
+      aria-label={mobileOverlay.active ? undefined : t("profile.details")}
+      aria-labelledby={mobileOverlay.active ? titleId : undefined}
+      aria-modal={mobileOverlay.active ? "true" : undefined}
+      role={mobileOverlay.active ? "dialog" : undefined}
+      tabIndex={mobileOverlay.active ? -1 : undefined}
+    >
       <header class="profile-panel-head">
-        <button class="mobile-close" onClick={() => { mobileInspectorOpen.value = false; }} aria-label={t("common.close")}>←</button>
+        <button class="mobile-close" data-mobile-overlay-initial-focus onClick={() => { mobileInspectorOpen.value = false; }} aria-label={t("common.close")}>←</button>
         <button class="profile-avatar-button" type="button" onClick={() => setAvatarPickerOpen(true)} aria-label={t("profile.changeAvatar", { name: profile.name })}>
           <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} class="character-portrait--panel" decorative />
           <span>{t("profile.change")}</span>
         </button>
-        <div><h2>{profile.name}</h2>{profile.role && <p>{profile.role}</p>}</div>
+        <div><h2 id={titleId}>{profile.name}</h2>{profile.role && <p>{profile.role}</p>}</div>
         <StatusPill status={profile.status} />
       </header>
       <nav class="panel-tabs" aria-label={t("profile.settings")}>

@@ -181,6 +181,26 @@ test("logout and login invalidate cursor pages before their deferred responses c
   }
 });
 
+test("remote device login normalizes a successful malformed JSON response into a recoverable failure", async () => {
+  const browser = installBrowserGlobals();
+  const serverUrl = "http://127.0.0.1:55111";
+  globalThis.fetch = async () => new Response("<html>proxy error</html>", {
+    status: 200,
+    headers: { "Content-Type": "text/html" },
+  });
+
+  try {
+    const result = await authenticateRemoteDevice("phone", "one-shot-secret", serverUrl);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, "unavailable");
+      assert.equal(result.retryAfterSeconds, undefined);
+    }
+  } finally {
+    browser.restore();
+  }
+});
+
 test("HTTP session recovery invalidates the pre-reauthentication inventory response", async () => {
   const browser = installBrowserGlobals();
   const serverUrl = "http://127.0.0.1:55110";

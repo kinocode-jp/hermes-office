@@ -17,6 +17,7 @@ const OPENAI_SECRET = "openai-example-value-123456";
 const AWS_SECRET = "aws-example-value-123456";
 const PASSWORD_SECRET = "password-example-value-123456";
 const ANTHROPIC_SECRET = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+const AUTH_HEADER_SECRET = "opaque-settings-credential";
 
 test("profile settings use a profile-pinned backend and expose secret-safe DTOs", async (t) => {
   const requests: Array<{ method: string; token: string; url: string }> = [];
@@ -32,7 +33,7 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
     if (request.url === "/api/memory") {
       writeJson(response, {
         active: "builtin",
-        providers: [{ name: "builtin", description: `Built in; ${ANTHROPIC_SECRET}; AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"`, configured: true, config_path: "/private/config" }],
+        providers: [{ name: "builtin", description: `Built in; ${ANTHROPIC_SECRET}; AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"\nAuthorization: Token ${AUTH_HEADER_SECRET}`, configured: true, config_path: "/private/config" }],
         builtin_files: { memory: 40, user: 12, path: "/private/memories" },
         credential: "hidden",
       });
@@ -64,14 +65,14 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
   assert.equal(settings.skills[1]?.category, "CATEGORY_TOKEN=[REDACTED]");
   assert.equal(settings.skills[1]?.description, "HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED]");
   assert.deepEqual(settings.memory.builtin, { memoryBytes: 40, userBytes: 12, hasMemory: true, hasUser: true });
-  assert.equal(settings.memory.providers[0]?.description, 'Built in; [REDACTED]; AWS_SECRET_ACCESS_KEY = "[REDACTED]"');
+  assert.equal(settings.memory.providers[0]?.description, 'Built in; [REDACTED]; AWS_SECRET_ACCESS_KEY = "[REDACTED]"\nAuthorization: [REDACTED]');
   assert.equal(settings.soul.content, "Helpful agent\nOPENAI_API_KEY = '[REDACTED]'");
   assert.equal(settings.soul.redacted, true);
   const serialized = JSON.stringify(settings);
   assert.equal(serialized.includes("/private"), false);
   assert.equal(serialized.includes("supersecretvalue"), false);
   assert.equal(serialized.includes("hidden"), false);
-  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, ANTHROPIC_SECRET]) assert.equal(serialized.includes(secret), false);
+  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, ANTHROPIC_SECRET, AUTH_HEADER_SECRET]) assert.equal(serialized.includes(secret), false);
   assert.equal(releases, 1, "one multi-request operation holds exactly one lease");
 
   await assert.rejects(adapter.getProfileSoul("other"), (error: unknown) => error instanceof HermesSettingsError);
@@ -195,6 +196,98 @@ test("skill and memory mutations are validated and use official Hermes routes", 
   );
 });
 
+test("profile compare-and-write mutations serialize by resource and reject one stale concurrent writer", async (t) => {
+  let skillContent = "initial skill";
+  let soulContent = "initial soul";
+  let activeProvider = "builtin";
+  let providerMode = "local";
+  const writes = new Map<string, number>();
+  const server = createServer(async (request, response) => {
+    const url = request.url ?? "";
+    if (request.method === "GET" && url === "/api/skills/content?name=local") {
+      writeJson(response, { content: skillContent });
+      return;
+    }
+    if (request.method === "PUT" && url === "/api/skills/content") {
+      const body = await readJson(request) as { content: string };
+      await delayedWrite();
+      skillContent = body.content;
+      countWrite(writes, url);
+      writeJson(response, { ok: true });
+      return;
+    }
+    if (request.method === "GET" && url === "/api/profiles/coder/soul") {
+      writeJson(response, { content: soulContent, exists: true });
+      return;
+    }
+    if (request.method === "PUT" && url === "/api/profiles/coder/soul") {
+      const body = await readJson(request) as { content: string };
+      await delayedWrite();
+      soulContent = body.content;
+      countWrite(writes, url);
+      writeJson(response, { ok: true });
+      return;
+    }
+    if (request.method === "GET" && url === "/api/memory") {
+      writeJson(response, { active: activeProvider, providers: [], builtin_files: {} });
+      return;
+    }
+    if (request.method === "PUT" && url === "/api/memory/provider") {
+      const body = await readJson(request) as { provider: string };
+      await delayedWrite();
+      activeProvider = body.provider;
+      countWrite(writes, url);
+      writeJson(response, { ok: true });
+      return;
+    }
+    if (request.method === "GET" && url === "/api/memory/providers/honcho/config?surface=declared") {
+      writeJson(response, { name: "honcho", label: "Honcho", fields: [{ key: "mode", kind: "text", value: providerMode, is_set: true }] });
+      return;
+    }
+    if (request.method === "PUT" && url === "/api/memory/providers/honcho/config?surface=declared") {
+      const body = await readJson(request) as { values: { mode: string } };
+      await delayedWrite();
+      providerMode = body.values.mode;
+      countWrite(writes, url);
+      writeJson(response, { ok: true });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+  const adapter = createHermesSettingsAdapter({
+    resolveProfileBackend: async () => ({ baseUrl: origin, sessionToken: TOKEN, release: () => undefined }),
+  });
+
+  const skillRevision = (await adapter.getSkillContent("coder", "local")).revision;
+  await assertOneConflict([
+    adapter.updateSkillContent("coder", "local", "first skill", skillRevision),
+    adapter.updateSkillContent("coder", "local", "second skill", skillRevision),
+  ]);
+  assert.equal(writes.get("/api/skills/content"), 1);
+
+  const soulRevision = (await adapter.getProfileSoul("coder")).revision;
+  await assertOneConflict([
+    adapter.updateProfileSoul("coder", "first soul", soulRevision),
+    adapter.updateProfileSoul("coder", "second soul", soulRevision),
+  ]);
+  assert.equal(writes.get("/api/profiles/coder/soul"), 1);
+
+  const configRevision = (await adapter.getMemoryProviderConfig("coder", "honcho")).revision;
+  await assertOneConflict([
+    adapter.updateMemoryProviderConfig("coder", "honcho", { mode: "first" }, configRevision),
+    adapter.updateMemoryProviderConfig("coder", "honcho", { mode: "second" }, configRevision),
+  ]);
+  assert.equal(writes.get("/api/memory/providers/honcho/config?surface=declared"), 1);
+
+  await assertOneConflict([
+    adapter.setMemoryProvider("coder", "honcho", "builtin"),
+    adapter.setMemoryProvider("coder", "remote", "builtin"),
+  ]);
+  assert.equal(writes.get("/api/memory/provider"), 1);
+});
+
 test("global settings are Office-owned, atomic, revisioned, and reject secret material", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-settings-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -263,4 +356,20 @@ function writeJson(response: ServerResponse<IncomingMessage>, value: unknown): v
   const body = JSON.stringify(value);
   response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
   response.end(body);
+}
+
+async function delayedWrite(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 30));
+}
+
+function countWrite(writes: Map<string, number>, path: string): void {
+  writes.set(path, (writes.get(path) ?? 0) + 1);
+}
+
+async function assertOneConflict(operations: [Promise<void>, Promise<void>]): Promise<void> {
+  const results = await Promise.allSettled(operations);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0]?.reason instanceof HermesSettingsError && rejected[0].reason.code === "conflict", true);
 }

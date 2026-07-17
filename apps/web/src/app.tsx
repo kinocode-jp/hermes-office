@@ -10,7 +10,7 @@ import { isLocalOfficeClient } from "./auth-state";
 import { logoutRemoteDevice } from "./office-api";
 import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
 import type { Surface } from "./domain";
-import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, officeAccess, officeConnection, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
+import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, navigateToSurface, officeAccess, officeConnection, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
 
 const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
   { id: "office", glyph: "⌂", label: "nav.office" },
@@ -29,7 +29,7 @@ export function App() {
       : connection.state === "error" ? t("connection.error") : connection.state;
   return (
     <div class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}>
-      <header class="topbar">
+      <header class="topbar" data-mobile-route-chrome>
         <a class="brand" href="#" aria-label={t("app.home")}>
           <span class="brand-mark">H</span>
           <span><b>Hermes</b><small>Office</small></span>
@@ -53,7 +53,7 @@ export function App() {
             class="quiet-button compact-inspector-button"
             type="button"
             aria-label={t("profile.details")}
-            onClick={() => { mobileInspectorOpen.value = true; }}
+            onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}
           >
             ◧
           </button>
@@ -63,12 +63,12 @@ export function App() {
         </div>
       </header>
 
-      <nav class="side-rail" aria-label={t("nav.main")}>
+      <nav class="side-rail" aria-label={t("nav.main")} data-mobile-route-chrome>
         {navItems.map((item) => (
           <button
             key={item.id}
             class={activeSurface.value === item.id ? "is-active" : ""}
-            onClick={() => { activeSurface.value = item.id; }}
+            onClick={() => navigateToSurface(item.id)}
           >
             <span>{item.glyph}</span>{t(item.label)}
           </button>

@@ -1,4 +1,4 @@
-import { signal } from "@preact/signals";
+import { signal, type Signal } from "@preact/signals";
 
 const STORAGE_KEY = "hermes-office.profile-avatars.v1";
 const CUSTOM_IMAGE_LIMIT = 1_500_000;
@@ -9,12 +9,112 @@ export const DEFAULT_CHARACTER_COUNT = 6;
 export type ProfileAvatar =
   | { kind: "creature"; index: number }
   | { kind: "custom"; dataUrl: string };
+export type AvatarMap = Record<string, ProfileAvatar>;
+export interface StoredCustomAvatar { profileId: string; dataUrl: string }
 
-type AvatarMap = Record<string, ProfileAvatar>;
+export interface AvatarAssetStore {
+  load(legacy: Readonly<AvatarMap>): Promise<unknown[]>;
+  put(profileId: string, dataUrl: string): Promise<void>;
+  delete(profileId: string): Promise<void>;
+}
 
-const initialAvatars = readStoredAvatars();
-export const profileAvatars = signal<AvatarMap>(initialAvatars);
-void hydrateCustomAvatars(initialAvatars);
+export class AvatarPreferences {
+  readonly avatars: Signal<AvatarMap>;
+  readonly #store: AvatarAssetStore;
+  readonly #persist: (avatars: AvatarMap) => void;
+  readonly #generations = new Map<string, number>();
+  readonly #mutationTails = new Map<string, Promise<void>>();
+
+  constructor(initial: AvatarMap, store: AvatarAssetStore, persist: (avatars: AvatarMap) => void = () => undefined) {
+    this.avatars = signal(initial);
+    this.#store = store;
+    this.#persist = persist;
+  }
+
+  begin(profileId: string): number {
+    if (!profileId) return 0;
+    const generation = (this.#generations.get(profileId) ?? 0) + 1;
+    this.#generations.set(profileId, generation);
+    return generation;
+  }
+
+  isCurrent(profileId: string, generation: number): boolean {
+    return generation > 0 && this.#generations.get(profileId) === generation;
+  }
+
+  setCreature(profileId: string, index: number): void {
+    if (!profileId || !Number.isInteger(index) || index < 0 || index >= DEFAULT_CHARACTER_COUNT) return;
+    this.begin(profileId);
+    this.#update(profileId, { kind: "creature", index });
+    void this.#enqueue(profileId, async () => await this.#store.delete(profileId)).catch(() => undefined);
+  }
+
+  async setCustom(profileId: string, dataUrl: string, startedGeneration?: number): Promise<boolean> {
+    if (!profileId || !isSafeImageDataUrl(dataUrl) || dataUrl.length > CUSTOM_IMAGE_LIMIT) return false;
+    const generation = startedGeneration ?? this.begin(profileId);
+    if (generation === 0 || this.#generations.get(profileId) !== generation) return false;
+    try {
+      await this.#enqueue(profileId, async () => await this.#store.put(profileId, dataUrl));
+    } catch {
+      return false;
+    }
+    if (this.#generations.get(profileId) !== generation) return false;
+    this.#update(profileId, { kind: "custom", dataUrl });
+    return true;
+  }
+
+  reset(profileId: string): void {
+    if (!profileId) return;
+    this.begin(profileId);
+    const next = { ...this.avatars.value };
+    delete next[profileId];
+    this.avatars.value = next;
+    this.#persist(next);
+    void this.#enqueue(profileId, async () => await this.#store.delete(profileId)).catch(() => undefined);
+  }
+
+  async hydrate(): Promise<void> {
+    let records: unknown[];
+    try {
+      records = await this.#store.load(this.avatars.value);
+    } catch {
+      return;
+    }
+    const next = { ...this.avatars.value };
+    for (const record of records) {
+      if (!isStoredCustomAvatar(record)) continue;
+      if (!record.profileId || this.#generations.has(record.profileId)) continue;
+      if (next[record.profileId]?.kind === "creature") continue;
+      if (record.dataUrl.length <= CUSTOM_IMAGE_LIMIT && isSafeImageDataUrl(record.dataUrl)) {
+        next[record.profileId] = { kind: "custom", dataUrl: record.dataUrl };
+      }
+    }
+    this.avatars.value = next;
+    this.#persist(next);
+  }
+
+  async whenIdle(profileId: string): Promise<void> {
+    await this.#mutationTails.get(profileId);
+  }
+
+  #update(profileId: string, avatar: ProfileAvatar): void {
+    const next = { ...this.avatars.value, [profileId]: avatar };
+    this.avatars.value = next;
+    this.#persist(next);
+  }
+
+  async #enqueue<T>(profileId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#mutationTails.get(profileId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.#mutationTails.set(profileId, tail);
+    try {
+      return await result;
+    } finally {
+      if (this.#mutationTails.get(profileId) === tail) this.#mutationTails.delete(profileId);
+    }
+  }
+}
 
 export function defaultAvatarOrdinal(profileId: string): number {
   const normalized = profileId.trim().toLocaleLowerCase("en-US");
@@ -35,36 +135,28 @@ export function avatarForProfile(profileId: string): ProfileAvatar {
   return profileAvatars.value[profileId] ?? { kind: "creature", index: defaultAvatarIndex(profileId) };
 }
 
-export function setCreatureAvatar(profileId: string, index: number): void {
-  if (!profileId || !Number.isInteger(index) || index < 0 || index >= DEFAULT_CHARACTER_COUNT) return;
-  updateAvatar(profileId, { kind: "creature", index });
-  void deleteCustomAvatar(profileId);
+export function beginCustomAvatarChange(profileId: string): number {
+  return avatarPreferences.begin(profileId);
 }
 
-export async function setCustomAvatar(profileId: string, dataUrl: string): Promise<boolean> {
-  if (!profileId || !isSafeImageDataUrl(dataUrl) || dataUrl.length > CUSTOM_IMAGE_LIMIT) return false;
-  if (!await writeCustomAvatar(profileId, dataUrl)) return false;
-  updateAvatar(profileId, { kind: "custom", dataUrl });
-  return true;
+export function isAvatarChangeCurrent(profileId: string, generation: number): boolean {
+  return avatarPreferences.isCurrent(profileId, generation);
+}
+
+export function setCreatureAvatar(profileId: string, index: number): void {
+  avatarPreferences.setCreature(profileId, index);
+}
+
+export async function setCustomAvatar(profileId: string, dataUrl: string, startedGeneration?: number): Promise<boolean> {
+  return await avatarPreferences.setCustom(profileId, dataUrl, startedGeneration);
 }
 
 export function resetProfileAvatar(profileId: string): void {
-  if (!(profileId in profileAvatars.value)) return;
-  const next = { ...profileAvatars.value };
-  delete next[profileId];
-  profileAvatars.value = next;
-  persist(next);
-  void deleteCustomAvatar(profileId);
+  avatarPreferences.reset(profileId);
 }
 
 export function isSafeImageDataUrl(value: string): boolean {
   return /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(value);
-}
-
-function updateAvatar(profileId: string, avatar: ProfileAvatar): void {
-  const next = { ...profileAvatars.value, [profileId]: avatar };
-  profileAvatars.value = next;
-  persist(next);
 }
 
 function readStoredAvatars(): AvatarMap {
@@ -78,12 +170,8 @@ function readStoredAvatars(): AvatarMap {
       if (!profileId || !value || typeof value !== "object") continue;
       const avatar = value as Partial<ProfileAvatar>;
       if (avatar.kind === "creature" && Number.isInteger(avatar.index) && Number(avatar.index) >= 0) {
-        // v1 offered twelve cells. Preserve old choices by folding them onto
-        // the six production characters instead of discarding the preference.
         avatars[profileId] = { kind: "creature", index: Number(avatar.index) % DEFAULT_CHARACTER_COUNT };
-        continue;
-      }
-      if (avatar.kind === "custom" && typeof avatar.dataUrl === "string" && avatar.dataUrl.length <= CUSTOM_IMAGE_LIMIT && isSafeImageDataUrl(avatar.dataUrl)) {
+      } else if (avatar.kind === "custom" && typeof avatar.dataUrl === "string" && avatar.dataUrl.length <= CUSTOM_IMAGE_LIMIT && isSafeImageDataUrl(avatar.dataUrl)) {
         avatars[profileId] = { kind: "custom", dataUrl: avatar.dataUrl };
       }
     }
@@ -98,59 +186,61 @@ function persist(avatars: AvatarMap): void {
     const compact = Object.fromEntries(Object.entries(avatars).filter((entry): entry is [string, { kind: "creature"; index: number }] => entry[1].kind === "creature"));
     globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(compact));
   } catch {
-    // Creature choices remain active for this session when preferences are blocked.
+    // In-memory preferences remain usable when localStorage is blocked.
   }
 }
 
-async function hydrateCustomAvatars(initial: AvatarMap): Promise<void> {
-  const database = await openAvatarDatabase();
-  if (!database) return;
-  try {
-    const transaction = database.transaction(DATABASE_STORE, "readwrite");
-    const store = transaction.objectStore(DATABASE_STORE);
-    for (const [profileId, avatar] of Object.entries(initial)) {
-      if (avatar.kind === "custom") store.put({ profileId, dataUrl: avatar.dataUrl });
-    }
-    const records = await requestResult<Array<{ profileId?: unknown; dataUrl?: unknown }>>(store.getAll());
-    const next = { ...profileAvatars.value };
-    for (const record of records) {
-      if (typeof record.profileId !== "string" || typeof record.dataUrl !== "string") continue;
-      if (next[record.profileId]?.kind === "creature") continue;
-      if (record.dataUrl.length <= CUSTOM_IMAGE_LIMIT && isSafeImageDataUrl(record.dataUrl)) {
-        next[record.profileId] = { kind: "custom", dataUrl: record.dataUrl };
+class IndexedDbAvatarStore implements AvatarAssetStore {
+  async load(legacy: Readonly<AvatarMap>): Promise<unknown[]> {
+    return await withAvatarStore("readwrite", async (store) => {
+      for (const [profileId, avatar] of Object.entries(legacy)) {
+        if (avatar.kind === "custom") await requestResult(store.put({ profileId, dataUrl: avatar.dataUrl }));
       }
+      return await requestResult<unknown[]>(store.getAll());
+    }) ?? [];
+  }
+
+  async put(profileId: string, dataUrl: string): Promise<void> {
+    const saved = await withAvatarStore("readwrite", async (store) => {
+      await requestResult(store.put({ profileId, dataUrl }));
+      return true;
+    });
+    if (saved !== true) throw new Error("avatar storage unavailable");
+  }
+
+  async delete(profileId: string): Promise<void> {
+    await withAvatarStore("readwrite", async (store) => {
+      await requestResult(store.delete(profileId));
+    });
+  }
+}
+
+function isStoredCustomAvatar(value: unknown): value is StoredCustomAvatar {
+  return typeof value === "object" && value !== null
+    && typeof (value as { profileId?: unknown }).profileId === "string"
+    && typeof (value as { dataUrl?: unknown }).dataUrl === "string";
+}
+
+const initialAvatars = readStoredAvatars();
+const avatarPreferences = new AvatarPreferences(initialAvatars, new IndexedDbAvatarStore(), persist);
+export const profileAvatars = avatarPreferences.avatars;
+void avatarPreferences.hydrate();
+
+async function withAvatarStore<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => Promise<T>): Promise<T | undefined> {
+  const database = await openAvatarDatabase();
+  if (!database) return undefined;
+  try {
+    const transaction = database.transaction(DATABASE_STORE, mode);
+    const completed = transactionCompletion(transaction);
+    try {
+      const result = await operation(transaction.objectStore(DATABASE_STORE));
+      await completed;
+      return result;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* The transaction may already be inactive. */ }
+      await completed.catch(() => undefined);
+      throw error;
     }
-    profileAvatars.value = next;
-    persist(next);
-  } catch {
-    // Keep the light-weight creature defaults when asset storage is unavailable.
-  } finally {
-    database.close();
-  }
-}
-
-async function writeCustomAvatar(profileId: string, dataUrl: string): Promise<boolean> {
-  const database = await openAvatarDatabase();
-  if (!database) return false;
-  try {
-    const transaction = database.transaction(DATABASE_STORE, "readwrite");
-    await requestResult(transaction.objectStore(DATABASE_STORE).put({ profileId, dataUrl }));
-    return true;
-  } catch {
-    return false;
-  } finally {
-    database.close();
-  }
-}
-
-async function deleteCustomAvatar(profileId: string): Promise<void> {
-  const database = await openAvatarDatabase();
-  if (!database) return;
-  try {
-    const transaction = database.transaction(DATABASE_STORE, "readwrite");
-    await requestResult(transaction.objectStore(DATABASE_STORE).delete(profileId));
-  } catch {
-    // A creature/default choice in localStorage takes precedence over stale assets.
   } finally {
     database.close();
   }
@@ -159,13 +249,19 @@ async function deleteCustomAvatar(profileId: string): Promise<void> {
 function openAvatarDatabase(): Promise<IDBDatabase | undefined> {
   if (typeof indexedDB === "undefined") return Promise.resolve(undefined);
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (database?: IDBDatabase): void => {
+      if (settled) { database?.close(); return; }
+      settled = true;
+      resolve(database);
+    };
     const request = indexedDB.open(DATABASE_NAME, 1);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(DATABASE_STORE)) request.result.createObjectStore(DATABASE_STORE, { keyPath: "profileId" });
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => resolve(undefined);
-    request.onblocked = () => resolve(undefined);
+    request.onsuccess = () => finish(request.result);
+    request.onerror = () => finish();
+    request.onblocked = () => finish();
   });
 }
 
@@ -173,5 +269,13 @@ function requestResult<T = IDBValidKey>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("avatar storage failed"));
+  });
+}
+
+function transactionCompletion(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("avatar transaction failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("avatar transaction aborted"));
   });
 }

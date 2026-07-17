@@ -8,7 +8,7 @@ import {
   setDeviceLoginFailure,
   setDeviceLoginSubmitting
 } from "../store";
-import { shouldShowDeviceEnrollmentForm } from "../auth-state";
+import { classifyDeviceLoginFailure, shouldShowDeviceEnrollmentForm } from "../auth-state";
 
 export function DeviceLogin() {
   const access = officeAccess.value;
@@ -36,9 +36,13 @@ export function DeviceLogin() {
     // before yielding control back to the browser event loop.
     const login = authenticateRemoteDevice(deviceNameInput.value, credentialInput.value, access.serverUrl);
     credentialInput.value = "";
-    const result = await login;
-    if (result.ok) retryOfficeServer();
-    else setDeviceLoginFailure(result);
+    try {
+      const result = await login;
+      if (result.ok) retryOfficeServer();
+      else setDeviceLoginFailure(result);
+    } catch {
+      setDeviceLoginFailure(classifyDeviceLoginFailure(0, null));
+    }
   };
 
   const checking = access.state === "checking";

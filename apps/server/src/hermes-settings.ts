@@ -5,6 +5,7 @@ import {
   GLOBAL_SETTINGS_MAX_SKILLS,
   isGlobalContextWithinBudget,
 } from "@hermes-office/protocol";
+import { KeyedOperationQueue } from "./keyed-operation-queue.js";
 import { containsLikelySecret, isLikelySecretIdentifier, redactSecrets } from "./secret-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -130,6 +131,7 @@ export function createHermesSettingsAdapter(options: HermesSettingsAdapterOption
   const timeoutMs = bounded(options.timeoutMs, DEFAULT_TIMEOUT_MS, 250, 60_000);
   const maxResponseBytes = bounded(options.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, 4_096, 8 * 1024 * 1024);
   const maxSkillContentBytes = bounded(options.maxSkillContentBytes, 256 * 1024, 1_024, 512 * 1024);
+  const mutationQueue = new KeyedOperationQueue();
 
   const withClient = async <T>(profile: string, operation: (client: ProfileClient) => Promise<T>): Promise<T> => {
     const validProfile = requiredProfile(profile);
@@ -152,53 +154,64 @@ export function createHermesSettingsAdapter(options: HermesSettingsAdapterOption
       return { profile: client.profile, skills, memory, soul };
     }),
     listSkills: async (profile) => await withClient(profile, listSkillsWith),
-    setSkillEnabled: async (profile, name, enabled, expectedEnabled) => await withClient(profile, async (client) => {
+    setSkillEnabled: async (profile, name, enabled, expectedEnabled) => {
+      const validProfile = requiredProfile(profile);
       const skill = requiredName(name, "skill");
-      if (expectedEnabled !== undefined) {
-        const current = (await listSkillsWith(client)).find((item) => item.name === skill);
-        if (current === undefined) throw new HermesSettingsError("not_found", "Hermes skill was not found.");
-        if (current.enabled !== expectedEnabled) throw conflict();
-      }
-      await client.request("/api/skills/toggle", "PUT", { name: skill, enabled });
-    }),
+      await mutationQueue.run(resourceKey(validProfile, "skill-toggle", skill), async () => await withClient(validProfile, async (client) => {
+        if (expectedEnabled !== undefined) {
+          const current = (await listSkillsWith(client)).find((item) => item.name === skill);
+          if (current === undefined) throw new HermesSettingsError("not_found", "Hermes skill was not found.");
+          if (current.enabled !== expectedEnabled) throw conflict();
+        }
+        await client.request("/api/skills/toggle", "PUT", { name: skill, enabled });
+      }));
+    },
     getSkillContent: async (profile, name) => await withClient(profile, async (client) =>
       await skillContentWith(client, requiredName(name, "skill"), maxSkillContentBytes)),
     updateSkillContent: async (profile, name, content, expectedRevision) => {
       if (Buffer.byteLength(content) > maxSkillContentBytes || content.includes("\0")) throw invalid("Skill content is invalid or too large.");
       if (containsLikelySecret(content)) throw invalid("Skill content appears to contain a secret. Store credentials through the dedicated secret channel.");
-      await withClient(profile, async (client) => {
-        const skill = requiredName(name, "skill");
+      const validProfile = requiredProfile(profile);
+      const skill = requiredName(name, "skill");
+      await mutationQueue.run(resourceKey(validProfile, "skill-content", skill), async () => await withClient(validProfile, async (client) => {
         if (expectedRevision !== undefined) {
           const current = await skillContentWith(client, skill, maxSkillContentBytes);
           if (current.redacted || current.revision !== requiredRevision(expectedRevision)) throw conflict();
         }
         await client.request("/api/skills/content", "PUT", { name: skill, content });
-      });
+      }));
     },
     getMemoryStatus: async (profile) => await withClient(profile, memoryStatusWith),
-    setMemoryProvider: async (profile, provider, expectedProvider) => await withClient(profile, async (client) => {
+    setMemoryProvider: async (profile, provider, expectedProvider) => {
+      const validProfile = requiredProfile(profile);
       const selected = requiredProvider(provider, true);
-      if (expectedProvider !== undefined && (await memoryStatusWith(client)).activeProvider !== requiredProvider(expectedProvider, true)) throw conflict();
-      await client.request("/api/memory/provider", "PUT", { provider: selected });
-    }),
+      const expected = expectedProvider === undefined ? undefined : requiredProvider(expectedProvider, true);
+      await mutationQueue.run(resourceKey(validProfile, "memory-provider"), async () => await withClient(validProfile, async (client) => {
+        if (expected !== undefined && (await memoryStatusWith(client)).activeProvider !== expected) throw conflict();
+        await client.request("/api/memory/provider", "PUT", { provider: selected });
+      }));
+    },
     getMemoryProviderConfig: async (profile, provider) => await withClient(profile, async (client) =>
       await providerConfigWith(client, requiredProvider(provider, false))),
-    updateMemoryProviderConfig: async (profile, provider, values, expectedRevision) => await withClient(profile, async (client) => {
+    updateMemoryProviderConfig: async (profile, provider, values, expectedRevision) => {
+      const validProfile = requiredProfile(profile);
       const validProvider = requiredProvider(provider, false);
-      const schema = await providerConfigWith(client, validProvider);
-      if (expectedRevision !== undefined && schema.revision !== requiredRevision(expectedRevision)) throw conflict();
-      const fields = new Map(schema.fields.map((field) => [field.key, field]));
-      const clean: Record<string, boolean | string> = {};
-      for (const [key, value] of Object.entries(values)) {
-        const field = fields.get(key);
-        if (field === undefined) throw invalid(`Unknown memory setting: ${key}`);
-        if (field.kind === "secret") throw invalid("Secret memory fields require the dedicated secret channel.");
-        if (typeof value !== "string" && typeof value !== "boolean") throw invalid(`Invalid memory setting: ${key}`);
-        if (typeof value === "string" && (value.length > 8_192 || value.includes("\0") || containsLikelySecret(value))) throw invalid(`Invalid memory setting: ${key}`);
-        clean[key] = value;
-      }
-      await client.request(`/api/memory/providers/${encodeURIComponent(validProvider)}/config?surface=declared`, "PUT", { values: clean });
-    }),
+      await mutationQueue.run(resourceKey(validProfile, "memory-config", validProvider), async () => await withClient(validProfile, async (client) => {
+        const schema = await providerConfigWith(client, validProvider);
+        if (expectedRevision !== undefined && schema.revision !== requiredRevision(expectedRevision)) throw conflict();
+        const fields = new Map(schema.fields.map((field) => [field.key, field]));
+        const clean: Record<string, boolean | string> = {};
+        for (const [key, value] of Object.entries(values)) {
+          const field = fields.get(key);
+          if (field === undefined) throw invalid(`Unknown memory setting: ${key}`);
+          if (field.kind === "secret") throw invalid("Secret memory fields require the dedicated secret channel.");
+          if (typeof value !== "string" && typeof value !== "boolean") throw invalid(`Invalid memory setting: ${key}`);
+          if (typeof value === "string" && (value.length > 8_192 || value.includes("\0") || containsLikelySecret(value))) throw invalid(`Invalid memory setting: ${key}`);
+          clean[key] = value;
+        }
+        await client.request(`/api/memory/providers/${encodeURIComponent(validProvider)}/config?surface=declared`, "PUT", { values: clean });
+      }));
+    },
     resetBuiltinMemory: async (profile, target) => {
       if (target !== "all" && target !== "memory" && target !== "user") throw invalid("Memory reset target is invalid.");
       await withClient(profile, async (client) => await client.request("/api/memory/reset", "POST", { target }));
@@ -207,16 +220,21 @@ export function createHermesSettingsAdapter(options: HermesSettingsAdapterOption
     updateProfileSoul: async (profile, content, expectedRevision) => {
       if (Buffer.byteLength(content) > 256 * 1024 || content.includes("\0")) throw invalid("Profile identity is invalid or too large.");
       if (containsLikelySecret(content)) throw invalid("Profile identity appears to contain a secret.");
-      await withClient(profile, async (client) => {
+      const validProfile = requiredProfile(profile);
+      await mutationQueue.run(resourceKey(validProfile, "soul"), async () => await withClient(validProfile, async (client) => {
         if (expectedRevision !== undefined) {
           const current = await soulWith(client);
           if (current.redacted || current.revision !== requiredRevision(expectedRevision)) throw conflict();
         }
         await client.request(`/api/profiles/${encodeURIComponent(client.profile)}/soul`, "PUT", { content });
-      });
+      }));
     },
   };
   return adapter;
+}
+
+function resourceKey(profile: string, resource: string, id = ""): string {
+  return `${profile}\0${resource}\0${id}`;
 }
 
 interface NormalizedBackend { baseUrl: URL; sessionToken: string }

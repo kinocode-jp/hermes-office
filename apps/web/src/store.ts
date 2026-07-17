@@ -27,6 +27,12 @@ export const activeSessionId = signal("");
 export const mobileInspectorOpen = signal(false);
 export const mobileWorkspaceOpen = signal(false);
 export const MAX_OPEN_CHAT_SESSIONS = 4;
+
+export function navigateToSurface(surface: Surface): void {
+  activeSurface.value = surface;
+  mobileInspectorOpen.value = false;
+  mobileWorkspaceOpen.value = false;
+}
 export const chatSocketState = signal<{ state: ChatConnectionState; message: RuntimeMessage }>({
   state: "disconnected",
   message: officeMessage("runtime.chat.waiting")
@@ -273,6 +279,7 @@ export function selectProfile(profileId: string): void {
     mobileInspectorOpen.value = false;
   } else {
     mobileInspectorOpen.value = true;
+    mobileWorkspaceOpen.value = false;
   }
   inspectorTab.value = "chat";
 }

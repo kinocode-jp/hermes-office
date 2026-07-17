@@ -93,9 +93,15 @@ fields fail closed.
 
 Global writes carry an integer `expectedRevision`. Skill/SOUL/provider document
 writes carry a SHA-256 `expectedRevision`; toggles/provider selection carry the
-previous effective value. Stale writes return HTTP 409. These checks prevent
-ordinary lost updates, although Hermes' upstream read and write calls are not a
-single transaction.
+previous effective value. Stale writes return HTTP 409. Office serializes each
+profile/resource compare-and-write pair, so concurrent writes through the same
+Office Server re-read after the prior write and cannot both accept one revision.
+
+Hermes does not currently expose a conditional-write contract for these routes.
+An out-of-process writer that edits Hermes directly can therefore race between
+Office's upstream read and write. `expectedRevision` is an in-process Office
+concurrency guarantee, not a cross-process transaction; operators should route
+interactive settings edits through one Office Server instance.
 
 ## Deliberate exclusions
 

@@ -8,6 +8,7 @@ import {
 import type { SettingsTab } from "../domain";
 import { localizeRuntimeMessage, officeMessage, officeRuntimeMessage, t, type RuntimeMessage } from "../i18n";
 import { canMutateSettingsTab, settingsMutationAccess } from "../settings-access";
+import { SettingsMutationRegistry, type SettingsMutationScope } from "../settings-mutation-registry";
 import { officeSnapshot } from "../store";
 import { AccessAudit } from "./access-audit";
 import { InfoTip } from "./info-tip";
@@ -55,9 +56,10 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
   const [skillQuery, setSkillQuery] = useState("");
   const [skillLimit, setSkillLimit] = useState(30);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState<ErrorState | null>(null);
   const generation = useRef(0);
+  const mutations = useRef(new SettingsMutationRegistry());
   const snapshot = officeSnapshot.value;
   const mutationAccess = settingsMutationAccess(snapshot);
   const canReadAudit = snapshot?.capabilities.access.allowedOperations.includes("audit.read") === true;
@@ -114,8 +116,9 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   useEffect(() => { setSkillLimit(30); }, [profileId, skillQuery]);
 
-  const perform = useCallback(async (key: string, action: () => Promise<void>, kind: "global" | "memory" | "skill" | "soul") => {
-    setBusy(key);
+  const perform = useCallback(async (key: string, scope: SettingsMutationScope, action: () => Promise<void>, kind: "global" | "memory" | "skill" | "soul") => {
+    if (!mutations.current.start(key, scope)) return;
+    setBusy(mutations.current.snapshot());
     setError(null);
     try {
       await action();
@@ -123,13 +126,14 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
     } catch (reason) {
       setError(errorState(reason));
     } finally {
-      setBusy(null);
+      mutations.current.finish(key);
+      setBusy(mutations.current.snapshot());
     }
   }, [onChanged]);
 
   const saveGlobal = () => {
     if (!global || !mutationAccess.global) return;
-    void perform("global", async () => {
+    void perform("global", "global", async () => {
       const updated = await updateGlobalSettings({
         expectedRevision: global.revision,
         sharedContextEnabled: sharedContext,
@@ -145,7 +149,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   const toggleSkill = (name: string, enabled: boolean) => {
     if (!profile || !mutationAccess.skill) return;
-    void perform(`skill:${name}`, async () => {
+    void perform(`skill:${name}`, `skill:${name}`, async () => {
       await setSkillEnabled(profile.profile, name, !enabled, enabled);
       setProfile((current) => current === null ? current : {
         ...current,
@@ -156,7 +160,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   const saveSoul = () => {
     if (!profile || profile.soul.redacted || !mutationAccess.soul) return;
-    void perform("soul", async () => {
+    void perform("soul", "soul", async () => {
       const updated = await updateProfileSoul(profile.profile, soulDraft, profile.soul.revision);
       setProfile((current) => current === null ? current : { ...current, soul: updated });
       setSoulDraft(updated.content);
@@ -165,7 +169,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   const saveProvider = () => {
     if (!profile || !mutationAccess.memory || providerDraft === profile.memory.activeProvider) return;
-    void perform("provider", async () => {
+    void perform("provider", "memory", async () => {
       const memory = await setMemoryProvider(profile.profile, providerDraft, profile.memory.activeProvider);
       setProfile((current) => current === null ? current : { ...current, memory });
       const currentGeneration = generation.current;
@@ -175,7 +179,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   const saveProviderConfig = () => {
     if (!profile || !providerConfig || !mutationAccess.memory) return;
-    void perform("provider-config", async () => {
+    void perform("provider-config", "memory", async () => {
       const updated = await updateMemoryProviderConfig(
         profile.profile,
         providerConfig.name,
@@ -208,6 +212,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
   );
   const soulDirty = profile !== null && profile.soul.content !== soulDraft;
   const providerConfigDirty = providerConfig !== null && JSON.stringify(providerValues) !== JSON.stringify(valuesFromConfig(providerConfig));
+  const memoryBusy = busy.has("provider") || busy.has("provider-config");
 
   return (
     <section class="live-settings" aria-busy={loading}>
@@ -284,7 +289,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
             <SectionHead code="UTIL-03" title={t("settings.sharedContext")} info={t("settings.noSecrets")} />
             <textarea value={globalContext} onInput={(event) => setGlobalContext(event.currentTarget.value)} rows={8} disabled={!mutationAccess.global} aria-invalid={!globalContextValid} aria-describedby="global-context-budget" placeholder={t("settings.contextPlaceholder")} />
             <small id="global-context-budget" class={`settings-budget ${globalContextValid ? "" : "is-over"}`}>{t("settings.contextBudget", { count: globalContextBytes, max: GLOBAL_CONTEXT_MAX_UTF8_BYTES })}</small>
-            <ActionBar dirty={globalDirty} retryPending={global?.skillSync.state === "pending"} busy={busy === "global"} permitted={mutationAccess.global} valid={globalContextValid && globalSkillsValid} onSave={saveGlobal} />
+            <ActionBar dirty={globalDirty} retryPending={global?.skillSync.state === "pending"} busy={busy.has("global")} permitted={mutationAccess.global} valid={globalContextValid && globalSkillsValid} onSave={saveGlobal} />
           </div>
         </div>
       ) : !profile ? (
@@ -301,8 +306,8 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
                 <span class="skill-line__light" aria-hidden="true" />
                 <div><b>{skill.name}</b><p>{skill.description || t("settings.noDescription")}</p></div>
                 <small>{skill.provenance} · {skill.category}</small>
-                <button type="button" role="switch" aria-checked={skill.enabled} disabled={!mutationAccess.skill || busy === `skill:${skill.name}`} onClick={() => toggleSkill(skill.name, skill.enabled)}>
-                  {busy === `skill:${skill.name}` ? "…" : skill.enabled ? "ON" : "OFF"}
+                <button type="button" role="switch" aria-checked={skill.enabled} disabled={!mutationAccess.skill || busy.has(`skill:${skill.name}`)} onClick={() => toggleSkill(skill.name, skill.enabled)}>
+                  {busy.has(`skill:${skill.name}`) ? "…" : skill.enabled ? "ON" : "OFF"}
                 </button>
               </article>
             ))}
@@ -319,7 +324,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
           <SectionHead code="IDENTITY" title={`${profile.profile} / SOUL.md`} note={`revision ${shortRevision(profile.soul.revision)}`} info={t("settings.soulNote")} />
           {profile.soul.redacted && <p class="settings-warning">{t("settings.redacted")}</p>}
           <textarea value={soulDraft} onInput={(event) => setSoulDraft(event.currentTarget.value)} rows={18} disabled={profile.soul.redacted || !mutationAccess.soul} spellcheck={false} />
-          <ActionBar dirty={soulDirty && !profile.soul.redacted} busy={busy === "soul"} permitted={mutationAccess.soul} onSave={saveSoul} />
+          <ActionBar dirty={soulDirty && !profile.soul.redacted} busy={busy.has("soul")} permitted={mutationAccess.soul} onSave={saveSoul} />
         </div>
       ) : (
         <div class="live-settings__memory">
@@ -330,12 +335,12 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
           <div class="settings-ledger">
             <SectionHead code="MEM-01" title={t("settings.memoryProvider")} note={profile.memory.activeProvider || t("settings.builtin")} />
             <label class="settings-field"><span>{t("settings.provider")}</span>
-              <select value={providerDraft} disabled={!mutationAccess.memory} onChange={(event) => setProviderDraft(event.currentTarget.value)}>
+              <select value={providerDraft} disabled={!mutationAccess.memory || memoryBusy} onChange={(event) => setProviderDraft(event.currentTarget.value)}>
                 <option value="">{t("settings.builtin")}</option>
                 {profile.memory.providers.filter((provider) => provider.name !== "builtin").map((provider) => <option key={provider.name} value={provider.name}>{provider.name}{provider.configured ? "" : ` — ${t("settings.setupRequired")}`}</option>)}
               </select>
             </label>
-            <ActionBar dirty={providerDraft !== profile.memory.activeProvider} busy={busy === "provider"} permitted={mutationAccess.memory} onSave={saveProvider} />
+            <ActionBar dirty={providerDraft !== profile.memory.activeProvider} busy={memoryBusy} permitted={mutationAccess.memory} onSave={saveProvider} />
           </div>
           {providerConfig && providerConfig.fields.some((field) => field.kind !== "secret") && (
             <div class="settings-ledger settings-ledger--wide">
@@ -345,19 +350,19 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
                   <label class="settings-field" key={field.key}>
                     <span>{field.label}{field.required ? " *" : ""}</span>
                     {field.kind === "boolean" ? (
-                      <input type="checkbox" checked={providerValues[field.key] === true} disabled={!mutationAccess.memory} onChange={(event) => setProviderValues({ ...providerValues, [field.key]: event.currentTarget.checked })} />
+                      <input type="checkbox" checked={providerValues[field.key] === true} disabled={!mutationAccess.memory || memoryBusy} onChange={(event) => setProviderValues({ ...providerValues, [field.key]: event.currentTarget.checked })} />
                     ) : field.kind === "select" ? (
-                      <select value={String(providerValues[field.key] ?? "")} disabled={!mutationAccess.memory} onChange={(event) => setProviderValues({ ...providerValues, [field.key]: event.currentTarget.value })}>
+                      <select value={String(providerValues[field.key] ?? "")} disabled={!mutationAccess.memory || memoryBusy} onChange={(event) => setProviderValues({ ...providerValues, [field.key]: event.currentTarget.value })}>
                         {field.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                       </select>
                     ) : (
-                      <input value={String(providerValues[field.key] ?? "")} disabled={!mutationAccess.memory} onInput={(event) => setProviderValues({ ...providerValues, [field.key]: event.currentTarget.value })} />
+                      <input value={String(providerValues[field.key] ?? "")} disabled={!mutationAccess.memory || memoryBusy} onInput={(event) => setProviderValues({ ...providerValues, [field.key]: event.currentTarget.value })} />
                     )}
                     {field.description && <small>{field.description}</small>}
                   </label>
                 ))}
               </div>
-              <ActionBar dirty={providerConfigDirty} busy={busy === "provider-config"} permitted={mutationAccess.memory} onSave={saveProviderConfig} />
+              <ActionBar dirty={providerConfigDirty} busy={memoryBusy} permitted={mutationAccess.memory} onSave={saveProviderConfig} />
             </div>
           )}
         </div>

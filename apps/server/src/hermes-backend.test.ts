@@ -310,6 +310,7 @@ const server = createServer((request, response) => {
   response.writeHead(404);
   response.end();
 });
+
 server.listen(0, "127.0.0.1", async () => {
   const address = server.address();
   process.stdout.write("HERMES_DASHBOARD_READY port=" + address.port + "\\n");
@@ -323,6 +324,7 @@ server.listen(0, "127.0.0.1", async () => {
   await flood(process.stderr);
   writeFileSync(${JSON.stringify(donePath)}, "done");
 });
+
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 `, "utf8");
   await chmod(executable, 0o755);
@@ -342,6 +344,66 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   }
 });
 
+test("managed backend invalidates a crashed generation, recovers once, and never respawns during shutdown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-"));
+  const executable = join(directory, "fake-hermes.mjs");
+  const countPath = join(directory, "serve-count.txt");
+  const crashPath = join(directory, "crash-first");
+  await writeManagedRecoveryFixture(executable, countPath, crashPath, false);
+  const backend = new HermesBackend({
+    executable, startTimeoutMs: 2_000, requestTimeoutMs: 500,
+    managedRestartAttempts: 2, managedRestartBackoffMs: 20,
+    globalSettingsPath: join(directory, "global-settings.json"),
+  });
+  const states: string[] = [];
+  backend.onStatusChange((status) => states.push(status.state));
+  try {
+    assert.equal(backend.settings(), backend.settings(), "HTTP requests share one mutation queue for this runtime");
+    assert.equal((await backend.start()).state, "ready");
+    assert.deepEqual((await backend.snapshot()).profiles.map((profile) => profile.id), ["generation-1"]);
+    await writeFile(crashPath, "crash", "utf8");
+    await waitForCondition(() => states.includes("unreachable"), 2_000);
+    assert.throws(() => backend.chat(), /not ready/i, "the dead origin and token are not reusable while recovering");
+    await waitForCondition(() => backend.status().state === "ready", 3_000);
+    assert.deepEqual((await backend.snapshot()).profiles.map((profile) => profile.id), ["generation-2"]);
+    assert.equal((await readFile(countPath, "utf8")).trim(), "2");
+    const unreachable = states.indexOf("unreachable");
+    const restarting = states.indexOf("starting", unreachable);
+    assert.equal(restarting > unreachable, true);
+    assert.equal(states.indexOf("ready", restarting) > restarting, true);
+    await backend.close();
+    const countAtClose = await readFile(countPath, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(await readFile(countPath, "utf8"), countAtClose);
+    assert.equal(backend.status().state, "stopped");
+  } finally {
+    await backend.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("managed recovery stops after its configured attempt bound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-bound-"));
+  const executable = join(directory, "fake-hermes.mjs");
+  const countPath = join(directory, "serve-count.txt");
+  const crashPath = join(directory, "crash-first");
+  await writeManagedRecoveryFixture(executable, countPath, crashPath, true);
+  const backend = new HermesBackend({
+    executable, startTimeoutMs: 1_000, requestTimeoutMs: 500,
+    managedRestartAttempts: 2, managedRestartBackoffMs: 10,
+    globalSettingsPath: join(directory, "global-settings.json"),
+  });
+  try {
+    assert.equal((await backend.start()).state, "ready");
+    await writeFile(crashPath, "crash", "utf8");
+    await waitForCondition(() => backend.status().state === "error", 4_000);
+    assert.equal((await readFile(countPath, "utf8")).trim(), "3", "one initial child plus exactly two recovery attempts");
+  } finally {
+    await backend.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function waitForFile(path: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -349,6 +411,47 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for managed backend state.");
+}
+
+async function writeManagedRecoveryFixture(executable: string, countPath: string, crashPath: string, failRecovery: boolean): Promise<void> {
+  await writeFile(executable, `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+if (process.argv.includes("--version")) {
+  process.stdout.write("Hermes Agent v0.18.2\\n");
+  process.exit(0);
+}
+const countPath = ${JSON.stringify(countPath)};
+const crashPath = ${JSON.stringify(crashPath)};
+const generation = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;
+writeFileSync(countPath, String(generation));
+if (${JSON.stringify(failRecovery)} && generation > 1) process.exit(1);
+const server = createServer((request, response) => {
+  response.setHeader("Content-Type", "application/json");
+  if (request.url === "/api/status") response.end(JSON.stringify({ version: "0.18.2" }));
+  else if (request.url === "/api/profiles") response.end(JSON.stringify({ profiles: [{ name: "generation-" + generation }] }));
+  else if (request.url?.startsWith("/api/profiles/sessions")) response.end(JSON.stringify({ sessions: [], total: 0, errors: [] }));
+  else if (request.url === "/api/plugins/kanban/board") response.end(JSON.stringify({ columns: [], latest_event_id: 0 }));
+  else { response.statusCode = 404; response.end(); }
+});
+server.listen(0, "127.0.0.1", () => {
+  process.stdout.write("HERMES_DASHBOARD_READY port=" + server.address().port + "\\n");
+});
+const watcher = setInterval(() => {
+  if (generation === 1 && existsSync(crashPath)) server.close(() => process.exit(1));
+}, 10);
+process.on("SIGTERM", () => { clearInterval(watcher); server.close(() => process.exit(0)); });
+`, "utf8");
+  await chmod(executable, 0o755);
 }
 
 async function startHermesFixture(handler: (request: IncomingMessage, response: ServerResponse, url: URL) => void, requestTimeoutMs = 2_000): Promise<{ backend: HermesBackend; close(): Promise<void> }> {

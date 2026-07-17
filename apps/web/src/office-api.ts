@@ -500,16 +500,16 @@ export async function officeFetchJson<T>(path: string, options: OfficeApiRequest
  * Starts a one-shot device login. The credential is serialized directly into
  * the request body and is never placed in module state, signals, URLs, or logs.
  */
-export function authenticateRemoteDevice(deviceNameInput: string, credential: string, serverUrl = officeServerUrl()): Promise<DeviceLoginResult> {
+export async function authenticateRemoteDevice(deviceNameInput: string, credential: string, serverUrl = officeServerUrl()): Promise<DeviceLoginResult> {
   const deviceName = normalizeDeviceName(deviceNameInput);
-  if (!deviceName) return Promise.resolve({ ok: false, ...classifyDeviceLoginFailure(400, null) });
-  const request = fetch(`${serverUrl}/api/v1/auth/device`, {
-    method: "POST",
-    credentials: "include",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ token: credential, deviceName })
-  });
-  return request.then(async (response): Promise<DeviceLoginResult> => {
+  if (!deviceName) return { ok: false, ...classifyDeviceLoginFailure(400, null) };
+  try {
+    const response = await fetch(`${serverUrl}/api/v1/auth/device`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ token: credential, deviceName })
+    });
     if (!response.ok) return { ok: false, ...classifyDeviceLoginFailure(response.status, response.headers.get("Retry-After")) };
     const session = parseOfficeSession(await response.json() as unknown);
     if (!session) return { ok: false, ...classifyDeviceLoginFailure(500, null) };
@@ -517,7 +517,9 @@ export function authenticateRemoteDevice(deviceNameInput: string, credential: st
     officeSessionRecoveryPending.delete(serverUrl);
     officeSessions.set(serverUrl, Promise.resolve(issueOfficeClientSession(session.csrfToken)));
     return { ok: true };
-  }, (): DeviceLoginResult => ({ ok: false, ...classifyDeviceLoginFailure(0, null) }));
+  } catch {
+    return { ok: false, ...classifyDeviceLoginFailure(0, null) };
+  }
 }
 
 export async function logoutRemoteDevice(serverUrl = officeServerUrl()): Promise<void> {

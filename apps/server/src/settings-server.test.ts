@@ -27,7 +27,7 @@ test("Office Server settings API requires authentication and CSRF on writes", as
     settings: () => settings,
     globalSettings: () => global,
   };
-  const server = createOfficeServer({ port: 0, runtimeSource: runtime });
+  const server = createOfficeServer({ port: 0, runtimeSource: runtime, allowedOrigins: ["http://localhost:4173"] });
   const address = await server.listen();
   t.after(() => server.close());
   const origin = `http://127.0.0.1:${address.port}`;

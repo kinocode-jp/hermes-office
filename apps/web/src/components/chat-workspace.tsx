@@ -4,8 +4,14 @@ import { chatSessionTitle, t } from "../i18n";
 import { activeSessionId, mobileInspectorOpen, mobileWorkspaceOpen, openSession, profileList, sessions, openSessionIds } from "../store";
 import { ChatPane } from "./chat-pane";
 import { InfoTip } from "./info-tip";
+import { useMobileOverlay } from "./use-mobile-overlay";
 
 export function ChatWorkspace() {
+  const mobileOverlay = useMobileOverlay<HTMLElement>({
+    kind: "route",
+    open: mobileWorkspaceOpen.value,
+    onClose: () => { mobileWorkspaceOpen.value = false; },
+  });
   const openSessions = useMemo(
     () => openSessionIds.value
       .map((id) => sessions.value.find((session) => session.id === id))
@@ -23,10 +29,16 @@ export function ChatWorkspace() {
   }
 
   return (
-    <section class="chat-workspace-shell">
+    <section
+      ref={mobileOverlay.ref}
+      class="chat-workspace-shell"
+      role={mobileOverlay.active ? "region" : undefined}
+      aria-labelledby={mobileOverlay.active ? "mobile-workspace-title" : undefined}
+      tabIndex={mobileOverlay.active ? -1 : undefined}
+    >
       <header class="mobile-workspace-bar">
-        <button onClick={() => { mobileWorkspaceOpen.value = false; }}>← {t("workspace.profiles")}</button>
-        <b>{t("workspace.chats", { count: openSessions.length })}</b>
+        <button data-mobile-overlay-initial-focus onClick={() => { mobileWorkspaceOpen.value = false; }}>← {t("workspace.profiles")}</button>
+        <b id="mobile-workspace-title">{t("workspace.chats", { count: openSessions.length })}</b>
         <button onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}>{t("workspace.profileSettings")}</button>
       </header>
       <nav class="mobile-chat-tabs" aria-label={t("workspace.switchChats")}>

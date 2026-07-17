@@ -40,7 +40,7 @@ test("Office history endpoint serves large histories as bounded cursor pages", a
     }),
     kanban: () => { throw new Error("unused"); },
   };
-  const server = createOfficeServer({ port: 0, runtimeSource: runtime, maxJsonBytes: 4 * 1024 });
+  const server = createOfficeServer({ port: 0, runtimeSource: runtime, maxJsonBytes: 4 * 1024, allowedOrigins: [ORIGIN] });
   const address = await server.listen();
   t.after(() => server.close());
   const base = `http://127.0.0.1:${address.port}`;

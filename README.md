@@ -79,7 +79,9 @@ npm run dev
 
 This starts the PWA on port `4173` and Office Server on port `4317`. By default,
 Office Server starts a managed stock `hermes serve` process on an OS-selected
-loopback port. The Hermes backend credential stays in Office Server.
+loopback port. The development command explicitly allows the two Vite origins;
+production does not trust port `4173`. The Hermes backend credential stays in
+Office Server.
 
 Run surfaces individually with:
 
@@ -144,6 +146,11 @@ HERMES_OFFICE_ALLOWED_ORIGINS='https://your-device.your-tailnet.ts.net' \
 HERMES_OFFICE_TRUSTED_PROXY_HOPS=1 \
 npm start
 ```
+
+Configured remote origins are added to, rather than substituted for, the
+server's actual loopback listener origin. This keeps the local production UI at
+`http://127.0.0.1:4317` available for owner-only device review and revocation;
+unrelated local development origins remain denied.
 
 The first remote browser exchanges the enrollment token over the configured
 HTTPS proxy for a separate device credential and HttpOnly session cookie. The

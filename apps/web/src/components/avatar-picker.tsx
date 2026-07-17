@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { avatarForProfile, DEFAULT_CHARACTER_COUNT, resetProfileAvatar, setCreatureAvatar, setCustomAvatar } from "../avatar-preferences";
+import { avatarForProfile, beginCustomAvatarChange, DEFAULT_CHARACTER_COUNT, isAvatarChangeCurrent, resetProfileAvatar, setCreatureAvatar, setCustomAvatar } from "../avatar-preferences";
 import { CharacterPortrait } from "./character-portrait";
 import { InfoTip } from "./info-tip";
 import { t } from "../i18n";
@@ -17,6 +17,7 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
   const selected = avatarForProfile(profileId);
 
   useEffect(() => {
@@ -44,9 +45,17 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
       setError(t("avatar.invalid"));
       return;
     }
-    const dataUrl = await readFile(file);
-    if (await setCustomAvatar(profileId, dataUrl)) onClose();
-    else setError(t("avatar.saveFailed"));
+    const generation = beginCustomAvatarChange(profileId);
+    setUploading(true);
+    try {
+      const dataUrl = await readFile(file);
+      if (await setCustomAvatar(profileId, dataUrl, generation)) onClose();
+      else if (isAvatarChangeCurrent(profileId, generation)) setError(t("avatar.saveFailed"));
+    } catch {
+      setError(t("avatar.invalid"));
+    } finally {
+      setUploading(false);
+    }
   }
 
   return (
@@ -81,8 +90,8 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
           ))}
         </div>
         <div class="avatar-picker-actions">
-          <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
-          <button type="button" class="avatar-upload-button" onClick={() => inputRef.current?.click()}>{t("avatar.upload")}</button>
+          <input ref={inputRef} type="file" disabled={uploading} accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
+          <button type="button" class="avatar-upload-button" disabled={uploading} onClick={() => inputRef.current?.click()}>{t("avatar.upload")}</button>
           <button type="button" class="avatar-reset-button" onClick={() => { resetProfileAvatar(profileId); onClose(); }}>{t("avatar.reset")}</button>
         </div>
         {error && <p class="avatar-picker-error" role="alert">{error}</p>}

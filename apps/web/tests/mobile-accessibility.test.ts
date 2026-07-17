@@ -6,13 +6,17 @@ import { createProfileSession } from "../src/components/profile-panel.tsx";
 import { mobileChatTabPresentation } from "../src/components/chat-workspace.tsx";
 import { locale, setLocale } from "../src/i18n.ts";
 import {
+  activeSurface,
   activeSessionId,
   mobileInspectorOpen,
   mobileWorkspaceOpen,
+  navigateToSurface,
   officeConnection,
   openSession,
   openSessionIds,
   profileList,
+  selectProfile,
+  selectedProfileId,
   sessions,
 } from "../src/store.ts";
 
@@ -100,6 +104,7 @@ test("mobile new chat opens its workspace only after session creation succeeds",
   const previousSessions = sessions.value;
   const previousOpenIds = openSessionIds.value;
   const previousActiveId = activeSessionId.value;
+  const previousSelectedProfile = selectedProfileId.value;
   const previousInspector = mobileInspectorOpen.value;
   const previousWorkspace = mobileWorkspaceOpen.value;
   try {
@@ -131,16 +136,99 @@ test("mobile new chat opens its workspace only after session creation succeeds",
     sessions.value = previousSessions;
     openSessionIds.value = previousOpenIds;
     activeSessionId.value = previousActiveId;
+    selectedProfileId.value = previousSelectedProfile;
     mobileInspectorOpen.value = previousInspector;
     mobileWorkspaceOpen.value = previousWorkspace;
   }
 });
 
+test("mobile primary navigation closes both overlays before revealing its surface", () => {
+  const previousSurface = activeSurface.value;
+  const previousInspector = mobileInspectorOpen.value;
+  const previousWorkspace = mobileWorkspaceOpen.value;
+  try {
+    for (const surface of ["office", "kanban", "library", "settings"] as const) {
+      mobileInspectorOpen.value = true;
+      mobileWorkspaceOpen.value = true;
+      navigateToSurface(surface);
+      assert.equal(activeSurface.value, surface);
+      assert.equal(mobileInspectorOpen.value, false);
+      assert.equal(mobileWorkspaceOpen.value, false);
+    }
+  } finally {
+    activeSurface.value = previousSurface;
+    mobileInspectorOpen.value = previousInspector;
+    mobileWorkspaceOpen.value = previousWorkspace;
+  }
+});
+
+test("mobile profile selection opens exactly one focused route with and without an existing chat", () => {
+  const previousProfiles = profileList.value;
+  const previousSessions = sessions.value;
+  const previousOpenIds = openSessionIds.value;
+  const previousActiveId = activeSessionId.value;
+  const previousSelectedProfile = selectedProfileId.value;
+  const previousInspector = mobileInspectorOpen.value;
+  const previousWorkspace = mobileWorkspaceOpen.value;
+  try {
+    profileList.value = [{
+      id: "theo", name: "Theo", role: "Engineering", status: "idle", color: "#087f70",
+      sessions: 0, taskCount: 0, memoryBytes: 0, memoryNote: "", skills: [], inheritedSkills: [],
+    }];
+    sessions.value = [];
+    openSessionIds.value = [];
+    mobileWorkspaceOpen.value = true;
+    selectProfile("theo");
+    assert.equal(mobileInspectorOpen.value, true);
+    assert.equal(mobileWorkspaceOpen.value, false);
+
+    sessions.value = [session("existing", "Existing chat")];
+    selectProfile("theo");
+    assert.equal(mobileInspectorOpen.value, false);
+    assert.equal(mobileWorkspaceOpen.value, true);
+  } finally {
+    profileList.value = previousProfiles;
+    sessions.value = previousSessions;
+    openSessionIds.value = previousOpenIds;
+    activeSessionId.value = previousActiveId;
+    selectedProfileId.value = previousSelectedProfile;
+    mobileInspectorOpen.value = previousInspector;
+    mobileWorkspaceOpen.value = previousWorkspace;
+  }
+});
+
+test("mobile route and modal overlays expose consistent focus, inert, and navigation semantics", async () => {
+  const [app, workspace, profile, overlay] = await Promise.all([
+    readFile(new URL("../src/app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/chat-workspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/profile-panel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/use-mobile-overlay.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(app, /onClick=\{\(\) => navigateToSurface\(item\.id\)\}/);
+  assert.match(app, /data-mobile-route-chrome/);
+  assert.match(workspace, /kind: "route"/);
+  assert.match(workspace, /role=\{mobileOverlay\.active \? "region" : undefined\}/);
+  assert.doesNotMatch(workspace, /aria-modal=/);
+  assert.match(profile, /kind: "modal"/);
+  assert.match(profile, /role=\{mobileOverlay\.active \? "dialog" : undefined\}/);
+  assert.match(profile, /aria-modal=\{mobileOverlay\.active \? "true" : undefined\}/);
+  for (const source of [workspace, profile]) assert.match(source, /data-mobile-overlay-initial-focus/);
+  assert.match(overlay, /kind !== "route" \|\| !element\.hasAttribute\("data-mobile-route-chrome"\)/);
+  assert.match(overlay, /element\.inert = true/);
+  assert.match(overlay, /element\.setAttribute\("aria-hidden", "true"\)/);
+  assert.match(overlay, /event\.key === "Escape"/);
+  assert.match(overlay, /kind !== "modal" \|\| event\.key !== "Tab"/);
+  assert.match(overlay, /previousFocus\?\.isConnected/);
+});
+
 test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touch targets", async () => {
-  const [workspace, styles, appearance] = await Promise.all([
+  const [workspace, styles, appearance, liveSettings, audit] = await Promise.all([
     readFile(new URL("../src/components/chat-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
-    readFile(new URL("../src/appearance.css", import.meta.url), "utf8")
+    readFile(new URL("../src/appearance.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/live-settings.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(workspace, /aria-label=\{tab\.accessibleLabel\}/);
@@ -166,6 +254,13 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
   assert.match(styles, /\.task-assignee-select, \.task-status-select \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(styles, /\.task-comment-list header \{[^}]*flex-wrap: wrap/);
   assert.match(styles, /\.task-comment-form \{[^}]*minmax\(var\(--target-mobile\), max-content\)/);
+
+  for (const selector of [".live-settings__tabs button", ".skill-line p", ".settings-ledger textarea", ".memory-gauge span", ".settings-field"]) {
+    assert.match(declarationsForSelector(liveSettings, selector), /var\(--ls-text-|var\(--font-scale\)/, `${selector} must follow the selected font scale`);
+  }
+  for (const selector of [".access-audit__title p", ".access-audit__current strong", ".access-audit__rail li", ".access-audit__message", ".access-audit footer"]) {
+    assert.match(declarationsForSelector(audit, selector), /var\(--font-scale\)/, `${selector} must follow the selected font scale`);
+  }
 });
 
 function session(id: string, title: string): ChatSession {
@@ -176,6 +271,13 @@ function selectorsUsing(css: string, declaration: string): string {
   return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
     .filter((match) => match[2]?.includes(declaration))
     .map((match) => match[1]?.trim())
+    .join("\n");
+}
+
+function declarationsForSelector(css: string, selector: string): string {
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter((match) => match[1]?.split(",").some((candidate) => candidate.trim() === selector))
+    .map((match) => match[2]?.trim())
     .join("\n");
 }
 

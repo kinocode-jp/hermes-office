@@ -20,7 +20,7 @@
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names server,web \"npm run dev:server\" \"npm run dev:web\"",
     "dev:web": "npm run dev --workspace @hermes-office/web",
-    "dev:server": "npm run dev --workspace @hermes-office/server",
+    "dev:server": "HERMES_OFFICE_ALLOWED_ORIGINS=http://localhost:4173,http://127.0.0.1:4173 npm run dev --workspace @hermes-office/server",
     "dev:desktop": "npm run tauri:dev --workspace @hermes-office/desktop",
     "start": "node scripts/start-office.mjs",
     "build:production": "npm run build:web && npm run build --workspace @hermes-office/server",

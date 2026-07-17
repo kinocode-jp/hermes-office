@@ -59,7 +59,7 @@ test("production web assets are public, HEAD-aware, cache-safe, and use a functi
 
 test("API paths retain API routing and never receive the SPA shell", async () => {
   const root = await webFixture();
-  const server = createOfficeServer({ port: 0, staticWebRoot: root });
+  const server = createOfficeServer({ port: 0, staticWebRoot: root, allowedOrigins: [ORIGIN] });
   const address = await server.listen();
   const base = `http://127.0.0.1:${address.port}`;
   try {

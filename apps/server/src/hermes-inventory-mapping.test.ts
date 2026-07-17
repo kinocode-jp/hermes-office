@@ -172,15 +172,17 @@ test("missing timestamps use a stable unknown sentinel and preserve cursor gener
 test("session inventory redacts Hermes secrets before bounding browser display text", async () => {
   const secret = "dashboard-example-value-123456";
   const standalone = "sk_" + "live_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const authorization = "opaque-inventory-credential";
   const row = {
     ...session("secret-safe", 1),
     title: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}; ${standalone}`,
-    preview: `credential: OPENAI_API_KEY=${secret}`,
+    preview: `credential: OPENAI_API_KEY=${secret}\nProxy-Authorization: Token ${authorization}`,
   };
   const inventory = await collectHermesInventory(requester([profile()], [row]));
   const serialized = JSON.stringify(inventory.sessions);
   assert.equal(serialized.includes(secret), false);
   assert.equal(serialized.includes(standalone), false);
+  assert.equal(serialized.includes(authorization), false);
   assert.equal(serialized.includes("[REDACTED]"), true);
 });
 

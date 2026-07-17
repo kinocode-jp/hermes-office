@@ -18,14 +18,7 @@ import {
   createDemoRuntimeStatus,
   createDemoSnapshot,
 } from "./demo-state.js";
-
-const DEFAULT_ORIGINS = [
-  "http://127.0.0.1:4173",
-  "http://localhost:4173",
-  "tauri://localhost",
-  "http://tauri.localhost",
-  "https://tauri.localhost",
-] as const;
+import { DEFAULT_OFFICE_ORIGINS, listenerOrigins } from "./server-origins.js";
 
 export interface OfficeServerOptions {
   host?: string;
@@ -61,9 +54,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const maxResponseJsonBytes = boundedInteger(options.maxResponseJsonBytes, 4 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024);
   const maxEventBytes = boundedInteger(options.maxEventBytes, 64 * 1024, 1_024, 1024 * 1024);
   const maxWebSocketClients = boundedInteger(options.maxWebSocketClients, 32, 1, 256);
-  const originAllowlist = new Set(makeOriginAllowlist(
-    options.allowedOrigins ?? defaultOriginsForPort(port),
-  ));
+  const originAllowlist = new Set(makeOriginAllowlist(options.allowedOrigins ?? DEFAULT_OFFICE_ORIGINS));
   const runtimeSource = options.runtimeSource;
   const staticWeb = options.staticWebRoot === undefined ? undefined : new StaticWebAssets(options.staticWebRoot);
   let publishAudit = (_record: OfficeAuditRecord): void => {};
@@ -100,6 +91,11 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const chatDeviceLimiter = new ChatDeviceRateLimiter();
   const chatSessionCoordinator = new ChatSessionCoordinator();
   const chatUpstreamHub = runtimeSource === undefined ? undefined : new ChatUpstreamHub(runtimeSource, chatSessionCoordinator, maxJsonBytes);
+  const publishRuntimeStatus = (status: import("@hermes-office/protocol").RuntimeStatus): void => {
+    const event = makeEvent(++sequence, "runtime.status", status);
+    for (const client of websocketServer.clients) sendBoundedEvent(client, event, maxEventBytes);
+  };
+  const unsubscribeRuntimeStatus = runtimeSource?.onStatusChange?.(publishRuntimeStatus);
   publishAudit = (record) => {
     const publicRecord = {
       occurredAt: record.occurredAt,
@@ -503,15 +499,14 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
             reject(new Error("Office Server did not receive a TCP address."));
             return;
           }
-          if (options.allowedOrigins === undefined && isLoopbackHost(host)) {
-            originAllowlist.add(`http://127.0.0.1:${address.port}`);
-            originAllowlist.add(`http://localhost:${address.port}`);
-          }
+          for (const origin of listenerOrigins(address)) originAllowlist.add(origin);
           resolve(address);
         });
       }),
-    close: () =>
-      new Promise<void>((resolve, reject) => {
+    close: () => {
+      unsubscribeRuntimeStatus?.();
+      const runtimeClose = runtimeSource?.close();
+      const serverClose = new Promise<void>((resolve, reject) => {
         for (const client of websocketServer.clients) {
           client.close(1001, "Server shutting down");
         }
@@ -527,8 +522,9 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       }).then(async () => {
         await chatUpstreamHub?.close();
         await auth.flushRegistryWrites();
-        await runtimeSource?.close();
-      }),
+      });
+      return Promise.all([serverClose, runtimeClose]).then(() => undefined);
+    },
     broadcast: <T>(topic: EventTopic, payload: T, aggregateId?: string): boolean => {
       const event = makeEvent(++sequence, topic, payload, aggregateId);
       let sent = false;
@@ -538,14 +534,6 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       return sent;
     },
   };
-}
-
-function defaultOriginsForPort(port: number): readonly string[] {
-  return [
-    ...DEFAULT_ORIGINS,
-    `http://127.0.0.1:${port}`,
-    `http://localhost:${port}`,
-  ];
 }
 
 function kanbanOperation(method: string | undefined, pathname: string): Operation {

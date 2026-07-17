@@ -36,7 +36,7 @@ test("Office Server seeds only session.create with trusted global context", asyn
       sessionCreateContext: async () => { contextReads += 1; return "Office-only shared context"; },
     }),
   } as unknown as HermesRuntimeSource;
-  const server = createOfficeServer({ port: 0, runtimeSource: runtime });
+  const server = createOfficeServer({ port: 0, runtimeSource: runtime, allowedOrigins: ["http://localhost:4173"] });
   const address = await server.listen();
   t.after(() => server.close());
   const origin = `http://127.0.0.1:${address.port}`;

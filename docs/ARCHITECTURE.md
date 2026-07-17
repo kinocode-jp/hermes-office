@@ -72,6 +72,13 @@ desktop shell starts the bundled Office Server JavaScript using a Node runtime
 available on the machine. These are local runtime integrations, not bundled,
 signed Hermes or Node distributions.
 
+After a managed child exits unexpectedly, Office invalidates that generation's
+origin and token immediately, publishes `runtime.status`, and performs one
+single-flight recovery sequence with bounded attempts and backoff. Exhausted
+recovery enters the explicit `error` state. Server shutdown suppresses recovery
+and waits for any in-flight attempt before terminating the current child, so a
+managed process is never respawned after shutdown begins.
+
 The desktop launcher canonicalizes and validates executable ownership/mode and
 requires Node 22.x/Hermes 0.18.x. A source `npm run dev` launch uses the explicit
 Hermes executable value; its default bare `hermes` name is resolved through the

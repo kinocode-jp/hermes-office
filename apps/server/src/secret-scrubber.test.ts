@@ -33,7 +33,7 @@ test("redacts namespaced, quoted, spaced, and lowercase secret assignments", () 
   assert.equal(containsLikelySecret("token budget = 4096\nsecretary = enabled"), false);
 });
 
-test("retains URL query, Bearer, private-key, and ANSI protections", () => {
+test("retains URL query, authorization-header, private-key, and ANSI protections", () => {
   const source = [
     "https://example.test/?access_token=query-example-value&mode=safe",
     "Authorization: Bearer bearer-example-value-123456",
@@ -50,7 +50,7 @@ test("retains URL query, Bearer, private-key, and ANSI protections", () => {
   assert.equal(result.value.includes("\u001b"), false);
   assert.match(result.value, /access_token=\[REDACTED\]&mode=safe/);
   assert.doesNotMatch(result.value, /\[REDACTED\]\]/);
-  assert.match(result.value, /Bearer \[REDACTED\]/);
+  assert.match(result.value, /Authorization: \[REDACTED\]/);
   assert.match(result.value, /\[REDACTED PRIVATE KEY\]/);
 });
 
@@ -71,11 +71,47 @@ test("redacts short explicit assignments, Basic auth, and HTTP URL userinfo", ()
     "password=[REDACTED]",
     "note: API_KEY='[REDACTED]'",
     'wrapper: "clientSecret=[REDACTED]"',
-    "Authorization: Basic [REDACTED]",
-    "Proxy-Authorization: Basic [REDACTED]",
+    "Authorization: [REDACTED]",
+    "Proxy-Authorization: [REDACTED]",
     "https://[REDACTED]:[REDACTED]@example.test/private?mode=safe",
   ].join("\n"));
   for (const line of source.split("\n")) assert.equal(containsLikelySecret(line), true);
+});
+
+test("redacts complete authorization header values independent of scheme or length", () => {
+  const source = [
+    "Authorization: Bearer abc123",
+    "authorization:\tToken opaque-service-credential",
+    "Authorization: Digest username=operator, response=tiny",
+    "Authorization: [REDACTED] trailing-secret",
+    "Proxy-Authorization: Custom x",
+    "trace Authorization=Token equal-secret",
+    "> Proxy-Authorization: Scheme prefixed-secret",
+    "X-Authorization: extension-credential",
+    "Authorization:",
+    "next-line-safe",
+  ].join("\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+
+  assert.equal(once.redacted, true);
+  assert.equal(once.value, [
+    "Authorization: [REDACTED]",
+    "authorization:\t[REDACTED]",
+    "Authorization: [REDACTED]",
+    "Authorization: [REDACTED]",
+    "Proxy-Authorization: [REDACTED]",
+    "trace Authorization=[REDACTED]",
+    "> Proxy-Authorization: [REDACTED]",
+    "X-Authorization: [REDACTED]",
+    "Authorization:",
+    "next-line-safe",
+  ].join("\n"));
+  for (const secret of ["abc123", "opaque-service-credential", "response=tiny", "trailing-secret", "Custom x", "equal-secret", "prefixed-secret", "extension-credential"]) {
+    assert.equal(once.value.includes(secret), false);
+  }
+  assert.deepEqual(twice, { value: once.value, redacted: false });
 });
 
 test("redacts high-confidence standalone provider credentials", () => {
@@ -155,6 +191,7 @@ test("redaction is idempotent for query and assignment placeholders", () => {
     "OPENAI_API_KEY=openai-example-value",
     'clientSecret = "client-example-value"',
     "session_token=[REDACTED]actual-secret-value",
+    "Authorization: [REDACTED] trailing-secret-value",
   ].join("\n");
 
   const once = redactSecrets(source);
@@ -165,6 +202,7 @@ test("redaction is idempotent for query and assignment placeholders", () => {
     "OPENAI_API_KEY=[REDACTED]",
     'clientSecret = "[REDACTED]"',
     "session_token=[REDACTED]",
+    "Authorization: [REDACTED]",
   ].join("\n"));
   assert.equal(twice.value, once.value);
   assert.equal(twice.redacted, false);

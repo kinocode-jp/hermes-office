@@ -74,7 +74,7 @@ function makeFixture(cardCount = 1) {
 
 test("Kanban responses use a bounded response budget independent from request bodies", async () => {
   const fixture = makeFixture(1_000);
-  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, maxJsonBytes: 4 * 1024 });
+  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, maxJsonBytes: 4 * 1024, allowedOrigins: [ORIGIN] });
   const address = await server.listen();
   const base = `http://127.0.0.1:${address.port}`;
   try {
@@ -109,7 +109,7 @@ function headers(session: { cookie: string; csrf?: string }): Record<string, str
 
 test("Kanban board and card reads require a session and return secret-safe DTOs", async () => {
   const fixture = makeFixture();
-  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime });
+  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, allowedOrigins: [ORIGIN] });
   const address = await server.listen();
   const base = `http://127.0.0.1:${address.port}`;
   try {
@@ -138,7 +138,7 @@ test("Kanban board and card reads require a session and return secret-safe DTOs"
 
 test("Kanban mutations require CSRF and expose create/update/status/assignee/comment routes", async () => {
   const fixture = makeFixture();
-  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime });
+  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, allowedOrigins: [ORIGIN] });
   const address = await server.listen();
   const base = `http://127.0.0.1:${address.port}`;
   try {
@@ -195,7 +195,7 @@ test("Kanban mutations require CSRF and expose create/update/status/assignee/com
 
 test("Kanban HTTP boundary rejects unknown fields, unsafe transitions, and oversized JSON", async () => {
   const fixture = makeFixture();
-  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, maxJsonBytes: 32 * 1024 });
+  const server = createOfficeServer({ port: 0, runtimeSource: fixture.runtime, maxJsonBytes: 32 * 1024, allowedOrigins: [ORIGIN] });
   const address = await server.listen();
   const base = `http://127.0.0.1:${address.port}`;
   try {

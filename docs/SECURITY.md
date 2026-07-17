@@ -24,6 +24,9 @@ independent audit, certification, or warranty.
   rejected. Remote browsers must arrive through the configured loopback proxy.
 - Local bootstrap checks the peer address, exact Host/Origin allowlists, and
   rejects forwarded requests rather than trusting proxy headers.
+- The actual loopback listener origin is always retained for local owner
+  management. Port `4173` Vite origins are allowed only by development scripts,
+  never by the production default or remote-origin configuration.
 - CORS and WebSocket upgrades validate exact configured origins.
 - HTTP methods, content types, JSON shapes, identifiers, request bodies,
   WebSocket frames, outbound responses, and event buffers are bounded. HTTP
