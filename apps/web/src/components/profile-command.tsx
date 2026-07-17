@@ -3,7 +3,7 @@ import { t } from "../i18n";
 import { profileList, selectProfile } from "../store";
 import { CharacterPortrait } from "./character-portrait";
 import { StatusPill } from "./status-pill";
-import { hasOpenModal, isTopmostModal } from "../modal-layer";
+import { canRestoreModalFocus, hasOpenModal, isTopmostModal, registerModal } from "../modal-layer";
 
 export function ProfileCommand() {
   const [open, setOpen] = useState(false);
@@ -38,10 +38,11 @@ export function ProfileCommand() {
 
   useEffect(() => {
     if (!open) return;
+    const unregister = dialog.current ? registerModal(dialog.current) : undefined;
     setQuery("");
     setActiveIndex(0);
     requestAnimationFrame(() => input.current?.focus());
-    return () => { previousFocus.current?.focus(); };
+    return () => { unregister?.(); if (canRestoreModalFocus(previousFocus.current)) previousFocus.current?.focus(); };
   }, [open]);
 
   const openCommand = () => {

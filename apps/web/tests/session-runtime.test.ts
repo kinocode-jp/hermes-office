@@ -3,10 +3,11 @@ import test from "node:test";
 import type { ChatPromptResult, ChatSteerResult } from "../src/chat-api.ts";
 import type { ChatSession } from "../src/domain.ts";
 import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, officeMessage, officeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
-import { ChatSteerMark, chatComposerState, formatChatMessageTime, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
+import { buildChatTimeline, chatComposerState, formatChatMessageTime, nextOperationAnnouncement, operationAnnouncementText, presentedOperationEvidence, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "../src/session-runtime.ts";
 import { boundedSteerEvidence, MAX_STEER_EVIDENCE_BYTES, MAX_STEER_EVIDENCE_COUNT } from "../src/chat-run-actions.ts";
 import {
+  applyChatHistory,
   closeSession,
   interruptSession,
   openSessionIds,
@@ -15,6 +16,7 @@ import {
   reconcilePromptOperationsWithHistory,
   sendMessage,
   sessions,
+  setChatHistoryLoading,
   setChatSessionDisconnected,
   setChatSessionReady,
   steerSession,
@@ -61,8 +63,9 @@ test("sendMessage rejects every in-flight shape and atomically blocks a second p
   sendMessage(ready.id, "first");
   sendMessage(ready.id, "second");
   assert.deepEqual(submitted, ["first"]);
-  assert.equal(sessions.value[0]?.messages.filter((message) => message.from === "user").length, 1);
-  assert.equal(Number.isNaN(Date.parse(sessions.value[0]!.messages[0]!.at)), false);
+  assert.equal(sessions.value[0]?.messages.filter((message) => message.from === "user").length, 0);
+  assert.equal(sessions.value[0]?.operationEvidence?.length, 1);
+  assert.equal(Number.isNaN(Date.parse(sessions.value[0]!.operationEvidence![0]!.at)), false);
 
   sessions.value = [{ ...ready, streamingMessageId: "hidden-live" }];
   sendMessage(ready.id, "marker");
@@ -83,15 +86,15 @@ test("prompt submissions expose pending, accepted, rejected, and commit-unknown 
   });
   sessions.value = [{ ...ready }];
   sendMessage(ready.id, "deploy once");
-  const pending = sessions.value[0]!.messages[0]!;
-  assert.equal(pending.promptOperation?.state, "pending");
-  assert.equal(pending.id, `prompt-${pending.promptOperation?.id}`);
+  const pending = sessions.value[0]!.operationEvidence![0]!;
+  assert.equal(pending.state, "pending");
+  assert.equal(pending.kind, "prompt");
+  assert.equal(sessions.value[0]!.messages.length, 0, "local RPC evidence must not corrupt the durable transcript");
   assert.equal(calls.length, 1);
 
   submission.resolve({ status: "unconfirmed", message: "socket closed after send" });
   await Promise.resolve();
-  assert.equal(sessions.value[0]!.messages[0]!.promptOperation?.state, "unconfirmed");
-  assert.equal(sessions.value[0]!.messages[0]!.status, undefined);
+  assert.equal(sessions.value[0]!.operationEvidence![0]!.state, "unconfirmed");
   assert.equal(canSubmitChatPrompt(sessions.value[0]!), true, "the operator may decide what to do after reviewing commit-unknown evidence");
   assert.equal(calls.length, 1, "commit-unknown prompts must never be replayed automatically");
 
@@ -106,15 +109,15 @@ test("prompt submissions expose pending, accepted, rejected, and commit-unknown 
     });
     sendMessage(ready.id, result.status);
     await Promise.resolve();
-    assert.equal(sessions.value[0]!.messages[0]!.promptOperation?.state, result.status);
-    assert.equal(sessions.value[0]!.messages[0]!.status, result.status === "rejected" ? "failed" : undefined);
+    assert.equal(sessions.value[0]!.operationEvidence![0]!.state, result.status);
+    assert.equal(sessions.value[0]!.messages.length, 0);
   }
 });
 
 test("authoritative history preserves prompt operation evidence without a durable operation id", () => {
   const at = "2026-07-17T01:00:00.000Z";
   const operation = (id: string, body: string, state: "accepted" | "rejected" | "unconfirmed") => ({
-    id, from: "user" as const, body, at, promptOperation: { id, state },
+    id, kind: "prompt" as const, body, at, state,
   });
   const local = [operation("accepted", "same", "accepted"), operation("rejected", "same", "rejected"), operation("unknown", "other", "unconfirmed")];
   const history = [{ id: "remote", from: "user" as const, body: "same", at, status: "complete" as const }];
@@ -123,8 +126,8 @@ test("authoritative history preserves prompt operation evidence without a durabl
 
 test("old or timestamp-free same-text history never erases newer accepted operation evidence", () => {
   const local = [{
-    id: "accepted-new", from: "user" as const, body: "repeatable command", at: "2026-07-17T10:00:00.000Z",
-    promptOperation: { id: "accepted-new", state: "accepted" as const },
+    id: "accepted-new", kind: "prompt" as const, body: "repeatable command", at: "2026-07-17T10:00:00.000Z",
+    state: "accepted" as const,
   }];
   for (const at of ["", "12:00", "2025-07-17T10:00:00.000Z"]) {
     const history = [{ id: `old-${at}`, from: "user" as const, body: "repeatable command", at, status: "complete" as const }];
@@ -132,6 +135,60 @@ test("old or timestamp-free same-text history never erases newer accepted operat
   }
   const closeInTime = [{ id: "close-in-time", from: "user" as const, body: "repeatable command", at: "2026-07-17T10:00:01.000Z", status: "complete" as const }];
   assert.deepEqual(reconcilePromptOperationsWithHistory(local, closeInTime).map(({ id }) => id), ["accepted-new"]);
+});
+
+test("legacy local operations migrate into a bounded ledger without duplicating or reordering the durable transcript", () => {
+  const legacy: ChatSession = {
+    ...ready,
+    messages: [
+      { id: "durable-old", from: "agent", body: "old durable", at: "10:00", status: "complete" },
+      { id: "local-op", from: "user", body: "repeat", at: "10:01", promptOperation: { id: "op-1", state: "accepted" } },
+    ],
+    operationEvidence: [{ id: "op-0", kind: "prompt", body: "uncertain", at: "09:59", state: "unconfirmed" }],
+  };
+  assert.deepEqual(presentedOperationEvidence(legacy).map(({ id }) => id), ["op-0", "op-1"]);
+  sessions.value = [legacy];
+  setChatHistoryLoading(ready.id, true);
+  applyChatHistory(ready.id, [
+    { id: "history-1", from: "user", body: "repeat", at: "10:02", status: "complete" },
+    { id: "history-2", from: "agent", body: "done", at: "10:03", status: "complete" },
+  ]);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["history-1", "history-2"]);
+  assert.deepEqual(sessions.value[0]?.operationEvidence?.map(({ id }) => id), ["op-0", "op-1"]);
+});
+
+test("separate operation evidence is presented in conversation chronology without same-body deduplication", () => {
+  const messages = [
+    { id: "durable-1", from: "user" as const, body: "repeat", at: "2026-07-17T10:00:00.000Z" },
+    { id: "durable-2", from: "agent" as const, body: "done", at: "2026-07-17T10:02:00.000Z" },
+  ];
+  const evidence = [
+    { id: "operation-1", kind: "prompt" as const, body: "repeat", at: "2026-07-17T10:01:00.000Z", state: "accepted" as const },
+    { id: "operation-2", kind: "prompt" as const, body: "later", at: "2026-07-17T10:03:00.000Z", state: "unconfirmed" as const },
+  ];
+  const timeline = buildChatTimeline(messages, evidence);
+  assert.deepEqual(timeline.map((item) => item.kind === "message" ? item.message.id : item.operation.id), [
+    "durable-1", "operation-1", "durable-2", "operation-2",
+  ]);
+  assert.equal(timeline.filter((item) => (item.kind === "message" ? item.message.body : item.operation.body) === "repeat").length, 2);
+
+  const mixedClock = buildChatTimeline(messages, [{ ...evidence[0]!, at: "10:01" }]);
+  assert.deepEqual(mixedClock.map((item) => item.kind), ["message", "message", "operation"], "incomparable timestamp families preserve source order instead of guessing causality");
+});
+
+test("operation live announcements emit only the latest changed id/state", () => {
+  const previousLocale = locale.value;
+  const operation = { id: "operation", kind: "prompt" as const, body: "deploy", at: "12:00", state: "pending" as const };
+  try {
+    setLocale("ja");
+    const pending = nextOperationAnnouncement([operation], "")!;
+    assert.equal(nextOperationAnnouncement([operation], pending.key), undefined);
+    const accepted = nextOperationAnnouncement([{ ...operation, state: "accepted" }], pending.key)!;
+    assert.notEqual(accepted.key, pending.key);
+    assert.match(operationAnnouncementText(accepted.operation), /指示.*Hermes受理済み.*deploy/);
+  } finally {
+    setLocale(previousLocale);
+  }
 });
 
 test("chat timestamps render by selected locale without rewriting legacy clock text", () => {
@@ -167,13 +224,13 @@ test("active runs steer once without changing authoritative run state", async ()
   assert.equal(await first, true);
   assert.equal(sessions.value[0]?.status, "streaming");
   assert.equal(sessions.value[0]?.steerPending, false);
-  assert.deepEqual(sessions.value[0]?.messages.map(({ from, kind, body }) => ({ from, kind, body })), [
-    { from: "user", kind: "steer", body: "add mobile coverage" },
+  assert.deepEqual(sessions.value[0]?.operationEvidence?.map(({ kind, body, state }) => ({ kind, body, state })), [
+    { kind: "steer", body: "add mobile coverage", state: "accepted" },
   ]);
   sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, {
     type: "message.complete", liveSessionId: "live", payload: { messageId: "agent-done", text: "done" }
   })];
-  assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, 1);
+  assert.equal(sessions.value[0]?.operationEvidence?.filter(({ kind }) => kind === "steer").length, 1);
 });
 
 test("accepted Steer evidence is deterministically bounded by count and UTF-8 bytes without body dedupe", () => {
@@ -288,12 +345,6 @@ test("composer Enter ignores IME composition in prompt and steer modes", () => {
   }
 });
 
-test("steer badge is decorative so its hidden semantic label is read once", () => {
-  const badge = ChatSteerMark();
-  assert.equal(badge.props["aria-hidden"], "true");
-  assert.equal(badge.props.children, t("chat.steerMessage"));
-});
-
 test("failed steering keeps the run active and reports failure without a local message", async () => {
   registerChatRuntime({
     ensureSession() {}, releaseSession() {}, submitPrompt() {}, interrupt() {},
@@ -376,11 +427,16 @@ test("stop blocks duplicate prompts until acknowledgement and restores the activ
   assert.equal(sessions.value[0]?.messages[0]?.status, "streaming");
   assert.match(localizeRuntimeMessage(sessions.value[0]!.errorMessage!), /停止を確認できません/);
 
-  const authoritativeIdle = reduceChatGatewayEvent({ ...sessions.value[0]!, interruptPending: true, interruptOperationId: "stop-2" }, {
+  const uncorrelatedIdle = reduceChatGatewayEvent({ ...sessions.value[0]!, interruptPending: true, interruptOperationId: "stop-2" }, {
     type: "session.info", liveSessionId: "live", payload: { running: false, status: "idle" },
   });
-  assert.equal(authoritativeIdle.interruptPending, false);
-  assert.equal(isChatRunActive(authoritativeIdle), false);
+  assert.equal(uncorrelatedIdle.interruptPending, true);
+  assert.equal(isChatRunActive(uncorrelatedIdle), true);
+  const staleTerminal = reduceChatGatewayEvent(uncorrelatedIdle, {
+    type: "message.complete", liveSessionId: "stale-live", payload: { messageId: "agent-active", text: "stale" },
+  });
+  assert.equal(staleTerminal, uncorrelatedIdle);
+  assert.equal(staleTerminal.interruptPending, true);
 });
 
 test("same-target terminal events retain steering until queued or rejected acknowledgement", async (context) => {
@@ -417,7 +473,7 @@ test("same-target terminal events retain steering until queued or rejected ackno
         operation.resolve({ status: outcome });
         assert.equal(await pendingSteer, outcome === "queued");
         assert.equal(sessions.value[0]?.steerPending, false);
-        assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, outcome === "queued" ? 1 : 0);
+        assert.equal(sessions.value[0]?.operationEvidence?.filter(({ kind }) => kind === "steer").length ?? 0, outcome === "queued" ? 1 : 0);
         assert.equal(canSubmitChatPrompt(sessions.value[0]!), true);
         if (outcome === "rejected") assert.match(localizeRuntimeMessage(sessions.value[0]!.errorMessage!), /拒否/);
       });

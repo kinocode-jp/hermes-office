@@ -361,24 +361,26 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   }
 });
 
-test("initial managed start retries a transient 429 status probe and succeeds", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-initial-transient-"));
-  const executable = join(directory, "fake-hermes.mjs");
-  const countPath = join(directory, "serve-count.txt");
-  const crashPath = join(directory, "unused-crash");
-  await writeManagedRecoveryFixture(executable, countPath, crashPath, false, 1, 429);
-  const backend = new HermesBackend({
-    executable, startTimeoutMs: 2_000, requestTimeoutMs: 500,
-    globalSettingsPath: join(directory, "global-settings.json"),
+for (const transientStatus of [408, 425, 429]) {
+  test(`initial managed start retries a transient ${transientStatus} status probe and succeeds`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hermes-office-initial-transient-"));
+    const executable = join(directory, "fake-hermes.mjs");
+    const countPath = join(directory, "serve-count.txt");
+    const crashPath = join(directory, "unused-crash");
+    await writeManagedRecoveryFixture(executable, countPath, crashPath, false, 1, transientStatus);
+    const backend = new HermesBackend({
+      executable, startTimeoutMs: 2_000, requestTimeoutMs: 500,
+      globalSettingsPath: join(directory, "global-settings.json"),
+    });
+    try {
+      assert.equal((await backend.start()).state, "ready");
+      assert.equal((await readFile(countPath, "utf8")).trim(), "2", "the transient first child is replaced exactly once");
+    } finally {
+      await backend.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
-  try {
-    assert.equal((await backend.start()).state, "ready");
-    assert.equal((await readFile(countPath, "utf8")).trim(), "2", "the transient first child is replaced exactly once");
-  } finally {
-    await backend.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+}
 
 test("managed backend invalidates a crashed generation, recovers once, and never respawns during shutdown", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-"));

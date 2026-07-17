@@ -15,9 +15,14 @@ export function createChatSocketAuthGuard(
   expected: OfficeAuthSession,
 ): ChatSocketAuthGuard {
   const controller = new AbortController();
+  const expectedIdentity = sessionIdentity(expected);
+  const expiresAt = Date.parse(expected.expiresAt);
   return {
     signal: controller.signal,
-    isActive: () => !controller.signal.aborted && sameSession(auth.authenticate(request), expected),
+    isActive: () => !controller.signal.aborted
+      && Number.isFinite(expiresAt)
+      && Date.now() < expiresAt
+      && sameSession(auth.authenticate(request), expectedIdentity),
     invalidate: () => controller.abort(),
   };
 }
@@ -29,10 +34,15 @@ export function invalidateChatSocket(
   guards.get(socket)?.invalidate();
 }
 
-function sameSession(current: OfficeAuthSession | undefined, expected: OfficeAuthSession): boolean {
+type SessionIdentity = Pick<OfficeAuthSession, "csrfToken"> & { principal: OfficeAuthSession["principal"] };
+
+function sessionIdentity(session: OfficeAuthSession): SessionIdentity {
+  return { csrfToken: session.csrfToken, principal: { ...session.principal } };
+}
+
+function sameSession(current: OfficeAuthSession | undefined, expected: SessionIdentity): boolean {
   return current !== undefined
     && current.csrfToken === expected.csrfToken
-    && current.expiresAt === expected.expiresAt
     && current.principal.id === expected.principal.id
     && current.principal.tier === expected.principal.tier
     && current.principal.local === expected.principal.local;

@@ -154,6 +154,12 @@ export class ChatUpstreamHub {
         try { await connection.close(); } finally { this.#upstreamUnavailable(generation); }
       }
       if (request.method === "prompt.submit" && promptCommitCouldBeUnconfirmed(error)) {
+        // A malformed/ambiguous success can leave the live session running even
+        // though the downstream socket received no authoritative result. Reset
+        // the shared generation before reporting ambiguity: this releases all
+        // Office leases synchronously, closes every close-on-disconnect Hermes
+        // session, and makes a replacement resume wait for reset completion.
+        this.#resetGeneration(generation);
         throw new ChatCommitUnconfirmedError();
       }
       throw error;

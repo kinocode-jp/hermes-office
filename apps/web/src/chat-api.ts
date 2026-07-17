@@ -11,6 +11,15 @@ import {
   type OfficeWebSocketLease,
 } from "./office-api";
 import { DEFAULT_CLIENT_HISTORY_LIMITS, HistoryAccumulator, type ChatHistoryResult } from "./history-loader";
+import {
+  commitUnconfirmedRpcError,
+  explicitRpcRejection,
+  interruptResultWasAccepted,
+  isCommitUnconfirmedRpcFrame,
+  isExplicitRpcRejection,
+  normalizePromptResult,
+  normalizeSteerResult,
+} from "./chat-rpc-results";
 
 export type { ChatHistoryResult } from "./history-loader";
 
@@ -89,23 +98,6 @@ type PendingRequest = {
   reject(reason: Error): void;
   timeout: ReturnType<typeof setTimeout>;
 };
-
-const RPC_REJECTED = Symbol("rpc-rejected");
-
-type ExplicitRpcRejection = Error & { [RPC_REJECTED]: true };
-
-function explicitRpcRejection(message: string): ExplicitRpcRejection {
-  return Object.assign(new Error(message), { [RPC_REJECTED]: true as const });
-}
-
-function isExplicitRpcRejection(error: unknown): error is ExplicitRpcRejection {
-  return typeof error === "object" && error !== null && RPC_REJECTED in error;
-}
-
-function isCommitUnconfirmedRpcError(error: Record<string, unknown>): boolean {
-  const data = asRecord(error.data);
-  return error.code === -32008 || data?.reason === "commit_unconfirmed";
-}
 
 type ActiveTarget = { generation: number; target: ChatTarget };
 type LiveTarget = { clientSessionId: string; generation: number };
@@ -186,7 +178,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     if (ambiguousPreOpenFailure) preOpenFailureCount += 1;
     const needsAuthentication = shouldRecoverOfficeWebSocket(event, socketOpened, socketFailedBeforeOpen)
       && (!ambiguousPreOpenFailure || preOpenFailureCount === 1);
-    const historyResyncRequired = event?.code === 1013 && event.reason.includes("reload history");
+    const historyResyncRequired = event.reason.includes("reload history");
     socket = undefined;
     socketAuthRevision = undefined;
     socketOpened = false;
@@ -267,8 +259,9 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         : typeof payload?.storedSessionId === "string" ? payload.storedSessionId : undefined;
       if (storedSessionId) {
         active.target = { ...active.target, storedSessionId };
-        callbacks.onSessionReady(clientSessionId, liveSessionId, storedSessionId);
+        if (!historiesAwaitingReset.has(clientSessionId)) callbacks.onSessionReady(clientSessionId, liveSessionId, storedSessionId);
       }
+      if (historiesAwaitingReset.has(clientSessionId)) return;
       callbacks.onEvent(clientSessionId, {
         type,
         liveSessionId,
@@ -287,7 +280,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const message = error.code === -32006
         ? "このセッションは別の端末で使用中です。別の端末で閉じてから再接続してください。"
         : typeof error.message === "string" ? error.message : "Chat RPCに失敗しました。";
-      request.reject(isCommitUnconfirmedRpcError(error) ? new Error(message) : explicitRpcRejection(message));
+      request.reject(isCommitUnconfirmedRpcFrame(error) ? commitUnconfirmedRpcError(message) : explicitRpcRejection(message));
       return;
     }
     request.resolve(frame.result);
@@ -371,6 +364,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     if (!requestSocket || requestSocket.readyState !== WebSocket.OPEN || !isCurrentTarget(active) || opening.has(target.clientSessionId)) return;
     const existingLiveSessionId = liveSessionIdFor(active, liveToClient);
     if (existingLiveSessionId) {
+      if (historiesAwaitingReset.has(target.clientSessionId)) return;
       callbacks.onSessionReady(target.clientSessionId, existingLiveSessionId, target.storedSessionId);
       return;
     }
@@ -405,6 +399,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         ...(typeof result?.running === "boolean" ? { running: result.running } : {}),
         ...(typeof result?.status === "string" ? { status: result.status } : {})
       };
+      historiesAwaitingReset.delete(target.clientSessionId);
       callbacks.onSessionReady(target.clientSessionId, liveSessionId, storedSessionId, runtime);
     } catch (error) {
       if (isCurrentTarget(active) && socket === requestSocket) callbacks.onSessionError(target.clientSessionId, errorText(error));
@@ -420,7 +415,11 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     const resetTranscript = historiesAwaitingReset.has(target.clientSessionId);
     if (!target.storedSessionId) {
       if (!isCurrentTarget(active)) return;
-      if (resetTranscript) callbacks.onHistoryLoading(target.clientSessionId, true);
+      if (resetTranscript) {
+        callbacks.onHistoryLoading(target.clientSessionId, true);
+        callbacks.onHistoryError(target.clientSessionId, "送信結果を確認するための保存済み履歴IDを取得できませんでした。明示的に再接続してください。");
+        return;
+      }
       loadedHistories.set(target.clientSessionId, active);
       callbacks.onHistory(target.clientSessionId, []);
       return;
@@ -449,8 +448,13 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       }
       if (!isCurrentHistoryLoad(active, operation)) return;
       if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
+      const result = history.result();
+      callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, result);
+      if (resetTranscript && !historyCanSatisfyReconnectBarrier(result)) {
+        callbacks.onHistoryError(target.clientSessionId, "保存済み履歴の完全性を確認できませんでした。明示的に再試行してください。");
+        return;
+      }
       loadedHistories.set(target.clientSessionId, active);
-      callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, history.result());
     } catch (error) {
       if (isCurrentHistoryLoad(active, operation) && history.messages.length > 0) {
         history.fail(errorText(error));
@@ -484,11 +488,25 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     void loadHistory(active).then(() => {
       if (!isCurrentTarget(active) || targetStartOperations.get(clientSessionId) !== recovery) return;
       if (loadedHistories.get(clientSessionId) !== active) return;
-      historiesAwaitingReset.delete(clientSessionId);
       void openRemoteSession(active);
     }).finally(() => {
       if (targetStartOperations.get(clientSessionId) === recovery) targetStartOperations.delete(clientSessionId);
     });
+  };
+
+  const beginHistoryBarrier = (active: ActiveTarget): void => {
+    if (!isCurrentTarget(active)) return;
+    const clientSessionId = active.target.clientSessionId;
+    loadedHistories.delete(clientSessionId);
+    historyLoads.delete(clientSessionId);
+    targetStartOperations.delete(clientSessionId);
+    historiesAwaitingReset.add(clientSessionId);
+    callbacks.onSessionDisconnected(clientSessionId);
+    // The Office Server resets the ambiguous Hermes generation and initiates a
+    // 1013 close. Close defensively as well without reusing this live mapping;
+    // browsers reserve 1013 for servers, so use an application code while
+    // retaining the protocol reason that drives the same history barrier.
+    if (socket?.readyState === WebSocket.OPEN) socket.close(4001, "Prompt commit unconfirmed; reload history");
   };
 
   const bestEffortClose = (liveSessionId: string): void => {
@@ -569,14 +587,18 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const active = targets.get(clientSessionId);
       const requestSocket = socket;
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
+      if (!active || historiesAwaitingReset.has(clientSessionId) || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
         return { status: "rejected", message: "Live Sessionが未接続です。" };
       }
       try {
-        await rpc("prompt.submit", { session_id: liveSessionId, text }, operationId);
-        return { status: "accepted" };
+        const raw = await rpc("prompt.submit", { session_id: liveSessionId, text }, operationId);
+        const result = normalizePromptResult(raw);
+        if (result !== undefined) return result;
+        beginHistoryBarrier(active);
+        return { status: "unconfirmed", message: "Hermesが不正な送信確認を返しました。保存済み履歴を再確認します。" };
       } catch (error) {
         const message = errorText(error);
+        if (!isExplicitRpcRejection(error) && isCurrentTarget(active) && socket === requestSocket) beginHistoryBarrier(active);
         return isExplicitRpcRejection(error)
           ? { status: "rejected", message }
           : { status: "unconfirmed", message };
@@ -588,7 +610,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const active = targets.get(clientSessionId);
       const requestSocket = socket;
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
+      if (!active || historiesAwaitingReset.has(clientSessionId) || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
         throw new Error("Live Sessionが未接続です。");
       }
       const raw = await rpc("session.steer", { session_id: liveSessionId, text: trimmed });
@@ -601,8 +623,9 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const active = targets.get(clientSessionId);
       const requestSocket = socket;
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) throw new Error("Live Sessionが未接続です。");
-      await rpc("session.interrupt", { session_id: liveSessionId });
+      if (!active || historiesAwaitingReset.has(clientSessionId) || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) throw new Error("Live Sessionが未接続です。");
+      const raw = await rpc("session.interrupt", { session_id: liveSessionId });
+      if (!interruptResultWasAccepted(raw)) throw new Error("Hermesが不正な停止確認を返しました。");
       if (!isCurrentTarget(active) || socket !== requestSocket || liveSessionIdFor(active, liveToClient) !== liveSessionId) {
         throw new Error("停止対象のセッションが変更されました。現在の状態を確認してください。");
       }
@@ -610,13 +633,13 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     async respondClarify(clientSessionId, requestId, answer) {
       const active = targets.get(clientSessionId);
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!liveSessionId) throw new Error("Live Sessionが未接続です。");
+      if (historiesAwaitingReset.has(clientSessionId) || !liveSessionId) throw new Error("Live Sessionが未接続です。");
       await rpc("clarify.respond", { request_id: requestId, answer });
     },
     async respondApproval(clientSessionId, approvalId, choice) {
       const active = targets.get(clientSessionId);
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!liveSessionId) throw new Error("Live Sessionが未接続です。");
+      if (historiesAwaitingReset.has(clientSessionId) || !liveSessionId) throw new Error("Live Sessionが未接続です。");
       await rpc("approval.respond", { session_id: liveSessionId, approval_id: approvalId, choice });
     },
     retry() {
@@ -670,12 +693,12 @@ function targetsMatch(current: ChatTarget, incoming: ChatTarget): boolean {
     && (incoming.storedSessionId === undefined || current.storedSessionId === incoming.storedSessionId);
 }
 
-export function normalizeSteerResult(value: unknown): ChatSteerResult {
-  const outer = asRecord(value);
-  const result = asRecord(outer?.value) ?? outer;
-  if (result?.status === "queued") return { status: "queued" };
-  if (result?.status === "rejected") return { status: "rejected" };
-  return { status: "invalid" };
+function historyCanSatisfyReconnectBarrier(result: ChatHistoryResult): boolean {
+  // History is loaded newest-first. Dropping only the oldest tail at the
+  // explicit message cap cannot hide the prompt whose acknowledgement became
+  // ambiguous immediately before this barrier; all integrity partials can.
+  if (result.reason === "message_limit") return true;
+  return !result.partial && result.reason === undefined;
 }
 
 export function normalizeHistoryPage(value: unknown, storedSessionId: string): {

@@ -229,11 +229,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-agent { border-color: var(--agent-color, var(--aqua)); }
 .message-tool { max-width: 100%; padding-left: 26px; border-color: var(--amber); color: var(--muted); font-family: ui-monospace, monospace; }
 .message-tool-mark { position: absolute; left: 8px; top: 8px; color: var(--amber); font-size: 12px; line-height: 1; }
-.message-steer-mark { display: block; margin-bottom: 3px; color: var(--aqua); font: 700 8px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 .message-prompt-state { display: block; margin-bottom: 3px; color: var(--muted); font: 700 var(--text-utility)/1.2 ui-monospace, monospace; }
 .message-prompt-state small { display: block; margin-top: 2px; color: inherit; font: 500 var(--text-utility)/1.35 ui-monospace, monospace; }
 .message-prompt-state.is-rejected { color: var(--coral); }
 .message-prompt-state.is-unconfirmed { color: var(--amber); }
+.chat-operation-ledger { align-self: flex-end; width: min(92%, 520px); border: 1px solid var(--line); border-right: 3px solid var(--aqua); background: color-mix(in srgb, var(--surface) 92%, var(--aqua)); }
+.chat-operation-ledger > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; min-height: 44px; padding: 7px 9px; color: var(--muted); cursor: pointer; font: 750 var(--text-utility)/1.2 ui-monospace, monospace; letter-spacing: .03em; }
+.chat-operation-ledger > summary:focus-visible { outline: 2px solid var(--aqua); outline-offset: -3px; }
+.chat-operation-ledger > summary > span:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.chat-operation-ledger .chat-operation-body { grid-column: 1 / -1; overflow: hidden; color: var(--paper); font: 500 var(--text-body)/1.35 "IBM Plex Sans JP", system-ui, sans-serif; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
+.chat-operation-ledger > summary > time { grid-column: 2; grid-row: 1; align-self: start; }
+.chat-operation-meta { display: grid; gap: 5px; padding: 0 9px 9px; color: var(--muted); font: 500 var(--text-utility)/1.35 ui-monospace, monospace; }
+.chat-operation-meta code { overflow-wrap: anywhere; }
+.chat-operation { border-left: 0; }
+.chat-operation.is-rejected { border-right-color: var(--coral); }
+.chat-operation.is-unconfirmed { border-right-color: var(--amber); }
+.chat-operation .message-prompt-state { margin: 0; text-align: right; }
 .message p { margin: 0; font-size: 11px; line-height: 1.55; }
 .message time { display: block; margin-top: 2px; color: rgba(243,232,209,.35); font: 500 9px/1 ui-monospace, monospace; text-align: right; }
 .message-streaming { box-shadow: inset 0 -1px 0 rgba(85,214,190,.45); }

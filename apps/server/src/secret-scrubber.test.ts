@@ -54,6 +54,15 @@ test("retains URL query, authorization-header, private-key, and ANSI protections
   assert.match(result.value, /\[REDACTED PRIVATE KEY\]/);
 });
 
+test("ANSI normalization alone is not classified as credential material", () => {
+  const decoratedProse = "\u001b[31mwarning\u001b[0m";
+  const decoratedSecret = "\u001b[33mAPI_KEY=credential-value\u001b[0m";
+
+  assert.deepEqual(redactSecrets(decoratedProse), { value: "warning", redacted: true });
+  assert.equal(containsLikelySecret(decoratedProse), false);
+  assert.equal(containsLikelySecret(decoratedSecret), true);
+});
+
 test("redacts short explicit assignments, Basic auth, and HTTP URL userinfo", () => {
   const source = [
     "password=x",
@@ -199,6 +208,58 @@ test("redacts cookie headers at shell and browser log boundaries without consumi
   for (const safe of ["https://example.test/safe", "--verbose", "--next-safe", "visible-extension=value", "also-visible=value"]) {
     assert.equal(once.value.includes(safe), true);
   }
+  assert.deepEqual(twice, { value: once.value, redacted: false });
+});
+
+test("redacts quoted JSON cookie values without consuming adjacent fields", () => {
+  const source = [
+    '{"Cookie":"session=json-secret; theme=light","safe":"visible"}',
+    '{"Set-Cookie": "session=escaped-\\\"secret; Secure", "count": 2}',
+    '  "Cookie": "pretty-json-secret",',
+    '{"X-Cookie":"extension-visible","Cookie":"[REDACTED]","after":true}',
+  ].join("\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+
+  assert.equal(once.value, [
+    '{"Cookie":"[REDACTED]","safe":"visible"}',
+    '{"Set-Cookie": "[REDACTED]", "count": 2}',
+    '  "Cookie": "[REDACTED]",',
+    '{"X-Cookie":"extension-visible","Cookie":"[REDACTED]","after":true}',
+  ].join("\n"));
+  for (const secret of ["json-secret", "escaped-", "secret; Secure", "pretty-json-secret"]) assert.equal(once.value.includes(secret), false);
+  for (const safe of ['"safe":"visible"', '"count": 2', '"X-Cookie":"extension-visible"', '"after":true']) {
+    assert.equal(once.value.includes(safe), true);
+  }
+  assert.deepEqual(twice, { value: once.value, redacted: false });
+});
+
+test("redacts cookie values across valid pretty-JSON line breaks", () => {
+  const source = [
+    "{",
+    '  "Cookie"',
+    "  :",
+    '  "session=multiline-cookie; theme=dark",',
+    '  "safe": "visible",',
+    '  "Set-Cookie"',
+    "  :",
+    '  "session=multiline-set-cookie; Secure",',
+    '  "X-Cookie": "extension-visible"',
+    "}",
+  ].join("\r\n");
+
+  assert.doesNotThrow(() => JSON.parse(source));
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+  assert.deepEqual(JSON.parse(once.value), {
+    Cookie: "[REDACTED]",
+    safe: "visible",
+    "Set-Cookie": "[REDACTED]",
+    "X-Cookie": "extension-visible",
+  });
+  assert.equal(once.value.includes("multiline-cookie"), false);
+  assert.equal(once.value.includes("multiline-set-cookie"), false);
   assert.deepEqual(twice, { value: once.value, redacted: false });
 });
 

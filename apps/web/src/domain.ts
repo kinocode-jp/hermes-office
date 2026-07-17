@@ -26,12 +26,21 @@ export type ChatMessage = {
   presentation?: { kind: "tool-fallback"; name?: string | undefined; phase: "running" | "complete" } | undefined;
   at: string;
   status?: "streaming" | "complete" | "failed" | "cancelled";
-  /** Client-side evidence for a prompt.submit operation. Never implies acceptance until the RPC acknowledges it. */
+  /** Legacy in-memory shape migrated into ChatSession.operationEvidence before transcript replacement. */
   promptOperation?: {
     id: string;
     state: "pending" | "accepted" | "rejected" | "unconfirmed";
     message?: string | undefined;
   } | undefined;
+};
+
+export type ChatOperationEvidence = {
+  id: string;
+  kind: "prompt" | "steer";
+  body: string;
+  at: string;
+  state: "pending" | "accepted" | "rejected" | "unconfirmed";
+  message?: string | undefined;
 };
 
 export type ChatConnectionState = "disconnected" | "connecting" | "ready" | "error";
@@ -74,6 +83,8 @@ export type ChatSession = {
   titlePresentation?: "new-chat" | undefined;
   status: "streaming" | "ready" | "waiting";
   messages: ChatMessage[];
+  /** Bounded local RPC evidence. It is deliberately separate from Hermes' durable transcript. */
+  operationEvidence?: ChatOperationEvidence[] | undefined;
   connectionState?: ChatConnectionState;
   historyState?: ChatHistoryState;
   historyPartial?: boolean;

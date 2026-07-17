@@ -3,7 +3,7 @@ import { avatarForProfile, beginCustomAvatarChange, DEFAULT_CHARACTER_COUNT, isA
 import { CharacterPortrait } from "./character-portrait";
 import { InfoTip } from "./info-tip";
 import { t } from "../i18n";
-import { isTopmostModal } from "../modal-layer";
+import { canRestoreModalFocus, isTopmostModal, registerModal } from "../modal-layer";
 
 type AvatarPickerProps = {
   profileId: string;
@@ -14,6 +14,10 @@ type AvatarPickerProps = {
 
 const MAX_FILE_BYTES = 1_000_000;
 
+export function canDismissAvatarPicker(uploading: boolean, resetting: boolean): boolean {
+  return !uploading && !resetting;
+}
+
 export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: AvatarPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
@@ -21,15 +25,19 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
   const [uploading, setUploading] = useState(false);
   const [resetting, setResetting] = useState(false);
   const selected = avatarForProfile(profileId);
+  const busy = !canDismissAvatarPicker(uploading, resetting);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
+    const unregister = dialog ? registerModal(dialog) : undefined;
     const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button, input:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
     focusable()[0]?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isTopmostModal(dialogRef.current)) return;
-      if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+      if (event.key === "Escape") { event.preventDefault(); if (!busyRef.current) onClose(); return; }
       if (event.key !== "Tab") return;
       const controls = focusable();
       if (controls.length === 0) return;
@@ -39,7 +47,7 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener("keydown", handleKeyDown);
-    return () => { document.removeEventListener("keydown", handleKeyDown); previousFocus?.focus(); };
+    return () => { unregister?.(); document.removeEventListener("keydown", handleKeyDown); if (canRestoreModalFocus(previousFocus)) previousFocus?.focus(); };
   }, [onClose]);
 
   async function loadCustomImage(file?: File): Promise<void> {
@@ -73,14 +81,14 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
   }
 
   return (
-    <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (!busy && event.currentTarget === event.target) onClose(); }}>
       <section ref={dialogRef} class="avatar-picker" role="dialog" aria-modal="true" aria-labelledby="avatar-picker-title" aria-describedby="avatar-picker-description">
         <header>
           <div>
             <small>{t("avatar.kicker")}</small>
             <h3 id="avatar-picker-title">{t("avatar.title", { name: profileName })} <InfoTip text={`${t("avatar.description")} ${t("avatar.note")}`} align="end" /></h3>
           </div>
-          <button type="button" onClick={onClose} aria-label={t("common.close")}>×</button>
+          <button type="button" disabled={busy} onClick={onClose} aria-label={t("common.close")}>×</button>
         </header>
         <p id="avatar-picker-description" class="visually-hidden">{t("avatar.description")}</p>
         <div class="avatar-choice-grid">

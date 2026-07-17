@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { canRestoreModalFocus, hasOpenModal, isTopmostModal, lockBackgroundElements, registerModal } from "../modal-layer";
 
 export const PHONE_OVERLAY_VIEWPORT = "(max-width: 767px)";
 export const COMPACT_OVERLAY_VIEWPORT = "(max-width: 1279px)";
@@ -39,24 +40,17 @@ export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, v
     const overlay = overlayElement;
     if (!active || !overlay) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const unregisterModal = kind === "modal" ? registerModal(overlay) : undefined;
     const overlayRoot = overlay.closest<HTMLElement>(".profile-panel, .workspace-drawer") ?? overlay;
     const appShell = overlayRoot.closest<HTMLElement>(".app-shell");
-    const background = appShell
+    const background = kind === "route" && appShell
       ? [...appShell.children].filter((element): element is HTMLElement => (
         element instanceof HTMLElement
         && element !== overlayRoot
         && (kind !== "route" || !element.hasAttribute("data-mobile-route-chrome"))
       ))
       : [];
-    const previousBackground = background.map((element) => ({
-      element,
-      inert: element.inert,
-      ariaHidden: element.getAttribute("aria-hidden"),
-    }));
-    for (const element of background) {
-      element.inert = true;
-      element.setAttribute("aria-hidden", "true");
-    }
+    const releaseBackground = lockBackgroundElements(background);
 
     let disposed = false;
     queueMicrotask(() => {
@@ -68,6 +62,7 @@ export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, v
     });
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (kind === "modal" ? !isTopmostModal(overlay) : hasOpenModal()) return;
       const nestedModal = event.target instanceof Element
         ? event.target.closest<HTMLElement>('[role="dialog"][aria-modal="true"]')
         : null;
@@ -98,14 +93,11 @@ export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, v
 
     return () => {
       disposed = true;
+      unregisterModal?.();
+      releaseBackground();
       overlay.removeEventListener("keydown", handleKeyDown);
       const shouldRestoreFocus = overlay.contains(document.activeElement);
-      for (const { element, inert, ariaHidden } of previousBackground) {
-        element.inert = inert;
-        if (ariaHidden === null) element.removeAttribute("aria-hidden");
-        else element.setAttribute("aria-hidden", ariaHidden);
-      }
-      if (shouldRestoreFocus && previousFocus?.isConnected) previousFocus.focus();
+      if (shouldRestoreFocus && canRestoreModalFocus(previousFocus)) previousFocus?.focus();
     };
   }, [active, kind, overlayElement]);
 

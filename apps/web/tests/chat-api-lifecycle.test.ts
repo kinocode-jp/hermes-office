@@ -174,7 +174,7 @@ test("steer sends one exact live session.steer request and rejects empty or unre
   harness.api.stop();
 });
 
-test("prompt submit distinguishes explicit RPC rejection from commit-unknown transport loss", async () => {
+test("prompt submit accepts only streaming and treats malformed success as unconfirmed", async () => {
   const harness = await createHarness();
   harness.api.ensureSession({ clientSessionId: "client-prompt", profileId: "coder" });
   await flush();
@@ -187,25 +187,40 @@ test("prompt submit distinguishes explicit RPC rejection from commit-unknown tra
   harness.socket.respond(rejectedFrame.id, undefined, { code: -32000, message: "policy denied" });
   assert.deepEqual(await rejected, { status: "rejected", message: "policy denied" });
 
-  for (const error of [
-    { code: -32008, message: "commit outcome unknown" },
-    { code: -32000, message: "write acknowledgement lost", data: { reason: "commit_unconfirmed" } },
-  ]) {
-    const downstreamUnknown = harness.api.submitPrompt("client-prompt", "downstream maybe committed", `operation-${error.code}-${JSON.stringify(error.data)}`);
-    const downstreamFrame = harness.socket.frames("prompt.submit", "live-prompt").at(-1)!;
-    harness.socket.respond(downstreamFrame.id, undefined, error);
-    assert.deepEqual(await downstreamUnknown, { status: "unconfirmed", message: error.message });
-  }
+  const accepted = harness.api.submitPrompt("client-prompt", "valid", "operation-valid");
+  const acceptedFrame = harness.socket.frames("prompt.submit", "live-prompt").at(-1)!;
+  harness.socket.respond(acceptedFrame.id, { status: "streaming" });
+  assert.deepEqual(await accepted, { status: "accepted" });
 
-  const unconfirmed = harness.api.submitPrompt("client-prompt", "maybe committed", "operation-unknown");
-  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 4);
-  harness.socket.close(1006, "network lost after send");
-  assert.deepEqual(await unconfirmed, { status: "unconfirmed", message: "Chat接続が切断されました。" });
-  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 4, "prompt.submit must not be replayed");
+  const malformed = harness.api.submitPrompt("client-prompt", "maybe committed", "operation-malformed");
+  const malformedFrame = harness.socket.frames("prompt.submit", "live-prompt").at(-1)!;
+  harness.socket.respond(malformedFrame.id, undefined);
+  assert.deepEqual(await malformed, {
+    status: "unconfirmed",
+    message: "Hermesが不正な送信確認を返しました。保存済み履歴を再確認します。",
+  });
+  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 3, "a malformed success must never be replayed");
   harness.api.stop();
 });
 
-test("interrupt resolves only after its RPC acknowledgement", async () => {
+test("commit_unconfirmed data is ambiguous even when the generic RPC code is used", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "client-reason", profileId: "reviewer" });
+  await flush();
+  const create = harness.socket.frame("session.create", "reviewer")!;
+  harness.socket.respond(create.id, { session_id: "live-reason" });
+  await flush();
+  const submission = harness.api.submitPrompt("client-reason", "maybe committed", "operation-reason");
+  const frame = harness.socket.frame("prompt.submit", "live-reason")!;
+  harness.socket.respond(frame.id, undefined, {
+    code: -32000, message: "write acknowledgement lost", data: { reason: "commit_unconfirmed" },
+  });
+  assert.deepEqual(await submission, { status: "unconfirmed", message: "write acknowledgement lost" });
+  assert.equal(harness.socket.frames("prompt.submit", "live-reason").length, 1);
+  harness.api.stop();
+});
+
+test("interrupt resolves only after an authoritative interrupted acknowledgement", async () => {
   const harness = await createHarness();
   harness.api.ensureSession({ clientSessionId: "client-stop", profileId: "coder" });
   await flush();
@@ -216,9 +231,19 @@ test("interrupt resolves only after its RPC acknowledgement", async () => {
   const stopping = harness.api.interrupt("client-stop").then(() => { settled = true; });
   const frame = harness.socket.frame("session.interrupt", "live-stop")!;
   assert.equal(settled, false);
-  harness.socket.respond(frame.id, { status: "accepted" });
+  harness.socket.respond(frame.id, { status: "interrupted" });
   await stopping;
   assert.equal(settled, true);
+
+  const malformed = harness.api.interrupt("client-stop");
+  const malformedFrame = harness.socket.frames("session.interrupt", "live-stop").at(-1)!;
+  harness.socket.respond(malformedFrame.id, { status: "accepted" });
+  await assert.rejects(malformed, /不正な停止確認/);
+
+  const empty = harness.api.interrupt("client-stop");
+  const emptyFrame = harness.socket.frames("session.interrupt", "live-stop").at(-1)!;
+  harness.socket.respond(emptyFrame.id, undefined);
+  await assert.rejects(empty, /不正な停止確認/);
   harness.api.stop();
 });
 

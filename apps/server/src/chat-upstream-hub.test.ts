@@ -144,6 +144,45 @@ test("a duplicate live close failure resets the shared generation and terminaliz
   assert.equal(hermes.isLive("live-main"), false, "generation reset must reap every close-on-disconnect live session");
 });
 
+test("an ambiguous prompt resets leases before a replacement resume and waits for upstream cleanup", async () => {
+  const hermes = new NativeFakeHermes();
+  const closeGate = deferred<void>();
+  hermes.failPromptAmbiguously = true;
+  hermes.delayNextConnectionClose(closeGate.promise);
+  const coordinator = new ChatSessionCoordinator();
+  const runtime = hermes.runtime();
+  const hub = new ChatUpstreamHub(runtime, coordinator, 64 * 1024);
+  const dependencies = {
+    auth: new OfficeAuth(), officeSession: SESSION, runtimeSource: runtime,
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    sessionCoordinator: coordinator, chatHub: hub,
+  };
+  const oldClient = new FakeWebSocket();
+  handleOfficeChatConnection(oldClient as unknown as WebSocket, dependencies);
+  await settle();
+  oldClient.rpc(70, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle();
+  oldClient.rpc(71, "prompt.submit", { session_id: "live-main", text: "run once" });
+  await settle(4);
+
+  assert.equal(oldClient.errorCode(71), -32008);
+  assert.deepEqual(oldClient.closed, { code: 1013, reason: "Hermes chat restarted; reload history" });
+  assert.equal(coordinator.ownerForLive("live-main"), undefined, "ambiguous generation leases release before async close completes");
+  assert.equal(hermes.connectionCloseCount, 1);
+
+  const replacement = new FakeWebSocket();
+  handleOfficeChatConnection(replacement as unknown as WebSocket, dependencies);
+  replacement.rpc(72, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(4);
+  assert.equal(hermes.resumeRequests.length, 1, "replacement resume waits for close-on-disconnect cleanup");
+
+  hermes.failPromptAmbiguously = false;
+  closeGate.resolve();
+  await settle(8);
+  assert.equal(hermes.resumeRequests.length, 2);
+  assert.equal(replacement.errorCode(72), undefined, "replacement does not lose a cleanup race to session_in_use");
+});
+
 test("coordinator converges durable aliases without ever adding a second live id", () => {
   const owner = {};
   const coordinator = new ChatSessionCoordinator();
@@ -418,6 +457,7 @@ class NativeFakeHermes {
   readonly createRequests: Array<{ profile: string; closeOnDisconnect: boolean }> = [];
   readonly sessionCloseRequests: string[] = [];
   readonly failCloseFor = new Set<string>();
+  failPromptAmbiguously = false;
   connectCount = 0;
   connectionCloseCount = 0;
   readonly #events: Array<(event: HermesChatEvent) => void> = [];
@@ -428,6 +468,7 @@ class NativeFakeHermes {
   #mainStored = "compression-tip";
   #parentReturnsDuplicate = false;
   #createSequence = 0;
+  #connectionCloseGate: Promise<void> | undefined;
 
   runtime(): HermesRuntimeSource {
     return {
@@ -442,6 +483,9 @@ class NativeFakeHermes {
             request: async (request: HermesChatRequest) => await this.#request(generation, request),
             close: async () => {
               this.connectionCloseCount += 1;
+              const gate = this.#connectionCloseGate;
+              this.#connectionCloseGate = undefined;
+              await gate;
               this.#generationClosed[generation] = true;
               this.#live.clear();
             },
@@ -454,6 +498,7 @@ class NativeFakeHermes {
   }
 
   emit(event: HermesChatEvent): void { this.#events.at(-1)?.(event); }
+  delayNextConnectionClose(gate: Promise<void>): void { this.#connectionCloseGate = gate; }
   eventEmitter(generation: number): (event: HermesChatEvent) => void { return this.#events[generation]!; }
   isLive(liveId: string): boolean { return this.#live.has(liveId); }
   markAlreadyAbsent(liveId: string): void { this.#live.delete(liveId); }
@@ -500,6 +545,9 @@ class NativeFakeHermes {
       const identity = { liveSessionId: `live-created-${index}`, storedSessionId: `stored-created-${index}` };
       this.#live.set(identity.liveSessionId, identity);
       return { method: request.method, value: { ...identity, running: false, status: "idle" } };
+    }
+    if (request.method === "prompt.submit" && this.failPromptAmbiguously) {
+      throw new HermesChatTransportError("backend_rejected", "malformed prompt acknowledgement");
     }
     if (request.method !== "session.resume") return { method: request.method, value: { status: "ok" } };
     const sessionId = String(request.params?.session_id);
@@ -673,6 +721,12 @@ class FakeWebSocket extends EventEmitter {
     return typeof event?.payload?.approvalId === "string" ? event.payload.approvalId : "";
   }
   frames(): Array<Record<string, unknown>> { return this.sent.map((body) => JSON.parse(body) as Record<string, unknown>); }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 async function settle(turns = 2): Promise<void> {

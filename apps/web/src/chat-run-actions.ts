@@ -1,5 +1,5 @@
 import type { Signal } from "@preact/signals";
-import type { ChatMessage, ChatSession } from "./domain";
+import type { ChatMessage, ChatOperationEvidence, ChatSession } from "./domain";
 import type { ChatSteerResult } from "./chat-api";
 import { canSteerChatSession, isChatRunActive } from "./session-runtime";
 import { nowTimestamp } from "./chat-store-utils";
@@ -12,6 +12,15 @@ export const MAX_STEER_EVIDENCE_COUNT = 64;
 // operation is never immediately evicted solely because of its own payload.
 export const MAX_STEER_EVIDENCE_BYTES = 256 * 1024;
 
+export function boundedOperationEvidence(evidence: readonly ChatOperationEvidence[]): ChatOperationEvidence[] {
+  const retained = evidence.slice(-MAX_STEER_EVIDENCE_COUNT);
+  let bytes = retained.reduce((total, operation) => total + operationEvidenceBytes(operation), 0);
+  while (retained.length > 0 && bytes > MAX_STEER_EVIDENCE_BYTES) {
+    bytes -= operationEvidenceBytes(retained.shift()!);
+  }
+  return retained;
+}
+
 export function boundedSteerEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
   const evidence = messages.filter((message) => message.kind === "steer").slice(-MAX_STEER_EVIDENCE_COUNT);
   let bytes = evidence.reduce((total, message) => total + steerEvidenceBytes(message), 0);
@@ -19,20 +28,6 @@ export function boundedSteerEvidence(messages: readonly ChatMessage[]): ChatMess
     bytes -= steerEvidenceBytes(evidence.shift()!);
   }
   return evidence;
-}
-
-export function boundedChatOperationEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
-  const evidence = messages.filter((message) => (
-    message.kind === "steer" || message.promptOperation !== undefined
-  )).slice(-MAX_STEER_EVIDENCE_COUNT);
-  let bytes = evidence.reduce((total, message) => total + steerEvidenceBytes(message), 0);
-  while (evidence.length > 0 && bytes > MAX_STEER_EVIDENCE_BYTES) bytes -= steerEvidenceBytes(evidence.shift()!);
-  return evidence;
-}
-
-export function retainBoundedSteerEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
-  const retained = new Set(boundedSteerEvidence(messages));
-  return messages.filter((message) => message.kind !== "steer" || retained.has(message));
 }
 
 export function invalidatePendingSteer(session: ChatSession): ChatSession {
@@ -73,9 +68,12 @@ export async function steerChatRun(
       ...item,
       steerPending: false,
       steerOperationId: undefined,
-      messages: retainBoundedSteerEvidence([...item.messages, { id: operationId, from: "user", kind: "steer", body: trimmed, at: nowTimestamp() }]),
+      operationEvidence: boundedOperationEvidence([
+        ...(item.operationEvidence ?? []),
+        { id: operationId, kind: "steer", body: trimmed, at: nowTimestamp(), state: "accepted" },
+      ]),
     } : item);
-    return state.value.some((item) => item.id === sessionId && item.messages.some(({ id }) => id === operationId));
+    return state.value.some((item) => item.id === sessionId && item.operationEvidence?.some(({ id }) => id === operationId));
   } catch {
     updateSession(state, sessionId, (item) => item.steerOperationId === operationId ? {
       ...item,
@@ -132,4 +130,8 @@ function updateSession(state: SessionState, sessionId: string, update: (session:
 
 function steerEvidenceBytes(message: ChatMessage): number {
   return new TextEncoder().encode(`${message.id}\0${message.body}\0${message.at}`).byteLength;
+}
+
+function operationEvidenceBytes(operation: ChatOperationEvidence): number {
+  return new TextEncoder().encode(`${operation.id}\0${operation.kind}\0${operation.state}\0${operation.body}\0${operation.at}\0${operation.message ?? ""}`).byteLength;
 }

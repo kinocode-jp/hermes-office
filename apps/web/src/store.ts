@@ -3,14 +3,14 @@ import { officeInventoryReliability } from "@hermes-office/protocol";
 import { initialSessions, initialTaskComments, initialTasks, profiles } from "./demo-data";
 import { createDemoKanbanApi } from "./demo-kanban-api";
 import type { ChatGatewayEvent, ChatHistoryResult, ChatPromptResult, ChatSteerResult, ChatTarget } from "./chat-api";
-import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface } from "./domain";
+import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatOperationEvidence, ChatPendingInteraction, ChatSession, InspectorTab, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import { loadKanbanDemoRuntime, registerKanbanProfileTaskUpdater, resetKanbanRuntimeState } from "./kanban-store";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTimestamp, stringArray, stringValue } from "./chat-store-utils";
-import { boundedChatOperationEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
+import { boundedOperationEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
 import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
 export const profileList = signal<Profile[]>([]);
@@ -379,16 +379,14 @@ export function sendMessage(sessionId: string, body: string): void {
           ...session,
           status: "streaming",
           errorMessage: undefined,
-          messages: [
-            ...session.messages,
-            {
-              id: `prompt-${operationId}`,
-              from: "user",
-              body: trimmed,
-              at: nowTimestamp(),
-              ...(session.remoteKind === "demo" ? {} : { promptOperation: { id: operationId, state: "pending" as const } }),
-            }
-          ]
+          ...(session.remoteKind === "demo" ? {
+            messages: [...session.messages, { id: `prompt-${operationId}`, from: "user" as const, body: trimmed, at: nowTimestamp() }],
+          } : {
+            operationEvidence: boundedOperationEvidence([
+              ...(session.operationEvidence ?? []),
+              { id: operationId, kind: "prompt", body: trimmed, at: nowTimestamp(), state: "pending" },
+            ]),
+          })
         }
       : session
   );
@@ -455,27 +453,29 @@ export function setChatSocketState(state: ChatConnectionState, message = ""): vo
 }
 
 export function setChatHistoryLoading(sessionId: string, resetTranscript = false): void {
-  updateChatSession(sessionId, (session) => ({
-    ...session,
-    historyState: "loading",
-    ...(resetTranscript ? {
-      // Hermes history cannot reconstruct these queue acknowledgements. Keep the
-      // bounded, local operation evidence while replacing the durable transcript.
-      messages: boundedChatOperationEvidence(session.messages),
-      streamingMessageId: undefined,
-      historyPartial: false,
-      historyNotice: undefined,
-    } : {}),
-  }));
+  updateChatSession(sessionId, (session) => {
+    const migrated = migrateLegacyPromptEvidence(session);
+    return {
+      ...migrated,
+      historyState: "loading",
+      ...(resetTranscript ? {
+        messages: [],
+        streamingMessageId: undefined,
+        historyPartial: false,
+        historyNotice: undefined,
+      } : {}),
+    };
+  });
 }
 
 export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void {
   updateChatSession(sessionId, (session) => {
+    const migrated = migrateLegacyPromptEvidence(session);
     const historyIds = new Set(history.map((message) => message.id));
-    const localMessages = reconcilePromptOperationsWithHistory(session.messages, history)
+    const localMessages = migrated.messages
       .filter((message) => !historyIds.has(message.id));
     return {
-      ...session,
+      ...migrated,
       ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
       historyState: "loaded",
       historyPartial: result?.partial === true, historyNotice: result?.error ? officeRuntimeMessage(result.error) : undefined,
@@ -488,34 +488,45 @@ export function applyChatHistory(sessionId: string, history: ChatMessage[], reso
 function updatePromptOperation(sessionId: string, operationId: string, result: ChatPromptResult): void {
   updateChatSession(sessionId, (session) => {
     let found = false;
-    const messages = session.messages.map((message) => {
-      if (message.promptOperation?.id !== operationId || message.promptOperation.state !== "pending") return message;
+    const evidence = (session.operationEvidence ?? []).map((operation) => {
+      if (operation.id !== operationId || operation.kind !== "prompt" || operation.state !== "pending") return operation;
       found = true;
       return {
-        ...message,
-        promptOperation: {
-          id: operationId,
-          state: result.status,
-          ...(result.status === "accepted" ? {} : { message: result.message }),
-        },
-        ...(result.status === "rejected" ? { status: "failed" as const } : {}),
+        ...operation,
+        state: result.status,
+        ...(result.status === "accepted" ? { message: undefined } : { message: result.message }),
       };
     });
     if (!found) return session;
     return {
       ...session,
-      messages,
+      operationEvidence: evidence,
       ...(result.status === "rejected" || result.status === "unconfirmed" ? { status: "ready" as const } : {}),
     };
   });
 }
 
-export function reconcilePromptOperationsWithHistory(local: readonly ChatMessage[], _history: readonly ChatMessage[]): ChatMessage[] {
-  // Hermes history does not currently carry the client operation id. Text and
-  // timestamps cannot prove causality (clocks may differ and short prompts are
-  // commonly repeated), so retain bounded local evidence. applyChatHistory
-  // still removes an operation if a future durable row has the exact same id.
-  return [...local];
+export function reconcilePromptOperationsWithHistory(local: readonly ChatOperationEvidence[], _history: readonly ChatMessage[]): ChatOperationEvidence[] {
+  return boundedOperationEvidence(local);
+}
+
+function migrateLegacyPromptEvidence(session: ChatSession): ChatSession {
+  const legacy = session.messages.flatMap<ChatOperationEvidence>((message): ChatOperationEvidence[] => {
+    if (message.promptOperation) return [{
+      id: message.promptOperation.id, kind: "prompt" as const, body: message.body, at: message.at,
+      state: message.promptOperation.state,
+      ...(message.promptOperation.message ? { message: message.promptOperation.message } : {}),
+    }];
+    return message.kind === "steer"
+      ? [{ id: message.id, kind: "steer" as const, body: message.body, at: message.at, state: "accepted" as const }]
+      : [];
+  });
+  if (legacy.length === 0) return session;
+  return {
+    ...session,
+    messages: session.messages.filter((message) => message.promptOperation === undefined && message.kind !== "steer"),
+    operationEvidence: boundedOperationEvidence([...(session.operationEvidence ?? []), ...legacy]),
+  };
 }
 
 export function setChatHistoryError(sessionId: string, message: string): void {
@@ -543,6 +554,7 @@ export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent
 }
 
 export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayEvent): ChatSession {
+  if (session.liveSessionId && event.liveSessionId !== session.liveSessionId) return session;
   const payload = event.payload ?? {};
   if (event.type === "clarify.request") {
     const requestId = stringValue(payload.requestId) ?? stringValue(payload.request_id);
@@ -619,18 +631,8 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     return isChatRunActive(session) ? mergeGatewayStatusUpdate(session, payload) : session;
   }
   if (event.type === "session.info") {
-    const status = stringValue(payload.status)?.trim().toLowerCase().replaceAll("_", "-");
-    if (session.interruptPending && (payload.running === false || status === "idle" || status === "ready")) {
-      return {
-        ...session,
-        status: "ready",
-        streamingMessageId: undefined,
-        pendingInteraction: undefined,
-        interruptPending: false,
-        interruptOperationId: undefined,
-        messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "cancelled" } : item),
-      };
-    }
+    // session.info is an uncorrelated observation and may predate this interrupt.
+    // Only the interrupt RPC acknowledgement or a current terminal event can finish it.
     return session;
   }
   if (event.type.startsWith("tool.")) {

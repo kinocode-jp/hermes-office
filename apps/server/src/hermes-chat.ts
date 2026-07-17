@@ -407,18 +407,27 @@ function validateParams(
 function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<string, boolean | number | string | null> {
   const value = isRecord(raw) ? raw : {};
   if (method === "session.create" || method === "session.resume") {
+    const info = isRecord(value.info) ? value.info : undefined;
     return compact({
       liveSessionId: safeId(value.session_id),
       storedSessionId: safeId(value.stored_session_id),
       resumedSessionId: safeId(value.resumed),
       messageCount: finiteNumber(value.message_count),
-      running: typeof value.running === "boolean" ? value.running : undefined,
+      running: typeof value.running === "boolean" ? value.running : typeof info?.running === "boolean" ? info.running : undefined,
       status: safePublicText(value.status, 80),
     });
   }
   if (method === "session.close") {
     if (typeof value.closed !== "boolean") throw publicError("backend_rejected", "Hermes returned an invalid close result.");
     return { closed: value.closed };
+  }
+  if (method === "prompt.submit") {
+    if (value.status !== "streaming") throw publicError("backend_rejected", "Hermes returned an invalid prompt result.");
+    return compact({ status: "streaming", taskId: safeId(value.task_id) });
+  }
+  if (method === "session.interrupt") {
+    if (value.status !== "interrupted") throw publicError("backend_rejected", "Hermes returned an invalid interrupt result.");
+    return { status: "interrupted" };
   }
   if (method === "approval.respond") return { resolved: value.resolved === true };
   return compact({ status: safePublicText(value.status, 80), taskId: safeId(value.task_id) });

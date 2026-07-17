@@ -7,6 +7,7 @@ const ANSI_ESCAPE_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/gi;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const AUTHORIZATION_HEADER_PATTERN = /^([ \t]*(?:Authorization|Proxy-Authorization)[ \t]*:[ \t]*)([^\r\n]*)/gim;
+const JSON_COOKIE_HEADER_PATTERN = /(^[ \t]*|[{,]\s*)(["'])((?:Cookie|Set-Cookie))\2(\s*:\s*)(["'])/gim;
 const COOKIE_HEADER_PATTERN = /(^|[ \t"'`<>|])((?:Cookie|Set-Cookie)[ \t]*:[ \t]*)/gim;
 const URL_USERINFO_PATTERN = /((?:https?|postgres(?:ql)?|rediss?|mysql|mariadb|mongodb(?:\+srv)?|amqps?|ftps?|smtps?|imaps?|ldaps?):\/\/)[^/?#\s@:]*:[^/?#\s@]+@/gi;
 const QUERY_SECRET_PATTERN = /([?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+/gi;
@@ -21,8 +22,17 @@ const BENIGN_METADATA_SEGMENTS = new Set([
 
 /** Redact credential-shaped text before it crosses an Office trust boundary. */
 export function redactSecrets(value: string): SecretRedaction {
-  let output = value.replace(ANSI_ESCAPE_PATTERN, "");
-  output = output
+  const normalized = normalizeTerminalText(value);
+  const output = redactCredentialMaterial(normalized);
+  return { value: output, redacted: output !== value };
+}
+
+function normalizeTerminalText(value: string): string {
+  return value.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function redactCredentialMaterial(value: string): string {
+  let output = value
     .replace(PRIVATE_KEY_PATTERN, "[REDACTED PRIVATE KEY]")
     .replace(AUTHORIZATION_HEADER_PATTERN, (line: string, prefix: string, headerValue: string) =>
       headerValue.length === 0 ? line : `${prefix}[REDACTED]`)
@@ -32,9 +42,29 @@ export function redactSecrets(value: string): SecretRedaction {
     .replace(GOOGLE_API_KEY_PATTERN, "[REDACTED]")
     .replace(JWT_PATTERN, "[REDACTED]")
     .replace(KNOWN_CREDENTIAL_PATTERN, "[REDACTED]");
+  output = redactJsonCookieHeaders(output);
   output = redactCookieHeaders(output);
   output = redactSensitiveAssignments(output);
-  return { value: output, redacted: output !== value };
+  return output;
+}
+
+function redactJsonCookieHeaders(value: string): string {
+  let copiedUntil = 0;
+  let output = "";
+  JSON_COOKIE_HEADER_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = JSON_COOKIE_HEADER_PATTERN.exec(value)) !== null) {
+    const openingQuote = match[5]!;
+    const valueStart = match.index + match[0].length;
+    const valueEnd = cookieHeaderValueEnd(value, valueStart, openingQuote);
+    if (valueEnd === valueStart) continue;
+    output += value.slice(copiedUntil, valueStart);
+    output += "[REDACTED]";
+    copiedUntil = valueEnd;
+    JSON_COOKIE_HEADER_PATTERN.lastIndex = valueEnd;
+  }
+  JSON_COOKIE_HEADER_PATTERN.lastIndex = 0;
+  return `${output}${value.slice(copiedUntil)}`;
 }
 
 function redactCookieHeaders(value: string): string {
@@ -77,7 +107,8 @@ function cookieHeaderValueEnd(value: string, start: number, quote: string | unde
 
 /** Detect secret material on input surfaces that must reject rather than redact. */
 export function containsLikelySecret(value: string): boolean {
-  return redactSecrets(value).redacted;
+  const normalized = normalizeTerminalText(value);
+  return redactCredentialMaterial(normalized) !== normalized;
 }
 
 export function isLikelySecretIdentifier(identifier: string): boolean {

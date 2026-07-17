@@ -6,9 +6,17 @@ import {
   type AvatarMap,
   type StoredCustomAvatar,
 } from "../src/avatar-preferences.ts";
+import { canDismissAvatarPicker } from "../src/components/avatar-picker.tsx";
 
 const FIRST_IMAGE = "data:image/png;base64,Zmlyc3Q=";
 const SECOND_IMAGE = "data:image/png;base64,c2Vjb25k";
+
+test("avatar picker cannot be dismissed while a durable upload or reset is in flight", () => {
+  assert.equal(canDismissAvatarPicker(false, false), true);
+  assert.equal(canDismissAvatarPicker(true, false), false);
+  assert.equal(canDismissAvatarPicker(false, true), false);
+  assert.equal(canDismissAvatarPicker(true, true), false);
+});
 
 test("upload followed by a creature choice cannot restore stale custom state", async () => {
   const store = new DeferredAvatarStore();

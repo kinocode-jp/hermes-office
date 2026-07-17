@@ -218,11 +218,10 @@ test("mobile route and modal overlays expose consistent focus, inert, and naviga
   assert.match(profile, /aria-modal=\{mobileOverlay\.active \? "true" : undefined\}/);
   for (const source of [workspace, profile]) assert.match(source, /data-mobile-overlay-initial-focus/);
   assert.match(overlay, /kind !== "route" \|\| !element\.hasAttribute\("data-mobile-route-chrome"\)/);
-  assert.match(overlay, /element\.inert = true/);
-  assert.match(overlay, /element\.setAttribute\("aria-hidden", "true"\)/);
+  assert.match(overlay, /lockBackgroundElements\(background\)/);
   assert.match(overlay, /event\.key === "Escape"/);
   assert.match(overlay, /kind !== "modal" \|\| event\.key !== "Tab"/);
-  assert.match(overlay, /previousFocus\?\.isConnected/);
+  assert.match(overlay, /canRestoreModalFocus\(previousFocus\)/);
 });
 
 test("first-run locale follows the browser and login exposes an unauthenticated language switch", async () => {
@@ -233,6 +232,15 @@ test("first-run locale follows the browser and login exposes an unauthenticated 
   const login = await readFile(new URL("../src/components/device-login.tsx", import.meta.url), "utf8");
   assert.match(login, /class="device-login-language"/);
   assert.match(login, /setLocale\(locale\.value === "ja" \? "en" : "ja"\)/);
+});
+
+test("operation evidence uses one deduplicated live status outside its non-live timeline entries", async () => {
+  const chat = await readFile(new URL("../src/components/chat-pane.tsx", import.meta.url), "utf8");
+  assert.match(chat, /nextOperationAnnouncement\(operationEvidence, announcedOperationKey\.current\)/);
+  assert.match(chat, /role=\{announcedOperation && isUrgentOperation\(announcedOperation\) \? "alert" : "status"\}/);
+  assert.match(chat, /aria-live=\{announcedOperation && isUrgentOperation\(announcedOperation\) \? "assertive" : "polite"\}/);
+  assert.match(chat, /aria-atomic="true"/);
+  assert.match(chat, /aria-live="off"/);
 });
 
 test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touch targets", async () => {
@@ -249,6 +257,8 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
   assert.match(styles, /\.mobile-chat-tabs \{[^}]*overflow-x: auto/);
   assert.match(styles, /\.mobile-chat-tabs button:focus-visible \{[^}]*outline: 2px solid/);
   assert.match(styles, /\.mobile-chat-tabs button \{[^}]*clamp\(148px, 48vw, 220px\)/);
+  assert.match(styles, /\.chat-operation-ledger > summary \{[^}]*min-height: 44px/);
+  assert.match(styles, /\.chat-operation-ledger > summary:focus-visible \{[^}]*outline: 2px solid/);
 
   const utilitySelectors = selectorsUsing(appearance, "font-size: var(--text-utility)");
   for (const selector of [".task-status-select", ".task-status-select small", ".task-comments-state", ".task-comments-empty", ".task-comments-limit", ".task-comment-list header", ".kanban-unconfirmed"]) {

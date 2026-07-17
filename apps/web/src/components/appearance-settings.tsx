@@ -10,7 +10,7 @@ import {
 } from "../appearance";
 import { locale } from "../i18n";
 import { InfoTip } from "./info-tip";
-import { hasOpenModal, isTopmostModal } from "../modal-layer";
+import { canRestoreModalFocus, hasOpenModal, isTopmostModal, registerModal } from "../modal-layer";
 
 const themeDetails: Record<Theme, { name: string; ja: string; en: string }> = {
   paper: { name: "Paper", ja: "白", en: "Pure white" },
@@ -44,6 +44,7 @@ export function AppearanceSettings() {
     window.clearTimeout(restoreFocusTimer.current);
     restoreFocusTimer.current = undefined;
     if (!open) return;
+    const unregister = panel.current ? registerModal(panel.current) : undefined;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTopmostModal(panel.current)) return;
@@ -59,11 +60,12 @@ export function AppearanceSettings() {
     window.addEventListener("keydown", onKeyDown);
     panel.current?.querySelector<HTMLElement>("button")?.focus();
     return () => {
+      unregister?.();
       window.removeEventListener("keydown", onKeyDown);
       const restoreFocus = previousFocus.current;
       restoreFocusTimer.current = window.setTimeout(() => {
         restoreFocusTimer.current = undefined;
-        restoreFocus?.focus();
+        if (canRestoreModalFocus(restoreFocus)) restoreFocus?.focus();
       }, 0);
     };
   }, [open]);
@@ -83,7 +85,7 @@ export function AppearanceSettings() {
 
       {open && (
         <>
-          <button class="appearance-scrim" type="button" aria-label={copy.close} onPointerDown={() => setOpen(false)} onClick={() => setOpen(false)} />
+          <button class="appearance-scrim" data-modal-affordance="true" type="button" aria-label={copy.close} onPointerDown={() => setOpen(false)} onClick={() => setOpen(false)} />
           <aside ref={panel} id="appearance-panel" class="appearance-panel" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
             <header>
               <div>

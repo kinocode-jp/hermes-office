@@ -135,7 +135,7 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
       const frame = JSON.parse(data.toString()) as Record<string, unknown>;
       received.push(frame);
       const params = frame.params as Record<string, unknown>;
-      websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { session_id: "live-1", stored_session_id: "stored-1", message_count: 0, running: false, status: `RPC_TOKEN=${DASHBOARD_SECRET}`, cwd: "/private/path", token: "hidden", echoed: params } }));
+      websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { session_id: "live-1", stored_session_id: "stored-1", message_count: 0, info: { running: false }, status: `RPC_TOKEN=${DASHBOARD_SECRET}`, cwd: "/private/path", token: "hidden", echoed: params } }));
     });
   });
   const origin = await listen(http);
@@ -272,6 +272,51 @@ test("session.close preserves false and rejects a malformed success result", asy
     connection.request({ method: "session.close", params: { session_id: "live-malformed" } }),
     (error: unknown) => error instanceof HermesChatTransportError && error.code === "backend_rejected",
   );
+  await connection.close();
+});
+
+test("prompt and interrupt accept only the pinned Hermes 0.18.2 success shapes", async (t) => {
+  const http = createServer((_request, response) => { response.writeHead(404).end(); });
+  const sockets = new WebSocketServer({ noServer: true });
+  http.on("upgrade", (request, socket, head) => sockets.handleUpgrade(request, socket, head, (websocket) => sockets.emit("connection", websocket, request)));
+  sockets.on("connection", (websocket) => websocket.on("message", (data) => {
+    const frame = JSON.parse(data.toString()) as Record<string, unknown>;
+    const params = frame.params as Record<string, unknown>;
+    const sessionId = String(params.session_id);
+    const result = sessionId === "prompt-valid" ? { status: "streaming", task_id: "task-1" }
+      : sessionId === "interrupt-valid" ? { status: "interrupted" }
+        : sessionId.endsWith("-empty") ? undefined
+          : { status: "accepted" };
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }));
+  }));
+  const origin = await listen(http);
+  t.after(() => {
+    for (const client of sockets.clients) client.terminate();
+    sockets.close();
+    http.close();
+  });
+
+  const connection = await createHermesChatTransport({ baseUrl: origin, sessionToken: TOKEN }).connect(() => undefined);
+  assert.deepEqual(
+    (await connection.request({ method: "prompt.submit", params: { session_id: "prompt-valid", text: "run" } })).value,
+    { status: "streaming", taskId: "task-1" },
+  );
+  assert.deepEqual(
+    (await connection.request({ method: "session.interrupt", params: { session_id: "interrupt-valid" } })).value,
+    { status: "interrupted" },
+  );
+  for (const [method, sessionId, params] of [
+    ["prompt.submit", "prompt-invalid", { session_id: "prompt-invalid", text: "run" }],
+    ["prompt.submit", "prompt-empty", { session_id: "prompt-empty", text: "run" }],
+    ["session.interrupt", "interrupt-invalid", { session_id: "interrupt-invalid" }],
+    ["session.interrupt", "interrupt-empty", { session_id: "interrupt-empty" }],
+  ] as const) {
+    await assert.rejects(
+      connection.request({ method, params }),
+      (error: unknown) => error instanceof HermesChatTransportError && error.code === "backend_rejected",
+      `${method} ${sessionId} must reject a malformed success frame`,
+    );
+  }
   await connection.close();
 });
 
