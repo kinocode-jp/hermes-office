@@ -116,27 +116,49 @@ test("Unicode default-ignorables cannot split secret labels, headers, tokens, or
   }
 });
 
+test("every Unicode format control outside Default_Ignorable cannot split a secret label", () => {
+  const format = /\p{Cf}/u;
+  const defaultIgnorable = /\p{Default_Ignorable_Code_Point}/u;
+  const formatOnlyControls: string[] = [];
+  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint += 1) {
+    const character = String.fromCodePoint(codePoint);
+    if (format.test(character) && !defaultIgnorable.test(character)) formatOnlyControls.push(character);
+  }
+  assert.ok(formatOnlyControls.length > 0);
+
+  for (const control of formatOnlyControls) {
+    const source = `API${control}_KEY=format-control-secret`;
+    const once = redactSecrets(source);
+    assert.deepEqual(once, { value: "[REDACTED UNICODE DATA]", redacted: true }, `U+${control.codePointAt(0)!.toString(16)}`);
+    assert.equal(containsLikelySecret(source), true);
+    assert.deepEqual(redactSecrets(once.value), { value: once.value, redacted: false });
+  }
+});
+
 test("harmless Unicode joiners, variation selectors, and bidi isolates remain unchanged", () => {
   const source = [
     "Family emoji: 👨‍👩‍👧‍👦",
     "Emoji presentation: ❤️",
     "Persian joiner: می‌خواهم",
     "Isolated direction: \u2066safe prose\u2069",
+    "Arabic number sign: \u0600123",
+    "Interlinear annotation: base\ufff9annotation\ufffatext\ufffb",
   ].join("\n");
 
   assert.deepEqual(redactSecrets(source), { value: source, redacted: false });
   assert.equal(containsLikelySecret(source), false);
 });
 
-test("a 128 KiB invisible split remains bounded and fails closed", () => {
+test("128 KiB default-ignorable and format-control splits remain bounded and fail closed", () => {
   const prefix = "API";
   const suffix = "_KEY=large-invisible-secret";
-  const ignorables = "\u200b".repeat(Math.ceil((128 * 1024 - Buffer.byteLength(prefix + suffix)) / 3));
-  const source = `${prefix}${ignorables}${suffix}`;
-  assert.ok(Buffer.byteLength(source) >= 128 * 1024);
-
-  assert.deepEqual(redactSecrets(source), { value: "[REDACTED UNICODE DATA]", redacted: true });
-  assert.equal(containsLikelySecret(source), true);
+  for (const control of ["\u200b", "\u0600"]) {
+    const controls = control.repeat(Math.ceil((128 * 1024 - Buffer.byteLength(prefix + suffix)) / Buffer.byteLength(control)));
+    const source = `${prefix}${controls}${suffix}`;
+    assert.ok(Buffer.byteLength(source) >= 128 * 1024);
+    assert.deepEqual(redactSecrets(source), { value: "[REDACTED UNICODE DATA]", redacted: true });
+    assert.equal(containsLikelySecret(source), true);
+  }
 });
 
 test("well-formed terminal normalization alone stays non-secret and idempotent", () => {

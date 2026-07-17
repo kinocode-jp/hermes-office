@@ -52,6 +52,62 @@ test("a fifth pane waits for the evicted live session close acknowledgement", as
   harness.api.stop();
 });
 
+test("a fifth pane waits for an evicted pending create to settle and close", async () => {
+  const harness = await createHarness();
+  for (let index = 1; index <= 4; index += 1) {
+    harness.api.ensureSession({ clientSessionId: `pending-client-${index}`, profileId: `pending-profile-${index}` });
+  }
+  await flush();
+  const evictedCreate = harness.socket.frame("session.create", "pending-profile-1");
+  assert.ok(evictedCreate);
+
+  harness.api.releaseSession("pending-client-1");
+  harness.api.ensureSession({ clientSessionId: "pending-client-5", profileId: "pending-profile-5" });
+  await flush();
+  assert.equal(harness.socket.frame("session.create", "pending-profile-5"), undefined);
+
+  harness.socket.respond(evictedCreate.id, { session_id: "pending-live-1" });
+  await flush();
+  const close = harness.socket.frame("session.close", "pending-live-1");
+  assert.ok(close);
+  assert.equal(harness.socket.frame("session.create", "pending-profile-5"), undefined);
+
+  harness.socket.respond(close.id, { closed: true });
+  await flush();
+  const replacement = harness.socket.frame("session.create", "pending-profile-5");
+  assert.ok(replacement, "the pending eviction releases its slot without a manual retry");
+  harness.socket.respond(replacement.id, { session_id: "pending-live-5" });
+  await flush();
+  assert.ok(harness.ready.some(({ clientSessionId }) => clientSessionId === "pending-client-5"));
+  harness.api.stop();
+});
+
+test("a same-id replacement cannot overwrite its pending-start handoff", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "reused-client", profileId: "old-profile" });
+  await flush();
+  const oldCreate = harness.socket.frame("session.create", "old-profile");
+  assert.ok(oldCreate);
+
+  harness.api.ensureSession({ clientSessionId: "reused-client", profileId: "new-profile" });
+  await flush();
+  assert.equal(harness.socket.frame("session.create", "new-profile"), undefined);
+
+  harness.socket.respond(oldCreate.id, { session_id: "old-pending-live" });
+  await flush();
+  const oldClose = harness.socket.frame("session.close", "old-pending-live");
+  assert.ok(oldClose);
+  harness.socket.respond(oldClose.id, { closed: true });
+  await flush();
+
+  const newCreate = harness.socket.frame("session.create", "new-profile");
+  assert.ok(newCreate);
+  harness.socket.respond(newCreate.id, { session_id: "new-live" });
+  await flush();
+  assert.deepEqual(harness.ready.at(-1), { clientSessionId: "reused-client", liveSessionId: "new-live" });
+  harness.api.stop();
+});
+
 test("a failed eviction close resets transport instead of racing the fifth pane", async () => {
   const harness = await createHarness();
   for (let index = 1; index <= 4; index += 1) {

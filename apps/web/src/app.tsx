@@ -10,6 +10,7 @@ import { isLocalOfficeClient } from "./auth-state";
 import { logoutRemoteDevice } from "./office-api";
 import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
 import type { Surface } from "./domain";
+import { surfaceAriaCurrent } from "./navigation-state";
 import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, navigateToSurface, officeAccess, officeConnection, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
 
 const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
@@ -68,6 +69,7 @@ export function App() {
           <button
             key={item.id}
             class={activeSurface.value === item.id ? "is-active" : ""}
+            aria-current={surfaceAriaCurrent(activeSurface.value, item.id)}
             onClick={() => navigateToSurface(item.id)}
           >
             <span>{item.glyph}</span>{t(item.label)}

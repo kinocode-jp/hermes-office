@@ -18,6 +18,7 @@ import { useState } from "preact/hooks";
 import { chatSessionTitle, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { loadMoreSessions, sessionInventoryState } from "../inventory";
 import { COMPACT_OVERLAY_VIEWPORT, useMobileOverlay } from "./use-mobile-overlay";
+import { inspectorTabIsSelected } from "../navigation-state";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
   { id: "chat", label: "profile.chat" },
@@ -140,7 +141,8 @@ export function ProfilePanel() {
       <nav class="panel-tabs" aria-label={t("profile.settings")}>
         {tabs.map((tab) => (
           <button
-            class={inspectorTab.value === tab.id ? "is-active" : ""}
+            class={inspectorTabIsSelected(inspectorTab.value, tab.id) ? "is-active" : ""}
+            aria-pressed={inspectorTabIsSelected(inspectorTab.value, tab.id)}
             onClick={() => {
               if (tab.id === "chat") inspectorTab.value = "chat";
               else openLiveSettings(tab.id);

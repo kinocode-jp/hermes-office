@@ -252,6 +252,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
     let claim: PendingClaim | undefined;
     let sessionClaim: ChatSessionClaim | undefined;
+    let sessionStartSettlement: { settle(): void } | undefined;
     let ownedRequestLiveId: string | undefined;
     let ownedRequestLeaseToken: symbol | undefined;
     try {
@@ -341,6 +342,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         }
         ownedRequest = { liveSessionId: ownedRequestLiveId, leaseToken: ownedRequestLeaseToken };
       }
+      if (sessionClaim !== undefined) sessionStartSettlement = chatHub.beginSessionStart(sessionOwner);
       const result = frame.method === "session.close" && typeof frame.params?.session_id === "string"
         ? await chatHub.closeOwnedSession(sessionOwner, frame.params.session_id, authorizeSideEffect)
         : ownedRequest !== undefined
@@ -388,6 +390,8 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       } else {
         sendRpcError(send, frame.id, -32000, "Hermes request failed.");
       }
+    } finally {
+      sessionStartSettlement?.settle();
     }
   };
 

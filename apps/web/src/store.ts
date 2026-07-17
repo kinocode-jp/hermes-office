@@ -11,7 +11,7 @@ import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeSe
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTimestamp, stringArray, stringValue } from "./chat-store-utils";
 import { boundedOperationEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
-import { registerDefaultAvatarProfiles } from "./avatar-preferences";
+import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
 import { appendLiveDelta, appendLiveMessage, boundedTranscriptSuffix, replaceLiveMessages, type TranscriptChange } from "./live-transcript";
 import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
@@ -198,7 +198,12 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
     sessionCounts.set(session.profileId, (sessionCounts.get(session.profileId) ?? 0) + 1);
   }
   const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
-  registerDefaultAvatarProfiles(snapshot.profiles.map((profile) => profile.id));
+  const snapshotProfileIds = snapshot.profiles.map((profile) => profile.id);
+  if (officeInventoryReliability(snapshot.inventory.profiles) === "complete" && !snapshot.inventory.profiles.hasMore) {
+    reconcileDefaultAvatarProfiles(snapshotProfileIds);
+  } else {
+    registerDefaultAvatarProfiles(snapshotProfileIds);
+  }
   profileList.value = snapshot.profiles.map((live, index) => {
     const previous = previousProfiles.get(live.id);
     return {

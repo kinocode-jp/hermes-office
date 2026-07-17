@@ -84,6 +84,33 @@ test("a completed custom upload is restored by a new preference instance", async
   assert.deepEqual(reloaded.avatars.value["profile-a"], { kind: "custom", dataUrl: FIRST_IMAGE });
 });
 
+test("prototype-named Profiles are safe across default, custom, hydrate, reset, and persist paths", async () => {
+  const store = new DeferredAvatarStore([["__proto__", FIRST_IMAGE]]);
+  const initial = Object.fromEntries([["constructor", { kind: "creature" as const, index: 4 }]]);
+  const persisted: AvatarMap[] = [];
+  const preferences = new AvatarPreferences(initial, store, (next) => persisted.push(next));
+
+  await preferences.hydrate();
+  assert.deepEqual(preferences.avatars.value["constructor"], { kind: "creature", index: 4 });
+  assert.deepEqual(preferences.avatars.value["__proto__"], { kind: "custom", dataUrl: FIRST_IMAGE });
+  assert.equal(Object.getPrototypeOf(preferences.avatars.value), null);
+  preferences.setCreature("toString", 2);
+  await preferences.whenIdle("toString");
+  assert.deepEqual(preferences.avatars.value["toString"], { kind: "creature", index: 2 });
+  assert.equal(await preferences.setCustom("constructor", SECOND_IMAGE), true);
+  assert.deepEqual(preferences.avatars.value["constructor"], { kind: "custom", dataUrl: SECOND_IMAGE });
+  assert.equal(Object.hasOwn(persisted.at(-1)!, "__proto__"), true, "hydrate persists __proto__ as data, not as a setter");
+  assert.equal(await preferences.reset("__proto__"), true);
+  assert.equal(Object.hasOwn(preferences.avatars.value, "__proto__"), false);
+
+  const reloaded = new AvatarPreferences(persisted.at(-1)!, store);
+  await reloaded.hydrate();
+  assert.deepEqual(reloaded.avatars.value["constructor"], { kind: "custom", dataUrl: SECOND_IMAGE });
+  assert.deepEqual(reloaded.avatars.value["toString"], { kind: "creature", index: 2 });
+  assert.equal(Object.hasOwn(reloaded.avatars.value, "__proto__"), false);
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+});
+
 function createPreferences(store: AvatarAssetStore, initial: AvatarMap = {}): AvatarPreferences {
   return new AvatarPreferences(initial, store);
 }

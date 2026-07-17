@@ -308,7 +308,7 @@ test("disconnect cleanup releases absent sessions and resets transport-failed cl
   hermes.emit({ type: "message.delta", sessionId: "live-pending", payload: { text: "detached" } });
   hermes.resolvePending();
   await settle(6);
-  assert.equal(hermes.sessionCloseRequests.includes("live-pending"), false, "generation close reaps an identity that was still pending at disconnect");
+  assert.equal(hermes.sessionCloseRequests.includes("live-pending"), true, "a settled pending identity is closed without resetting its peers");
   assert.equal(hermes.isLive("live-pending"), false);
   assert.equal(observer.events("live-pending").length, 0, "events for a detached owner must never spill to another Browser");
   const reused = new FakeWebSocket();

@@ -17,6 +17,7 @@ const MAX_UNBOUND_SESSIONS = 64;
 const MAX_UNBOUND_EVENTS = 128;
 const MAX_EVENTS_PER_SESSION = 32;
 const MAX_UNBOUND_BYTES = 256 * 1024;
+const MAX_PENDING_SESSION_SETTLEMENT_MS = 16_000;
 const OWNED_LIVE_METHODS = new Set<HermesChatRequest["method"]>(["prompt.submit", "session.steer", "session.interrupt"]);
 const OWNED_SESSION_REQUEST_METHODS = new Set<HermesChatRequest["method"]>([
   ...OWNED_LIVE_METHODS, "approval.respond", "clarify.respond",
@@ -26,6 +27,12 @@ export interface ChatHubSubscriber {
   onEvent(event: HermesChatEvent): void;
   onUnavailable(liveSessionIds: readonly string[]): void;
 }
+
+export interface ChatSessionStartSettlement {
+  settle(): void;
+}
+
+type PendingSessionStart = { promise: Promise<void>; settle(): void };
 
 type BufferedEvents = {
   events: HermesChatEvent[];
@@ -46,12 +53,13 @@ export class ChatUpstreamHub {
   readonly #runtimeSource: HermesRuntimeSource;
   readonly #coordinator: ChatSessionCoordinator;
   readonly #maxEventBytes: number;
+  readonly #pendingSessionSettlementMs: number;
   readonly #subscribers = new Map<ChatSessionOwner, ChatHubSubscriber>();
   readonly #unbound = new Map<string, BufferedEvents>();
   readonly #droppedUnbound = new Set<string>();
   readonly #ownerCleanup = new Map<ChatSessionOwner, Promise<boolean>>();
   readonly #cleanupOperations = new Set<Promise<boolean>>();
-  readonly #activeSessionStarts = new Map<ChatSessionOwner, number>();
+  readonly #pendingSessionStarts = new Map<ChatSessionOwner, Set<PendingSessionStart>>();
   #unboundEventCount = 0;
   #unboundBytes = 0;
   #connection: HermesChatConnection | undefined;
@@ -61,10 +69,19 @@ export class ChatUpstreamHub {
   #cleanupEpoch = 0;
   #stopping = false;
 
-  constructor(runtimeSource: HermesRuntimeSource, coordinator: ChatSessionCoordinator, maxEventBytes: number) {
+  constructor(
+    runtimeSource: HermesRuntimeSource,
+    coordinator: ChatSessionCoordinator,
+    maxEventBytes: number,
+    options: { pendingSessionSettlementMs?: number } = {},
+  ) {
     this.#runtimeSource = runtimeSource;
     this.#coordinator = coordinator;
     this.#maxEventBytes = Math.max(4_096, maxEventBytes);
+    const settlementMs = options.pendingSessionSettlementMs ?? MAX_PENDING_SESSION_SETTLEMENT_MS;
+    this.#pendingSessionSettlementMs = Number.isFinite(settlementMs)
+      ? Math.max(1, Math.min(60_000, Math.trunc(settlementMs)))
+      : MAX_PENDING_SESSION_SETTLEMENT_MS;
   }
 
   async attach(owner: ChatSessionOwner, subscriber: ChatHubSubscriber): Promise<void> {
@@ -111,18 +128,31 @@ export class ChatUpstreamHub {
           && (authorize?.() ?? true),
       );
     }
-    const requestAuthorization = () => this.#subscribers.has(owner) && (authorize?.() ?? true);
-    if (request.method !== "session.create" && request.method !== "session.resume") {
-      return await this.#requestUnchecked(request, internal, requestAuthorization);
-    }
-    this.#activeSessionStarts.set(owner, (this.#activeSessionStarts.get(owner) ?? 0) + 1);
-    try {
-      return await this.#requestUnchecked(request, internal, requestAuthorization);
-    } finally {
-      const remaining = (this.#activeSessionStarts.get(owner) ?? 1) - 1;
-      if (remaining === 0) this.#activeSessionStarts.delete(owner);
-      else this.#activeSessionStarts.set(owner, remaining);
-    }
+    return await this.#requestUnchecked(
+      request, internal,
+      () => this.#subscribers.has(owner) && (authorize?.() ?? true),
+    );
+  }
+
+  beginSessionStart(owner: ChatSessionOwner): ChatSessionStartSettlement {
+    if (!this.#subscribers.has(owner)) throw new Error("Chat owner is detached.");
+    let resolve!: () => void;
+    let settled = false;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    const starts = this.#pendingSessionStarts.get(owner) ?? new Set<PendingSessionStart>();
+    const pending: PendingSessionStart = {
+      promise,
+      settle: () => {
+        if (settled) return;
+        settled = true;
+        starts.delete(pending);
+        if (starts.size === 0) this.#pendingSessionStarts.delete(owner);
+        resolve();
+      },
+    };
+    starts.add(pending);
+    this.#pendingSessionStarts.set(owner, starts);
+    return pending;
   }
 
   async requestOwnedSession(
@@ -224,14 +254,14 @@ export class ChatUpstreamHub {
     let operation: Promise<boolean>;
     operation = (async () => {
       if (previous !== undefined) await previous.catch(() => false);
-      if (this.#activeSessionStarts.has(owner)) {
-        // The live identity is still unknowable, so no targeted close can be
-        // authoritative. Terminalize the shared generation before a new owner
-        // may read history or resume; late results then fail the generation fence.
+      if (!await this.#waitForSessionStarts(owner)) {
+        // A start that outlives the Hermes request bound has an unknowable live
+        // identity. Only this ambiguous fallback terminalizes the shared
+        // generation; normal late results settle and are closed owner-locally.
         await this.#resetGeneration(this.#generation);
       } else {
-        // Claims still waiting on pre-request work (for example global seed
-        // assembly) cannot reach Hermes after detach, and may be released now.
+        // The gateway settles only after binding or releasing every claim, so
+        // live leases can now be targeted and pre-request claims can be dropped.
         this.#coordinator.releaseUnboundOwnerLeases(owner);
       }
       for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
@@ -270,6 +300,20 @@ export class ChatUpstreamHub {
     while (this.#cleanupOperations.size > 0) {
       await Promise.allSettled([...this.#cleanupOperations]);
     }
+  }
+
+  async #waitForSessionStarts(owner: ChatSessionOwner): Promise<boolean> {
+    const pending = [...(this.#pendingSessionStarts.get(owner) ?? [])];
+    if (pending.length === 0) return true;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), this.#pendingSessionSettlementMs);
+      timer.unref();
+    });
+    const settled = Promise.all(pending.map((start) => start.promise)).then(() => true);
+    const completed = await Promise.race([settled, timedOut]);
+    if (timer !== undefined) clearTimeout(timer);
+    return completed;
   }
 
   async closeOwnedSession(

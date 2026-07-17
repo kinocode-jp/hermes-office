@@ -17,7 +17,7 @@ test("maps neutral profile ids to stable character-sheet cells", () => {
   registerDefaultAvatarProfiles(baseProfiles);
   for (const profileId of baseProfiles) {
     const first = characterSheetPosition(profileId);
-    assert.deepEqual(characterSheetPosition(`  ${profileId.toUpperCase()}  `), first);
+    assert.deepEqual(characterSheetPosition(`  ${profileId}  `), first);
     assert.equal(first.column, 0);
     assert.ok(first.row >= 0 && first.row < 6);
   }
@@ -48,6 +48,45 @@ test("inventory reorder and insertion never change an existing profile's default
   }
   assert.equal(appearance("new-leading-profile").hue, 106);
   assert.equal(saved["stable-profile-0"], 0);
+});
+
+test("authoritative reconciliation removes deleted slots and compacts the current roster", () => {
+  const saved: Record<string, number> = Object.create(null);
+  const assignments = new AvatarOrdinalPreferences({}, (next) => Object.assign(saved, next));
+  const initial = Array.from({ length: 12 }, (_, index) => `profile-${index}`);
+  assignments.register(initial);
+
+  const remaining = initial.slice(6).reverse();
+  assignments.reconcile(remaining);
+  assert.deepEqual(initial.slice(6).map((profileId) => assignments.ordinal(profileId)), [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(initial.slice(6).map((profileId) => Math.floor(assignments.ordinal(profileId) / 6) * 53), [0, 0, 0, 0, 0, 0]);
+
+  assignments.reconcile(["new-leading", ...remaining]);
+  assert.equal(assignments.ordinal("new-leading"), 6, "new IDs append after retained relative order");
+  assert.equal(assignments.ordinal("profile-0"), 7, "a deleted ID is absent until it is observed again");
+});
+
+test("prototype-named Hermes Profiles receive distinct safe ordinal slots", () => {
+  const persisted: Record<string, number>[] = [];
+  const initial = Object.fromEntries([["constructor", 7], ["toString", 2], ["__proto__", 9]]);
+  const assignments = new AvatarOrdinalPreferences(initial, (next) => persisted.push(next));
+  assert.deepEqual(["toString", "constructor", "__proto__"].map((id) => assignments.ordinal(id)), [0, 1, 2]);
+  assignments.register(["hasOwnProperty"]);
+  assert.equal(assignments.ordinal("hasOwnProperty"), 3);
+  assert.equal(Object.getPrototypeOf(persisted.at(-1)), null);
+  assert.equal(Object.hasOwn(persisted.at(-1)!, "__proto__"), true);
+});
+
+test("prototype properties cannot masquerade as default avatar preferences", () => {
+  profileAvatars.value = {};
+  for (const profileId of ["constructor", "toString", "__proto__"]) {
+    const avatar = avatarForProfile(profileId);
+    assert.equal(avatar.kind, "creature");
+  }
+  setCreatureAvatar("__proto__", 3);
+  assert.deepEqual(avatarForProfile("__proto__"), { kind: "creature", index: 3 });
+  assert.equal(Object.hasOwn(profileAvatars.value, "__proto__"), true);
+  profileAvatars.value = {};
 });
 
 test("malformed persisted avatar slots are compacted before new Profiles are assigned", () => {

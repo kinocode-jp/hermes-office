@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "../src/domain.ts";
 import { initializeInventory, loadMoreProfiles, loadMoreSessions, profileInventoryState, registerInventorySnapshotRefresh, sessionInventoryState } from "../src/inventory.ts";
+import { defaultAvatarOrdinal } from "../src/avatar-preferences.ts";
 import { locale, localizeRuntimeMessage, setLocale } from "../src/i18n.ts";
 import { storedSessionClientId } from "../src/session-identity.ts";
 import { activeSessionId, applyChatGatewayEvent, applyOfficeSnapshot, interruptSession, openSessionIds, profileList, registerChatRuntime, selectedProfileId, sessions } from "../src/store.ts";
@@ -128,6 +129,39 @@ test("profile pages upsert server fields, preserve UI fields, and prune only at 
     assert.equal(profileList.value.find((profile) => profile.id === "draft-profile")?.role, "Draft owner");
     assert.equal(sessions.value.some((session) => session.id === "local-draft"), true);
     assert.equal(selectedProfileId.value, "p0");
+  } finally {
+    browser.restore();
+  }
+});
+
+test("a complete snapshot compacts avatar slots to the current authoritative roster", () => {
+  const serverUrl = "http://127.0.0.1:55208";
+  const historical = Array.from({ length: 12 }, (_, index) => ({ id: `historical-${index}`, name: `Historical ${index}`, activity: "idle", activeSessionCount: 0 }));
+  applyOfficeSnapshot(snapshot({ profiles: historical, sequence: 80 }), serverUrl);
+  assert.deepEqual(historical.map(({ id }) => defaultAvatarOrdinal(id)), Array.from({ length: 12 }, (_, index) => index));
+
+  const current = Array.from({ length: 6 }, (_, index) => ({ id: `current-${index}`, name: `Current ${index}`, activity: "idle", activeSessionCount: 0 }));
+  applyOfficeSnapshot(snapshot({ profiles: current, sequence: 81 }), serverUrl);
+  assert.deepEqual(current.map(({ id }) => defaultAvatarOrdinal(id)), [0, 1, 2, 3, 4, 5]);
+  assert.equal(defaultAvatarOrdinal("historical-11"), 6, "a deleted slot is assigned anew only if observed again");
+});
+
+test("only a reliable terminal Profile continuation reconciles avatar slots", async () => {
+  const browser = installBrowserGlobals();
+  const serverUrl = "http://127.0.0.1:55209";
+  const historical = Array.from({ length: 12 }, (_, index) => ({ id: `paged-old-${index}`, name: `Old ${index}`, activity: "idle", activeSessionCount: 0 }));
+  applyOfficeSnapshot(snapshot({ profiles: historical, sequence: 90 }), serverUrl);
+  const current = Array.from({ length: 6 }, (_, index) => ({ id: `paged-current-${index}`, name: `Current ${index}`, activity: "idle", activeSessionCount: 0 }));
+  globalThis.fetch = inventoryFetch([profilePage(current.slice(3), terminal(3))]);
+
+  try {
+    const first = snapshot({ profiles: current.slice(0, 3), profilePage: continuing(3, "avatar-final"), sequence: 91 });
+    applyOfficeSnapshot(first, serverUrl);
+    initializeInventory(first, identity(serverUrl, 91));
+    assert.equal(defaultAvatarOrdinal("paged-old-11"), 11, "non-terminal snapshots retain historical assignments");
+    await loadMoreProfiles();
+    assert.deepEqual(current.map(({ id }) => defaultAvatarOrdinal(id)), [0, 1, 2, 3, 4, 5]);
+    assert.equal(defaultAvatarOrdinal("paged-old-11"), 6);
   } finally {
     browser.restore();
   }

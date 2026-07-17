@@ -68,6 +68,63 @@ test("disconnect fences a pending resume before replacement readiness and histor
   assert.equal(replacement.errorCode(202), undefined);
 });
 
+test("a detached pending resume settles and closes without resetting another owner", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const stable = new FakeWebSocket();
+  const pending = new FakeWebSocket();
+  handleOfficeChatConnection(stable as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(pending as unknown as WebSocket, dependencies);
+  await settle();
+
+  stable.rpc(210, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(4);
+  const stableOwner = coordinator.ownerForLive("live-old");
+  assert.ok(stableOwner);
+
+  pending.rpc(211, "session.resume", { session_id: "pending-only", profile: "coder" });
+  await settle();
+  pending.close(1006, "network lost during resume");
+  hermes.emit("live-old", "stable while peer settles");
+  await settle(4);
+
+  assert.equal(hermes.connectionCloseCount, 0);
+  assert.equal(stable.closed, undefined);
+  assert.equal(coordinator.ownerForLive("live-old"), stableOwner);
+  assert.equal(stable.events("live-old").at(-1)?.payload?.text, "stable while peer settles");
+
+  hermes.resolvePendingOnly();
+  await settle(10);
+  assert.deepEqual(hermes.sessionCloseRequests, ["live-pending"]);
+  assert.equal(hermes.connectionCloseCount, 0, "a settled peer start is closed owner-locally");
+  assert.equal(hermes.isLive("live-old"), true);
+  assert.equal(coordinator.ownerForLive("live-old"), stableOwner);
+  stable.rpc(212, "prompt.submit", { session_id: "live-old", text: "still routed" });
+  await settle(4);
+  assert.deepEqual(hermes.targetedRequests.at(-1), { method: "prompt.submit", sessionId: "live-old" });
+});
+
+test("an unsettled start times out behind cleanup barriers and explicitly resyncs peers", async () => {
+  const { hermes, dependencies } = setup(5);
+  const hub = dependencies.chatHub as ChatUpstreamHub;
+  const stable = new FakeWebSocket(); const pending = new FakeWebSocket();
+  handleOfficeChatConnection(stable as unknown as WebSocket, dependencies);
+  handleOfficeChatConnection(pending as unknown as WebSocket, dependencies); await settle();
+  stable.rpc(220, "session.resume", { session_id: "parent", profile: "coder" }); await settle(4);
+  pending.rpc(221, "session.resume", { session_id: "pending-only", profile: "coder" }); await settle();
+  pending.close(1006, "unsettled start");
+  let historyStarted = false;
+  const history = hub.readStableHistory(async () => { historyStarted = true; return "after-fence"; });
+  await settle(3); assert.equal(historyStarted, false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(await history, "after-fence");
+  assert.equal(stable.events("live-old").at(-1)?.payload?.status, "resync_required");
+  assert.equal(stable.closed?.code, 1013); assert.equal(hermes.connectionCloseCount, 1);
+  hermes.resolvePendingOnly(); await settle(4);
+  const replacement = new FakeWebSocket();
+  handleOfficeChatConnection(replacement as unknown as WebSocket, dependencies); await settle(4);
+  assert.equal(replacement.frames().some(({ method }) => method === "office.ready"), true);
+});
+
 test("a guessed live close cannot race ahead of its pending resume on the same socket", async () => {
   const { hermes, coordinator, dependencies } = setup();
   const client = new FakeWebSocket();
@@ -546,7 +603,7 @@ test("a resume result without any live id also resets the ambiguous shared gener
   assert.deepEqual(hermes.liveIds(), []);
 });
 
-function setup(): {
+function setup(pendingSessionSettlementMs?: number): {
   hermes: RaceFakeHermes;
   coordinator: ChatSessionCoordinator;
   dependencies: Parameters<typeof handleOfficeChatConnection>[1];
@@ -560,7 +617,8 @@ function setup(): {
     dependencies: {
       auth: new OfficeAuth(), officeSession: SESSION, runtimeSource: runtime,
       maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
-      sessionCoordinator: coordinator, chatHub: new ChatUpstreamHub(runtime, coordinator, 64 * 1024),
+      sessionCoordinator: coordinator, chatHub: new ChatUpstreamHub(runtime, coordinator, 64 * 1024,
+        pendingSessionSettlementMs === undefined ? {} : { pendingSessionSettlementMs }),
     },
   };
 }

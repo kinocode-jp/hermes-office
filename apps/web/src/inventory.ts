@@ -4,7 +4,7 @@ import { officeMessage, type RuntimeMessage } from "./i18n";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
 import { mergeServerSessionStatus } from "./session-runtime";
-import { registerDefaultAvatarProfiles } from "./avatar-preferences";
+import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
 import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
@@ -141,7 +141,10 @@ function commitInventoryPage(page: InventoryPage, identity: InventoryIdentity): 
   if (page.kind === "profiles") {
     identity.profilesReliable &&= isReliablePage(page.pagination);
     mergeProfiles(page.profiles, identity.seenProfiles);
-    if (identity.profilesReliable && isTerminal(page.pagination)) pruneProfiles(identity.seenProfiles);
+    if (identity.profilesReliable && isTerminal(page.pagination)) {
+      pruneProfiles(identity.seenProfiles);
+      reconcileDefaultAvatarProfiles([...identity.seenProfiles]);
+    }
   } else {
     identity.sessionsReliable &&= isReliablePage(page.pagination);
     mergeSessions(page.sessions, identity.seenSessions);

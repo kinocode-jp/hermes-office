@@ -129,6 +129,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   const liveToClient = new Map<string, LiveTarget>();
   const pending = new Map<string, PendingRequest>();
   const opening = new Map<string, symbol>();
+  const openingSettlements = new Map<string, { operation: symbol; promise: Promise<void>; resolve(): void }>();
   const historyLoads = new Map<string, symbol>();
   const loadedHistories = new Map<string, ActiveTarget>();
   const historiesAwaitingReset = new Set<string>();
@@ -395,6 +396,10 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       return;
     }
     opening.set(target.clientSessionId, operation);
+    let resolveOpening!: () => void;
+    const openingPromise = new Promise<void>((resolve) => { resolveOpening = resolve; });
+    const openingSettlement = { operation, promise: openingPromise, resolve: resolveOpening };
+    openingSettlements.set(target.clientSessionId, openingSettlement);
     callbacks.onSessionConnecting(target.clientSessionId);
     try {
       const raw = target.storedSessionId
@@ -436,9 +441,18 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
           historiesAwaitingReset.add(target.clientSessionId);
         }
         callbacks.onSessionError(target.clientSessionId, errorText(error));
+      } else if (!stopped && socket === requestSocket && requestSocket.readyState === WebSocket.OPEN
+        && !isExplicitRpcRejection(error)) {
+        // An evicted start without an authoritative result may still consume a
+        // server lease. Fence the transport so reconnect cleanup releases it.
+        requestSocket.close(4002, "Session start unconfirmed; reload history");
       }
     } finally {
       if (opening.get(target.clientSessionId) === operation) opening.delete(target.clientSessionId);
+      if (openingSettlements.get(target.clientSessionId) === openingSettlement) {
+        openingSettlements.delete(target.clientSessionId);
+      }
+      openingSettlement.resolve();
     }
   };
 
@@ -569,6 +583,10 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   const deactivateTarget = (active: ActiveTarget): void => {
     const clientSessionId = active.target.clientSessionId;
     if (!isCurrentTarget(active)) return;
+    const openingSettlement = openingSettlements.get(clientSessionId);
+    if (openingSettlement !== undefined) {
+      closeHandoffTail = closeHandoffTail.then(async () => await openingSettlement.promise);
+    }
     targets.delete(clientSessionId);
     opening.delete(clientSessionId);
     historyLoads.delete(clientSessionId);

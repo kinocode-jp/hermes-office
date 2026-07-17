@@ -82,9 +82,13 @@ branch, delegate, and tool children that native resume intentionally excludes.
 Office Server multiplexes every Browser Chat WebSocket over one Hermes gateway
 connection. This keeps Hermes' process-global live transport stable while
 Office routes each normalized live event only to the Browser socket that owns
-that live id. A Browser disconnect explicitly closes only its owned live
-sessions; only Server shutdown or shared-upstream failure closes the Hermes
-connection and reaps all `close_on_disconnect` sessions.
+that live id. A Browser disconnect waits a bounded interval for its in-flight
+create/resume identity to settle, then explicitly closes only that Browser's
+owned live sessions. If the identity does not settle within that bound or an
+owned close cannot be confirmed, Office treats the state as an ambiguous
+shared-upstream failure: it closes the Hermes connection, reaps every
+`close_on_disconnect` session, and makes all affected panes resynchronize.
+Server shutdown and other shared-upstream failures use the same global fence.
 
 Each Office lease owns exactly one Hermes live id. A second, different live id
 returned while converging a durable compression alias is a duplicate `_sessions`

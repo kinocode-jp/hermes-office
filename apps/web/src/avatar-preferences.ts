@@ -20,33 +20,52 @@ export interface AvatarAssetStore {
   delete(profileId: string): Promise<void>;
 }
 
-/** Preserves the roster slot assigned when a Profile is first observed. */
+/** Preserves relative roster slots until a complete authoritative reconciliation. */
 export class AvatarOrdinalPreferences {
-  #ordinals: AvatarOrdinalMap;
+  #ordinals: Map<string, number>;
   readonly #persist: (ordinals: AvatarOrdinalMap) => void;
 
   constructor(initial: AvatarOrdinalMap = {}, persist: (ordinals: AvatarOrdinalMap) => void = () => undefined) {
-    this.#ordinals = normalizeAvatarOrdinals(initial);
+    this.#ordinals = new Map(Object.entries(normalizeAvatarOrdinals(initial)));
     this.#persist = persist;
   }
 
   register(profileIds: readonly string[]): void {
-    let nextOrdinal = Object.values(this.#ordinals).reduce((maximum, ordinal) => Math.max(maximum, ordinal), -1) + 1;
     let changed = false;
     for (const profileId of profileIds) {
       const key = normalizedProfileId(profileId);
-      if (!key || this.#ordinals[key] !== undefined) continue;
-      this.#ordinals[key] = nextOrdinal++;
+      if (!key || this.#ordinals.has(key)) continue;
+      this.#ordinals.set(key, this.#ordinals.size);
       changed = true;
     }
-    if (changed) this.#persist({ ...this.#ordinals });
+    if (changed) this.#persist(this.#snapshot());
+  }
+
+  /** Reconciles only after Office has observed one complete authoritative roster. */
+  reconcile(profileIds: readonly string[]): void {
+    const current = uniqueProfileIds(profileIds);
+    const currentSet = new Set(current);
+    const retained = [...this.#ordinals]
+      .sort((left, right) => left[1] - right[1])
+      .map(([profileId]) => profileId)
+      .filter((profileId) => currentSet.has(profileId));
+    const retainedSet = new Set(retained);
+    const ordered = [...retained, ...current.filter((profileId) => !retainedSet.has(profileId))];
+    const next = new Map(ordered.map((profileId, ordinal) => [profileId, ordinal] as const));
+    if (mapsEqual(this.#ordinals, next)) return;
+    this.#ordinals = next;
+    this.#persist(this.#snapshot());
   }
 
   ordinal(profileId: string): number {
     const key = normalizedProfileId(profileId);
     if (!key) return DEFAULT_CHARACTER_COUNT - 1;
     this.register([key]);
-    return this.#ordinals[key]!;
+    return this.#ordinals.get(key)!;
+  }
+
+  #snapshot(): AvatarOrdinalMap {
+    return safeRecord(this.#ordinals);
   }
 }
 
@@ -58,7 +77,7 @@ export class AvatarPreferences {
   readonly #mutationTails = new Map<string, Promise<void>>();
 
   constructor(initial: AvatarMap, store: AvatarAssetStore, persist: (avatars: AvatarMap) => void = () => undefined) {
-    this.avatars = signal(initial);
+    this.avatars = signal(copyAvatarMap(initial));
     this.#store = store;
     this.#persist = persist;
   }
@@ -104,7 +123,7 @@ export class AvatarPreferences {
       return false;
     }
     if (!this.isCurrent(profileId, generation)) return false;
-    const next = { ...this.avatars.value };
+    const next = copyAvatarMap(this.avatars.value);
     delete next[profileId];
     this.avatars.value = next;
     this.#persist(next);
@@ -118,13 +137,13 @@ export class AvatarPreferences {
     } catch {
       return;
     }
-    const next = { ...this.avatars.value };
+    const next = copyAvatarMap(this.avatars.value);
     for (const record of records) {
       if (!isStoredCustomAvatar(record)) continue;
       if (!record.profileId || this.#generations.has(record.profileId)) continue;
-      if (next[record.profileId]?.kind === "creature") continue;
+      if (ownValue(next, record.profileId)?.kind === "creature") continue;
       if (record.dataUrl.length <= CUSTOM_IMAGE_LIMIT && isSafeImageDataUrl(record.dataUrl)) {
-        next[record.profileId] = { kind: "custom", dataUrl: record.dataUrl };
+        setOwnValue<ProfileAvatar>(next, record.profileId, { kind: "custom", dataUrl: record.dataUrl });
       }
     }
     this.avatars.value = next;
@@ -136,7 +155,8 @@ export class AvatarPreferences {
   }
 
   #update(profileId: string, avatar: ProfileAvatar): void {
-    const next = { ...this.avatars.value, [profileId]: avatar };
+    const next = copyAvatarMap(this.avatars.value);
+    setOwnValue(next, profileId, avatar);
     this.avatars.value = next;
     this.#persist(next);
   }
@@ -166,8 +186,12 @@ export function registerDefaultAvatarProfiles(profileIds: readonly string[]): vo
   defaultAvatarAssignments.register(profileIds);
 }
 
+export function reconcileDefaultAvatarProfiles(profileIds: readonly string[]): void {
+  defaultAvatarAssignments.reconcile(profileIds);
+}
+
 function normalizedProfileId(profileId: string): string {
-  return profileId.trim().toLocaleLowerCase("en-US");
+  return profileId.trim();
 }
 
 /** Compacts malformed, duplicate, or sparse persisted slots into one safe first-seen sequence. */
@@ -182,11 +206,11 @@ export function normalizeAvatarOrdinals(value: unknown): AvatarOrdinalMap {
     candidates.push({ key, ordinal, order });
   }
   candidates.sort((left, right) => left.ordinal - right.ordinal || left.order - right.order);
-  return Object.fromEntries(candidates.map((candidate, ordinal) => [candidate.key, ordinal]));
+  return safeRecord(candidates.map((candidate, ordinal) => [candidate.key, ordinal] as const));
 }
 
 export function avatarForProfile(profileId: string): ProfileAvatar {
-  return profileAvatars.value[profileId] ?? { kind: "creature", index: defaultAvatarIndex(profileId) };
+  return ownValue(profileAvatars.value, profileId) ?? { kind: "creature", index: defaultAvatarIndex(profileId) };
 }
 
 export function beginCustomAvatarChange(profileId: string): number {
@@ -219,7 +243,7 @@ function readStoredAvatars(): AvatarMap {
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const avatars: AvatarMap = {};
+    const avatars: AvatarMap = safeRecord();
     for (const [profileId, value] of Object.entries(parsed)) {
       if (!profileId || !value || typeof value !== "object") continue;
       const avatar = value as Partial<ProfileAvatar>;
@@ -237,7 +261,7 @@ function readStoredAvatars(): AvatarMap {
 
 function persist(avatars: AvatarMap): void {
   try {
-    const compact = Object.fromEntries(Object.entries(avatars).filter((entry): entry is [string, { kind: "creature"; index: number }] => entry[1].kind === "creature"));
+    const compact = safeRecord(Object.entries(avatars).filter((entry): entry is [string, { kind: "creature"; index: number }] => entry[1].kind === "creature"));
     globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(compact));
   } catch {
     // In-memory preferences remain usable when localStorage is blocked.
@@ -353,4 +377,40 @@ function transactionCompletion(transaction: IDBTransaction): Promise<void> {
     transaction.onerror = () => reject(transaction.error ?? new Error("avatar transaction failed"));
     transaction.onabort = () => reject(transaction.error ?? new Error("avatar transaction aborted"));
   });
+}
+
+function uniqueProfileIds(profileIds: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const profileId of profileIds) {
+    const key = normalizedProfileId(profileId);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+function mapsEqual(left: ReadonlyMap<string, number>, right: ReadonlyMap<string, number>): boolean {
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) if (right.get(key) !== value) return false;
+  return true;
+}
+
+function safeRecord<T>(entries: Iterable<readonly [string, T]> = []): Record<string, T> {
+  const record = Object.create(null) as Record<string, T>;
+  for (const [key, value] of entries) Object.defineProperty(record, key, { value, writable: true, enumerable: true, configurable: true });
+  return record;
+}
+
+function copyAvatarMap(avatars: Readonly<AvatarMap>): AvatarMap {
+  return safeRecord(Object.entries(avatars));
+}
+
+function ownValue<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+}
+
+function setOwnValue<T>(record: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(record, key, { value, writable: true, enumerable: true, configurable: true });
 }
