@@ -8,7 +8,7 @@ export const LIVE_TRANSCRIPT_LIMITS = {
 } as const;
 
 export type TranscriptChange =
-  | { status: "accepted"; messages: ChatMessage[] }
+  | { status: "accepted"; messages: ChatMessage[]; windowed: boolean }
   | { status: "resync-required"; reason: "row_limit" | "byte_limit" | "streaming_message_limit" };
 
 const encoder = new TextEncoder();
@@ -34,15 +34,12 @@ export function chatTranscriptBytes(messages: ChatMessage[]): number {
 }
 
 export function appendLiveMessage(messages: ChatMessage[], message: ChatMessage): TranscriptChange {
-  if (messages.length >= LIVE_TRANSCRIPT_LIMITS.maxRows) return resync("row_limit");
+  if (messages.length > LIVE_TRANSCRIPT_LIMITS.maxRows) return resync("row_limit");
   if (isStreaming(message) && utf8BodyBytes(message) > LIVE_TRANSCRIPT_LIMITS.maxStreamingMessageBytes) {
     return resync("streaming_message_limit");
   }
-  const nextBytes = chatTranscriptBytes(messages) + chatMessageBytes(message);
-  if (nextBytes > LIVE_TRANSCRIPT_LIMITS.maxBytes) return resync("byte_limit");
-  const next = [...messages, message];
-  transcriptBytes.set(next, nextBytes);
-  return { status: "accepted", messages: next };
+  if (chatMessageBytes(message) > LIVE_TRANSCRIPT_LIMITS.maxBytes) return resync("byte_limit");
+  return newestWindow([...messages, message], new Set([message.id]));
 }
 
 export function appendLiveDelta(messages: ChatMessage[], messageId: string, delta: string): TranscriptChange {
@@ -68,13 +65,13 @@ export function appendLiveDelta(messages: ChatMessage[], messageId: string, delt
     return replaceLiveMessage(messages, index, { ...current, body: current.body + delta, status: "streaming" }, true);
   }
   const nextBytes = chatTranscriptBytes(messages) + appendedJsonStringBytes(current.body, delta);
-  if (nextBytes > LIVE_TRANSCRIPT_LIMITS.maxBytes) return resync("byte_limit");
   const replacement = { ...current, body: current.body + delta, status: "streaming" as const };
   bodyBytes.set(replacement, nextBodyBytes);
   messageBytes.set(replacement, chatMessageBytes(current) + appendedJsonStringBytes(current.body, delta));
   const next = messages.map((message, currentIndex) => currentIndex === index ? replacement : message);
+  if (nextBytes > LIVE_TRANSCRIPT_LIMITS.maxBytes) return newestWindow(next, new Set([messageId]));
   transcriptBytes.set(next, nextBytes);
-  return { status: "accepted", messages: next };
+  return accepted(next, false);
 }
 
 export function replaceLiveMessage(
@@ -89,11 +86,12 @@ export function replaceLiveMessage(
   if (enforceStreamingLimit && utf8BodyBytes(replacement) > LIVE_TRANSCRIPT_LIMITS.maxStreamingMessageBytes) {
     return resync("streaming_message_limit");
   }
+  if (chatMessageBytes(replacement) > LIVE_TRANSCRIPT_LIMITS.maxBytes) return resync("byte_limit");
   const nextBytes = chatTranscriptBytes(messages) - chatMessageBytes(current) + chatMessageBytes(replacement);
-  if (nextBytes > LIVE_TRANSCRIPT_LIMITS.maxBytes) return resync("byte_limit");
   const next = messages.map((message, currentIndex) => currentIndex === index ? replacement : message);
+  if (nextBytes > LIVE_TRANSCRIPT_LIMITS.maxBytes) return newestWindow(next, new Set([replacement.id]));
   transcriptBytes.set(next, nextBytes);
-  return { status: "accepted", messages: next };
+  return accepted(next, false);
 }
 
 export function replaceLiveMessages(
@@ -101,14 +99,13 @@ export function replaceLiveMessages(
   replacements: ChatMessage[],
   enforceBodyLimitFor: ReadonlySet<string> = new Set(),
 ): TranscriptChange {
-  if (replacements.length > LIVE_TRANSCRIPT_LIMITS.maxRows) return resync("row_limit");
+  if (messages.length > LIVE_TRANSCRIPT_LIMITS.maxRows) return resync("row_limit");
   if (replacements.some((message) => (isStreaming(message) || enforceBodyLimitFor.has(message.id))
     && utf8BodyBytes(message) > LIVE_TRANSCRIPT_LIMITS.maxStreamingMessageBytes)) {
     return resync("streaming_message_limit");
   }
-  const nextBytes = chatTranscriptBytes(replacements);
-  if (nextBytes > LIVE_TRANSCRIPT_LIMITS.maxBytes) return resync("byte_limit");
-  return { status: "accepted", messages: replacements };
+  if (replacements.some((message) => chatMessageBytes(message) > LIVE_TRANSCRIPT_LIMITS.maxBytes)) return resync("byte_limit");
+  return newestWindow(replacements, enforceBodyLimitFor);
 }
 
 /** Keeps one contiguous newest window and reports the omission to the caller. */
@@ -174,6 +171,18 @@ function joinsSurrogatePair(current: string, suffix: string): boolean {
 function isHighSurrogate(code: number): boolean { return code >= 0xd800 && code <= 0xdbff; }
 function isLowSurrogate(code: number): boolean { return code >= 0xdc00 && code <= 0xdfff; }
 function isStreaming(message: ChatMessage): boolean { return message.status === "streaming"; }
+function accepted(messages: ChatMessage[], windowed: boolean): TranscriptChange {
+  return { status: "accepted", messages, windowed };
+}
+
+function newestWindow(messages: ChatMessage[], preserveIds: ReadonlySet<string>): TranscriptChange {
+  const bounded = boundedTranscriptSuffix(messages);
+  if (bounded.truncated && [...preserveIds].some((id) => !bounded.messages.some((message) => message.id === id))) {
+    return resync(messages.length > LIVE_TRANSCRIPT_LIMITS.maxRows ? "row_limit" : "byte_limit");
+  }
+  return accepted(bounded.messages, bounded.truncated);
+}
+
 function resync(reason: Extract<TranscriptChange, { status: "resync-required" }>["reason"]): TranscriptChange {
   return { status: "resync-required", reason };
 }

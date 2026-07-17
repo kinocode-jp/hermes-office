@@ -52,8 +52,10 @@ function setView(view: OfficeView): void { officeView.value = view; persistPrefe
 function setLayout(layout: OfficeLayoutId): void { officeLayout.value = layout; persistPreference("hermes-office.office-layout", layout); }
 function setSize(size: OfficeSizeId): void { officeSize.value = size; persistPreference("hermes-office.office-size", size); }
 
-const CHAR_W = 56;
-const CHAR_H = 76;
+const CHAR_W = 84;
+const CHAR_H = 84;
+const DENSE_OFFICE_PROFILE_COUNT = 12;
+const MIN_INTERACTIVE_SCENE_SCALE = 0.55;
 
 function profileActivity(profileId: string): string | undefined {
   const profileSessions = sessions.value.filter((session) => session.profileId === profileId);
@@ -75,6 +77,24 @@ function characterTransform(character: SimCharacter): string {
   return `translate3d(${Math.round(character.x - CHAR_W / 2)}px, ${Math.round(character.y - CHAR_H + 14)}px, 0)`;
 }
 
+function stableProfileIds(profileIds: string[]): string[] {
+  return [...profileIds].sort((left, right) => left === right ? 0 : left < right ? -1 : 1);
+}
+
+function placeCharactersAtAssignedDesks(world: OfficeWorld, characters: SimCharacter[]): void {
+  for (const character of characters) {
+    const desk = world.desks[character.deskIndex];
+    if (!desk) continue;
+    const seat = cellCenter(desk.chair);
+    character.x = seat.x;
+    character.y = seat.y;
+    character.path = [];
+    character.pause = Number.POSITIVE_INFINITY;
+    character.moving = false;
+    character.direction = "front";
+  }
+}
+
 function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWorld }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const charEls = useRef(new Map<string, HTMLButtonElement>());
@@ -84,6 +104,17 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
   const worldW = world.cols * CELL;
   const worldH = world.rows * CELL;
   const profileKey = profiles.map((profile) => profile.id).join("|");
+  const denseLayout = profiles.length >= DENSE_OFFICE_PROFILE_COUNT;
+  const assignedProfileIds = useMemo(
+    () => denseLayout ? stableProfileIds(profiles.map((profile) => profile.id)) : profiles.map((profile) => profile.id),
+    [denseLayout, profileKey]
+  );
+  const assignedDeskByProfile = useMemo(
+    () => new Map(assignedProfileIds.map((profileId, deskIndex) => [profileId, deskIndex])),
+    [assignedProfileIds]
+  );
+  const profilesById = new Map(profiles.map((profile) => [profile.id, profile]));
+  const profilesByDesk = assignedProfileIds.map((profileId) => profilesById.get(profileId)!);
 
   statusRef.current = new Map(profiles.map((profile) => [profile.id, profile.status]));
 
@@ -93,7 +124,8 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
     const fit = () => {
       const rect = stage.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      setScale(Math.min(rect.width / worldW, rect.height / worldH, 1.4));
+      const fitScale = Math.min(rect.width / worldW, rect.height / worldH, 1.4);
+      setScale(Math.max(fitScale, MIN_INTERACTIVE_SCENE_SCALE));
     };
     fit();
     const observer = new ResizeObserver(fit);
@@ -101,8 +133,18 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
     return () => observer.disconnect();
   }, [worldW, worldH]);
 
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const frame = window.requestAnimationFrame(() => {
+      stage.scrollLeft = Math.max(0, (stage.scrollWidth - stage.clientWidth) / 2);
+      stage.scrollTop = Math.max(0, (stage.scrollHeight - stage.clientHeight) / 2);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [scale, worldW, worldH]);
+
   useEffect(() => {
-    simRef.current = createCharacters(world, profiles.map((profile) => profile.id), simRef.current);
+    simRef.current = createCharacters(world, assignedProfileIds, simRef.current);
     const paint = (now = performance.now()) => {
       const walkFrame = Math.floor(now / 220) % 2;
       for (const character of simRef.current) {
@@ -116,16 +158,9 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
       }
     };
     paint();
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      // Without motion, seat everyone at their desk once and stop.
-      for (const character of simRef.current) {
-        const desk = world.desks[character.deskIndex];
-        if (desk) {
-          const seat = cellCenter(desk.chair);
-          character.x = seat.x;
-          character.y = seat.y;
-        }
-      }
+    if (denseLayout || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      // Dense rosters use exclusive desk seats; reduced motion uses the same stable layout.
+      placeCharactersAtAssignedDesks(world, simRef.current);
       paint();
       return;
     }
@@ -141,14 +176,15 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
     }, 80);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [world, profileKey]);
+  }, [world, profileKey, denseLayout, assignedProfileIds]);
 
   const cables: TaskCable[] = tasks.value.flatMap((task) => {
     if (!task.assigneeId) return [];
-    const index = profiles.findIndex((profile) => profile.id === task.assigneeId);
-    const desk = world.desks[index];
-    if (index < 0 || !desk) return [];
-    const profile = profiles[index]!;
+    const deskIndex = assignedDeskByProfile.get(task.assigneeId);
+    const desk = deskIndex === undefined ? undefined : world.desks[deskIndex];
+    if (deskIndex === undefined || !desk) return [];
+    const profile = profilesById.get(task.assigneeId);
+    if (!profile) return [];
     return [{
       id: `cable-${task.id}`,
       taskId: task.id,
@@ -163,53 +199,55 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
   });
 
   return (
-    <div class="office-stage" ref={stageRef}>
-      <div class="office-world" style={{ width: `${worldW}px`, height: `${worldH}px`, transform: `scale(${scale})` }}>
-        <div class="ow-wall" style={{ height: `${CELL}px` }} aria-hidden="true">
-          <span /><span /><span /><span />
-          <span class="ow-board" style={{ left: `${world.board.x * CELL}px`, width: `${world.board.w * CELL}px` }}>{t("office.board")}</span>
-        </div>
-        {world.objects.map((object) => (
-          <div
-            key={object.id}
-            class={`ow-obj ow-${object.type}`}
-            style={{ left: `${object.x * CELL}px`, top: `${object.y * CELL}px`, width: `${object.w * CELL}px`, height: `${object.h * CELL}px`, zIndex: object.solid ? 60 + object.y : 10 }}
-            aria-hidden="true"
-          />
-        ))}
-        {world.desks.slice(0, profiles.length).map((desk, index) => (
-          <div
-            key={`desk-${index}`}
-            class="ow-obj ow-desk"
-            style={{ left: `${desk.x * CELL}px`, top: `${desk.y * CELL}px`, width: `${2 * CELL}px`, height: `${CELL}px`, zIndex: 60 + desk.y, "--agent-color": profiles[index]!.color }}
-            aria-hidden="true"
-          >
-            <i class="ow-monitor" />
+    <div class="office-stage" ref={stageRef} data-character-layout={denseLayout ? "assigned" : "roaming"}>
+      <div class="office-world-frame" style={{ width: `${worldW * scale}px`, height: `${worldH * scale}px` }}>
+        <div class="office-world" style={{ width: `${worldW}px`, height: `${worldH}px`, transform: `scale(${scale})` }}>
+          <div class="ow-wall" style={{ height: `${CELL}px` }} aria-hidden="true">
+            <span /><span /><span /><span />
+            <span class="ow-board" style={{ left: `${world.board.x * CELL}px`, width: `${world.board.w * CELL}px` }}>{t("office.board")}</span>
           </div>
-        ))}
-        {cables.length > 0 && (
-          <TaskCables cables={cables} width={worldW} height={worldH} maxCables={24} onSelect={(cable) => selectProfile(cable.profileId)} />
-        )}
-        {profiles.map((profile, profileIndex) => {
-          const stateLabel = t(statusTranslation[profile.status]);
-          const activity = profileActivity(profile.id);
-          return (
-            <button
-              key={profile.id}
-              ref={(el) => { if (el) charEls.current.set(profile.id, el); else charEls.current.delete(profile.id); }}
-              class={`ow-char ${selectedProfileId.value === profile.id ? "is-selected" : ""}`}
-              style={{ width: `${CHAR_W}px`, height: `${CHAR_H}px`, "--agent-color": profile.color }}
-              data-status={profile.status}
-              title={activity ?? stateLabel}
-              onClick={() => selectProfile(profile.id)}
-              {...profileDropHandlers(profile.id)}
-              aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
+          {world.objects.map((object) => (
+            <div
+              key={object.id}
+              class={`ow-obj ow-${object.type}`}
+              style={{ left: `${object.x * CELL}px`, top: `${object.y * CELL}px`, width: `${object.w * CELL}px`, height: `${object.h * CELL}px`, zIndex: object.solid ? 60 + object.y : 10 }}
+              aria-hidden="true"
+            />
+          ))}
+          {world.desks.slice(0, profilesByDesk.length).map((desk, index) => (
+            <div
+              key={`desk-${index}`}
+              class="ow-obj ow-desk"
+              style={{ left: `${desk.x * CELL}px`, top: `${desk.y * CELL}px`, width: `${2 * CELL}px`, height: `${CELL}px`, zIndex: 60 + desk.y, "--agent-color": profilesByDesk[index]!.color }}
+              aria-hidden="true"
             >
-              <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} class="character-portrait--sim" decorative />
-              <span class="ow-char-name">{profile.name}</span>
-            </button>
-          );
-        })}
+              <i class="ow-monitor" />
+            </div>
+          ))}
+          {cables.length > 0 && (
+            <TaskCables cables={cables} width={worldW} height={worldH} maxCables={24} onSelect={(cable) => selectProfile(cable.profileId)} />
+          )}
+          {profiles.map((profile) => {
+            const stateLabel = t(statusTranslation[profile.status]);
+            const activity = profileActivity(profile.id);
+            return (
+              <button
+                key={profile.id}
+                ref={(el) => { if (el) charEls.current.set(profile.id, el); else charEls.current.delete(profile.id); }}
+                class={`ow-char ${selectedProfileId.value === profile.id ? "is-selected" : ""}`}
+                style={{ width: `${CHAR_W}px`, height: `${CHAR_H}px`, "--agent-color": profile.color }}
+                data-status={profile.status}
+                title={activity ?? stateLabel}
+                onClick={() => selectProfile(profile.id)}
+                {...profileDropHandlers(profile.id)}
+                aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
+              >
+                <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--sim" decorative />
+                <span class="ow-char-name" title={profile.name}>{profile.name}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -218,7 +256,7 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
 function OfficeList({ profiles }: { profiles: Profile[] }) {
   return (
     <div class="office-list">
-      {profiles.map((profile, profileIndex) => {
+      {profiles.map((profile) => {
         const stateLabel = t(statusTranslation[profile.status]);
         const activity = profileActivity(profile.id);
         return (
@@ -230,7 +268,7 @@ function OfficeList({ profiles }: { profiles: Profile[] }) {
             {...profileDropHandlers(profile.id)}
             aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
           >
-            <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} class="character-portrait--row" decorative />
+            <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--row" decorative />
             <span class="office-row-main">
               <b>{profile.name}</b>
               {activity && <small title={activity}>{activity}</small>}

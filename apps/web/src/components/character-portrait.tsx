@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { avatarForProfile, DEFAULT_CHARACTER_COUNT, defaultAvatarOrdinal, profileAvatars } from "../avatar-preferences";
+import { avatarForProfile, DEFAULT_CHARACTER_COUNT, defaultAvatarOrdinal } from "../avatar-preferences";
 import { t } from "../i18n";
 
 const CHARACTER_SHEET_ROWS = DEFAULT_CHARACTER_COUNT;
@@ -36,7 +36,6 @@ type CharacterPortraitProps = {
   class?: string;
   decorative?: boolean;
   characterIndex?: number;
-  profileIndex?: number;
 };
 
 export function CharacterPortrait({
@@ -44,22 +43,17 @@ export function CharacterPortrait({
   profileName,
   class: className = "",
   decorative = false,
-  characterIndex,
-  profileIndex
+  characterIndex
 }: CharacterPortraitProps) {
   const avatar = avatarForProfile(profileId);
-  const savedAvatar = profileAvatars.value[profileId];
-  const defaultIndex = profileIndex === undefined ? undefined : Math.max(0, profileIndex) % DEFAULT_CHARACTER_COUNT;
   const position = characterIndex !== undefined
     ? sheetPosition(characterIndex)
     : avatar.kind === "creature"
-      ? sheetPosition(savedAvatar?.kind === "creature" ? avatar.index : (defaultIndex ?? avatar.index))
+      ? sheetPosition(avatar.index)
       : sheetPosition(0);
-  const ordinal = profileIndex ?? defaultAvatarOrdinal(profileId);
-  const colorCycle = Math.floor(Math.max(0, ordinal) / DEFAULT_CHARACTER_COUNT);
   const creatureStyle = {
     "--sprite-y": `${formatPercentage((position.row / (CHARACTER_SHEET_ROWS - 1)) * 100)}%`,
-    "--avatar-hue": `${(colorCycle * 53) % 360}deg`
+    "--avatar-hue": `${characterHueRotation(profileId)}deg`
   } as JSX.CSSProperties;
   const accessibility: JSX.HTMLAttributes<HTMLSpanElement> = decorative
     ? { "aria-hidden": true }
@@ -75,6 +69,11 @@ export function CharacterPortrait({
       {...accessibility}
     />
   );
+}
+
+export function characterHueRotation(profileId: string): number {
+  const colorCycle = Math.floor(defaultAvatarOrdinal(profileId) / DEFAULT_CHARACTER_COUNT);
+  return (colorCycle * 53) % 360;
 }
 
 function formatPercentage(value: number): string {

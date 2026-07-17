@@ -314,10 +314,19 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         ownedRequestLeaseToken = pending.leaseToken;
       }
       if (frame.method === "session.create") {
+        if (!sessionCoordinator.canCreateLease(sessionOwner)) {
+          sendSessionLimit(send, frame.id);
+          return;
+        }
         sessionClaim = sessionCoordinator.claimCreate(sessionOwner, typeof frame.params?.profile === "string" ? frame.params.profile : undefined);
       }
       if (frame.method === "session.resume" && typeof frame.params?.session_id === "string") {
         const profile = typeof frame.params.profile === "string" ? frame.params.profile : "default";
+        if (!sessionCoordinator.ownsDurableSession(sessionOwner, profile, frame.params.session_id)
+          && !sessionCoordinator.canCreateLease(sessionOwner)) {
+          sendSessionLimit(send, frame.id);
+          return;
+        }
         sessionClaim = sessionCoordinator.claimResume(sessionOwner, profile, frame.params.session_id);
         if (sessionClaim === undefined) { sendSessionInUse(send, frame.id); return; }
       }
@@ -535,6 +544,13 @@ function sendSessionInUse(send: (value: unknown) => void, id: string | number): 
   send({
     jsonrpc: "2.0", id,
     error: { code: -32006, message: "Session is already in use by another Office client.", data: { reason: "session_in_use" } },
+  });
+}
+
+function sendSessionLimit(send: (value: unknown) => void, id: string | number): void {
+  send({
+    jsonrpc: "2.0", id,
+    error: { code: -32007, message: "This Office connection has reached its live session limit.", data: { reason: "session_limit" } },
   });
 }
 

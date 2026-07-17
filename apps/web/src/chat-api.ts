@@ -269,6 +269,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (!liveTarget || active?.generation !== liveTarget.generation || !type) return;
       const clientSessionId = liveTarget.clientSessionId;
       const payload = asRecord(params?.payload);
+      if (type === "error" && payload?.status === "resync_required") {
+        if (!historiesAwaitingReset.has(clientSessionId)) {
+          beginHistoryBarrier(active, "Hermes event history is incomplete; reload history");
+        }
+        return;
+      }
       const storedSessionId = typeof payload?.stored_session_id === "string"
         ? payload.stored_session_id
         : typeof payload?.storedSessionId === "string" ? payload.storedSessionId : undefined;
@@ -568,6 +574,14 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     preOpenFailureCount = 0;
     rejectPending("Chat接続を再試行します。");
     opening.clear();
+    if (force) {
+      historyLoads.clear();
+      targetStartOperations.clear();
+      loadedHistories.clear();
+      for (const [clientSessionId, active] of targets) {
+        if (active.target.storedSessionId) historiesAwaitingReset.add(clientSessionId);
+      }
+    }
     liveToClient.clear();
     const closingSocket = socket;
     socket = undefined;

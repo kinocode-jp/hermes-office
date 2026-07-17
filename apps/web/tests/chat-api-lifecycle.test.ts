@@ -159,6 +159,24 @@ test("interaction methods reject malformed success acknowledgements", async () =
   harness.api.stop();
 });
 
+test("a server resync_required event enters the durable history barrier", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "resync-client", profileId: "coder" });
+  await flush();
+  const create = harness.socket.frame("session.create", "coder")!;
+  harness.socket.respond(create.id, { session_id: "live-resync", stored_session_id: "stored-resync" });
+  await flush();
+
+  harness.socket.event("live-resync", "error", { status: "resync_required" });
+  assert.ok(harness.disconnections.length >= 1);
+  assert.equal(harness.disconnections.every((id) => id === "resync-client"), true);
+  assert.deepEqual(harness.socket.closes.at(-1), {
+    code: 4001, reason: "Hermes event history is incomplete; reload history",
+  });
+  assert.deepEqual(harness.events, [], "the incomplete-prefix signal is protocol control, not a normal transcript event");
+  harness.api.stop();
+});
+
 test("steer sends one exact live session.steer request and rejects empty or unready input", async () => {
   const harness = await createHarness();
   await assert.rejects(harness.api.steer("missing", "guidance"), /未接続/);
@@ -453,8 +471,8 @@ class FakeWebSocket {
   respond(id: string, result?: unknown, error?: unknown): void {
     this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id, ...(error === undefined ? { result } : { error }) }) });
   }
-  event(liveSessionId: string, type: string): void {
-    this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", method: "event", params: { session_id: liveSessionId, type, payload: {} } }) });
+  event(liveSessionId: string, type: string, payload: Record<string, unknown> = {}): void {
+    this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", method: "event", params: { session_id: liveSessionId, type, payload } }) });
   }
   frame(method: string, value: string): RpcFrame | undefined { return this.frames(method, value)[0]; }
   frames(method: string, value: string): RpcFrame[] {

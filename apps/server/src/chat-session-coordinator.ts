@@ -1,4 +1,6 @@
 const DEFAULT_PROFILE = "default";
+export const MAX_CHAT_SESSION_LEASES_PER_OWNER = 4;
+export const MAX_CHAT_SESSION_LEASES_TOTAL = 256;
 
 export type ChatSessionOwner = object;
 
@@ -33,6 +35,9 @@ export class ChatSessionCoordinator {
   readonly #closingLive = new Map<string, symbol>();
 
   claimCreate(owner: ChatSessionOwner, profile: string | undefined): ChatSessionClaim {
+    if (!this.canCreateLease(owner)) {
+      throw new Error("Chat session lease limit reached.");
+    }
     return this.#claim(this.#newLease(owner, normalizedProfile(profile)));
   }
 
@@ -44,6 +49,7 @@ export class ChatSessionCoordinator {
         ? this.#claim(existing)
         : undefined;
     }
+    if (!this.canCreateLease(owner)) return undefined;
     const lease = this.#newLease(owner, normalized);
     this.#bindDurableAliases(lease, [requestedId]);
     return this.#claim(lease);
@@ -138,6 +144,19 @@ export class ChatSessionCoordinator {
       for (const liveId of this.#leases.get(token)?.liveIds ?? []) ids.add(liveId);
     }
     return [...ids];
+  }
+
+  ownerLeaseCount(owner: ChatSessionOwner): number {
+    return this.#owners.get(owner)?.size ?? 0;
+  }
+
+  canCreateLease(owner: ChatSessionOwner): boolean {
+    return this.ownerLeaseCount(owner) < MAX_CHAT_SESSION_LEASES_PER_OWNER
+      && this.#leases.size < MAX_CHAT_SESSION_LEASES_TOTAL;
+  }
+
+  ownsDurableSession(owner: ChatSessionOwner, profile: string | undefined, sessionId: string): boolean {
+    return this.#durableLease(normalizedProfile(profile), sessionId)?.owner === owner;
   }
 
   ownedSessionLeases(owner: ChatSessionOwner): ChatSessionLeaseSnapshot[] {

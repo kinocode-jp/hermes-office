@@ -8,7 +8,6 @@ import { canRestoreModalFocus, isTopmostModal, registerModal } from "../modal-la
 type AvatarPickerProps = {
   profileId: string;
   profileName: string;
-  profileIndex?: number;
   onClose: () => void;
 };
 
@@ -18,7 +17,7 @@ export function canDismissAvatarPicker(uploading: boolean, resetting: boolean): 
   return !uploading && !resetting;
 }
 
-export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: AvatarPickerProps) {
+export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -107,7 +106,6 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
                 profileName={t("avatar.creature", { number: index + 1 })}
                 characterIndex={index}
                 decorative
-                {...(profileIndex === undefined ? {} : { profileIndex })}
               />
             </button>
           ))}

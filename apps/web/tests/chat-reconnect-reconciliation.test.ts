@@ -454,6 +454,45 @@ test("a partial reconnect history cannot satisfy the resume barrier", async () =
   api.stop();
 });
 
+test("manual retry with an unresolved prompt reloads history before resume", async () => {
+  const sockets: FakeWebSocket[] = [];
+  let historyRequests = 0;
+  const api = connectChatApi(noopCallbacks(), {
+    serverUrl: "http://127.0.0.1:4317",
+    createWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    fetchJson: async <T>() => {
+      historyRequests += 1;
+      return savedHistory() as T;
+    },
+    reconnectDelay: () => 0,
+  });
+  const target = { clientSessionId: "manual-retry", profileId: "coder", storedSessionId: "stored-1" };
+  api.ensureSession(target);
+  await waitFor(() => sockets.length === 1);
+  await flush();
+  sockets[0]!.open();
+  await waitFor(() => sockets[0]!.frame("session.resume") !== undefined);
+  sockets[0]!.respond(sockets[0]!.frame("session.resume")!.id, {
+    liveSessionId: "live-before-retry", storedSessionId: "stored-1", running: false,
+  });
+  await flush();
+
+  const prompt = api.submitPrompt(target.clientSessionId, "may commit", "manual-retry-prompt");
+  await waitFor(() => sockets[0]!.frame("prompt.submit") !== undefined);
+  api.retry();
+  assert.equal((await prompt).status, "unconfirmed");
+  await waitFor(() => sockets.length === 2);
+  await flush();
+  sockets[1]!.open();
+  await waitFor(() => sockets[1]!.frame("session.resume") !== undefined);
+  assert.equal(historyRequests, 2, "manual transport replacement cannot reuse the pre-prompt history cache");
+  api.stop();
+});
+
 test("initial stored connect coalesces callers and waits for production-shaped history before one resume", async () => {
   const sockets: FakeWebSocket[] = [];
   const initialHistory = deferred<unknown>();

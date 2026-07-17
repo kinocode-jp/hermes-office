@@ -6,7 +6,6 @@ import {
   mobileInspectorOpen,
   mobileWorkspaceOpen,
   openSession,
-  profileList,
   selectedProfile,
   selectedProfileSessions,
   settingsTab
@@ -118,7 +117,6 @@ export function ProfilePanel() {
   });
   const profile = selectedProfile.value;
   if (!profile) return null;
-  const profileIndex = profileList.value.findIndex((candidate) => candidate.id === profile.id);
   const titleId = "mobile-profile-panel-title";
   return (
     <aside
@@ -133,7 +131,7 @@ export function ProfilePanel() {
       <header class="profile-panel-head">
         <button class="mobile-close" data-mobile-overlay-initial-focus onClick={() => { mobileInspectorOpen.value = false; }} aria-label={t("common.close")}>←</button>
         <button class="profile-avatar-button" type="button" onClick={() => setAvatarPickerOpen(true)} aria-label={t("profile.changeAvatar", { name: profile.name })}>
-          <CharacterPortrait profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} class="character-portrait--panel" decorative />
+          <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--panel" decorative />
           <span>{t("profile.change")}</span>
         </button>
         <div><h2 id={titleId}>{profile.name}</h2>{profile.role && <p>{profile.role}</p>}</div>
@@ -156,7 +154,7 @@ export function ProfilePanel() {
       {inspectorTab.value === "chat"
         ? <ChatList />
         : <LiveSettingsRoute tab={inspectorTab.value} />}
-      {avatarPickerOpen && <AvatarPicker profileId={profile.id} profileName={profile.name} profileIndex={profileIndex} onClose={() => setAvatarPickerOpen(false)} />}
+      {avatarPickerOpen && <AvatarPicker profileId={profile.id} profileName={profile.name} onClose={() => setAvatarPickerOpen(false)} />}
     </aside>
   );
 }

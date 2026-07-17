@@ -218,6 +218,9 @@ export class ChatUpstreamHub {
       for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
         await this.#closeLease(owner, lease, 2);
       }
+      if (this.#coordinator.ownedSessionLeases(owner).length > 0) {
+        await this.#resetGeneration(this.#generation);
+      }
       return this.#coordinator.ownedSessionLeases(owner).length === 0;
     })().finally(() => {
       this.#cleanupOperations.delete(operation);
@@ -461,8 +464,9 @@ export class ChatUpstreamHub {
     return true;
   }
 
-  #resetGeneration(generation: number): void {
-    if (this.#stopping || generation !== this.#generation || this.#resetting !== undefined) return;
+  #resetGeneration(generation: number): Promise<void> {
+    if (this.#resetting !== undefined) return this.#resetting;
+    if (this.#stopping || generation !== this.#generation) return Promise.resolve();
     const connection = this.#connection;
     const connecting = this.#connecting;
     this.#upstreamUnavailable(generation);
@@ -477,6 +481,7 @@ export class ChatUpstreamHub {
       finally { if (this.#resetting === resetting) this.#resetting = undefined; }
     })();
     this.#resetting = resetting;
+    return resetting;
   }
 
   #upstreamUnavailable(generation: number): void {

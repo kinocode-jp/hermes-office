@@ -148,6 +148,31 @@ test("gateway fails closed when its shared session coordinator is not injected",
   assert.deepEqual(client.closed, { code: 1011, reason: "Chat session hub unavailable" });
 });
 
+test("one Office connection cannot retain more than four session leases", async () => {
+  const runtime = runtimeWithConnections(() => connection());
+  const coordinator = new ChatSessionCoordinator();
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION, runtimeSource: runtime,
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    limits: { socketRateCapacity: 100 }, sessionCoordinator: coordinator,
+  });
+  await flush();
+  for (let index = 1; index <= 5; index += 1) {
+    client.rpc(120 + index, "session.resume", { session_id: `lease-${index}`, profile: "test-bind" });
+    await flush();
+  }
+
+  assert.equal(client.errorCode(125), -32007);
+  assert.equal(client.errorCode(124), undefined);
+  const error = client.frames().find((frame) => frame.id === 125)?.error as { data?: { reason?: string } } | undefined;
+  assert.equal(error?.data?.reason, "session_limit");
+  client.rpc(126, "session.resume", { session_id: "lease-1", profile: "test-bind" });
+  await flush();
+  assert.equal(client.errorCode(126), undefined, "the bound does not reject an existing lease owned by this socket");
+});
+
 test("slow or failed chat clients are closed with a resynchronization policy", async () => {
   let publishSlow!: (event: HermesChatEvent) => void;
   const slow = new FakeWebSocket();
@@ -689,6 +714,9 @@ function connection(
         return { method: input.method, value: { liveSessionId: sessionId, storedSessionId: sessionId, running: false, status: "idle" } };
       }
       const result = await request(input);
+      if (input.method === "session.close" && result.value.status === "ok" && result.value.closed === undefined) {
+        return { method: input.method, value: { closed: true } };
+      }
       return input.method === "approval.respond" && result.value.status === "ok" && result.value.resolved === undefined
         ? { method: input.method, value: { resolved: true } }
         : result;

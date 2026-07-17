@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { characterSheetPosition } from "../src/components/character-portrait.tsx";
+import { characterHueRotation, characterSheetPosition } from "../src/components/character-portrait.tsx";
 import {
   avatarForProfile,
   isSafeImageDataUrl,
@@ -21,6 +21,20 @@ test("maps neutral profile ids to stable character-sheet cells", () => {
   assert.deepEqual(characterSheetPosition("new-runtime-profile"), first);
   assert.ok(first.index >= 0 && first.index < 6);
   assert.equal(characterSheetPosition("").index, 5);
+});
+
+test("inventory reorder and insertion never change an existing profile's default character or color", () => {
+  const initial = Array.from({ length: 12 }, (_, index) => `runtime-profile-${index}`);
+  const appearance = (profileId: string) => ({
+    character: characterSheetPosition(profileId).index,
+    hue: characterHueRotation(profileId),
+  });
+  const before = new Map(initial.map((profileId) => [profileId, appearance(profileId)]));
+  const reorderedWithInsertions = ["new-leading-profile", ...[...initial].reverse(), "new-trailing-profile"];
+  for (const profileId of reorderedWithInsertions.filter((id) => before.has(id))) {
+    assert.deepEqual(appearance(profileId), before.get(profileId));
+  }
+  assert.ok(new Set(initial.map((profileId) => characterHueRotation(profileId))).size > 1, "profiles beyond the base sheet receive deterministic color variation");
 });
 
 test("stores separate creature choices and refuses a non-durable reset", async () => {

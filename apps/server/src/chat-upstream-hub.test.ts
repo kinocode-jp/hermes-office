@@ -52,21 +52,21 @@ test("shared hub preserves native targets, merges unseen aliases, and routes onl
     await settle();
     assert.equal(hermes.resumeRequests.at(-1)?.sessionId, nativeTarget);
   }
-
+  a.rpc(29, "session.close", { session_id: "live-branch-child" });
+  await settle();
   assert.equal(a.events("live-b").length, 0);
   hermes.emit({ type: "status.update", sessionId: "live-b", payload: { status: "running" } });
   assert.equal(b.events("live-b").filter(({ type }) => type === "status.update").length, 1);
   assert.equal(a.events("live-b").length, 0);
-
   b.rpc(18, "session.create", { profile: "reviewer", title: "Unrelated new chat" });
   await settle();
   assert.equal(b.errorCode(18), undefined, "unrelated create stays available while another owner is live");
   assert.equal(hermes.createRequests[0]?.closeOnDisconnect, true);
-
   a.rpc(19, "session.resume", { session_id: "overflow", profile: "coder" });
   await settle();
   assert.equal(a.events("live-overflow").at(-1)?.payload?.status, "resync_required");
-
+  a.rpc(30, "session.close", { session_id: "live-overflow" });
+  await settle();
   hermes.rotateMainWithoutEvent();
   const resumeCount = hermes.resumeRequests.length;
   a.rpc(21, "session.resume", { session_id: "rotated-tip", profile: "coder" });
@@ -164,18 +164,15 @@ test("an ambiguous prompt resets leases before a replacement resume and waits fo
   await settle();
   oldClient.rpc(71, "prompt.submit", { session_id: "live-main", text: "run once" });
   await settle(4);
-
   assert.equal(oldClient.errorCode(71), -32008);
   assert.deepEqual(oldClient.closed, { code: 1013, reason: "Hermes chat restarted; reload history" });
   assert.equal(coordinator.ownerForLive("live-main"), undefined, "ambiguous generation leases release before async close completes");
   assert.equal(hermes.connectionCloseCount, 1);
-
   const replacement = new FakeWebSocket();
   handleOfficeChatConnection(replacement as unknown as WebSocket, dependencies);
   replacement.rpc(72, "session.resume", { session_id: "parent", profile: "coder" });
   await settle(4);
   assert.equal(hermes.resumeRequests.length, 1, "replacement resume waits for close-on-disconnect cleanup");
-
   hermes.failPromptAmbiguously = false;
   closeGate.resolve();
   await settle(8);
@@ -202,7 +199,6 @@ test("ordinary disconnect cleanup gates replacement readiness and history", asyn
   hermes.delaySessionClose("live-main", closeGate.promise);
   oldClient.close(1006, "network lost");
   await settle();
-
   let historyStarted = false;
   const history = hub.readStableHistory(async () => { historyStarted = true; return "fresh"; });
   const replacement = new FakeWebSocket();
@@ -212,7 +208,6 @@ test("ordinary disconnect cleanup gates replacement readiness and history", asyn
   assert.equal(historyStarted, false, "history waits for the previous owner's close-on-disconnect cleanup");
   assert.equal(replacement.frames().some(({ method }) => method === "office.ready"), false);
   assert.equal(hermes.resumeRequests.length, 1, "replacement resume remains queued before office.ready");
-
   closeGate.resolve();
   assert.equal(await history, "fresh");
   await settle(6);
@@ -244,7 +239,6 @@ test("coordinator converges durable aliases without ever adding a second live id
   const coordinator = new ChatSessionCoordinator();
   const initial = coordinator.claimCreate(owner, "coder");
   assert.equal(coordinator.bind(initial, { storedSessionId: "stored-old", liveSessionId: "live-old" }, true), "bound");
-
   const sameLease = coordinator.claimResume(owner, "coder", "stored-old");
   assert.ok(sameLease);
   assert.equal(coordinator.bind(sameLease, { storedSessionId: "stored-new", liveSessionId: "live-new" }, false), "conflict");
@@ -268,7 +262,6 @@ test("lease-level close completes every legacy live id before releasing ownershi
   const hub = new ChatUpstreamHub(hermes.runtime(), coordinator, 64 * 1024);
   await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
   hub.detach(owner);
-
   const result = await hub.closeOwnedSession(owner, "legacy-old");
   assert.equal(result.value.closed, true);
   assert.deepEqual(hermes.sessionCloseRequests, ["legacy-old", "legacy-new"]);
@@ -276,7 +269,7 @@ test("lease-level close completes every legacy live id before releasing ownershi
   assert.equal(hermes.isLive("legacy-old"), false);
 });
 
-test("one failed legacy live close retains the whole lease after bounded retries", async () => {
+test("one failed legacy live close resets the generation after bounded retries", async () => {
   const owner = {};
   const coordinator = new LegacyMultiLiveCoordinator(owner, ["legacy-old", "legacy-new"]);
   const hermes = new NativeFakeHermes();
@@ -286,15 +279,15 @@ test("one failed legacy live close retains the whole lease after bounded retries
   const hub = new ChatUpstreamHub(hermes.runtime(), coordinator, 64 * 1024);
   await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
   hub.detach(owner);
-
-  assert.equal(await hub.closeOwnerSessions(owner), false);
+  assert.equal(await hub.closeOwnerSessions(owner), true);
   assert.deepEqual(hermes.sessionCloseRequests, ["legacy-old", "legacy-new", "legacy-new"]);
-  assert.equal(coordinator.released, false);
-  assert.deepEqual(coordinator.ownedLiveSessionIds(owner), ["legacy-old", "legacy-new"]);
-  assert.equal(hermes.isLive("legacy-new"), true);
+  assert.equal(coordinator.released, true);
+  assert.deepEqual(coordinator.ownedLiveSessionIds(owner), []);
+  assert.equal(hermes.connectionCloseCount, 1);
+  assert.equal(hermes.isLive("legacy-new"), false);
 });
 
-test("disconnect cleanup releases absent sessions but retains transport-failed close leases", async () => {
+test("disconnect cleanup releases absent sessions and resets transport-failed close leases", async () => {
   const hermes = new NativeFakeHermes();
   const coordinator = new ChatSessionCoordinator();
   const runtime = hermes.runtime();
@@ -309,7 +302,6 @@ test("disconnect cleanup releases absent sessions but retains transport-failed c
   handleOfficeChatConnection(pending as unknown as WebSocket, dependencies);
   handleOfficeChatConnection(observer as unknown as WebSocket, dependencies);
   await settle();
-
   pending.rpc(30, "session.resume", { session_id: "pending-result", profile: "coder" });
   await settle();
   pending.close(1000, "closed while resume pending");
@@ -330,7 +322,6 @@ test("disconnect cleanup releases absent sessions but retains transport-failed c
     false,
     "cleanup must discard pre-bind events before a live ID can be reused",
   );
-
   const invalid = new FakeWebSocket();
   handleOfficeChatConnection(invalid as unknown as WebSocket, dependencies);
   await settle();
@@ -347,7 +338,6 @@ test("disconnect cleanup releases absent sessions but retains transport-failed c
     false,
     "an invalid binding must discard its unowned early events",
   );
-
   const absent = new FakeWebSocket();
   handleOfficeChatConnection(absent as unknown as WebSocket, dependencies);
   await settle();
@@ -367,13 +357,14 @@ test("disconnect cleanup releases absent sessions but retains transport-failed c
   absentRetry.rpc(37, "session.resume", { session_id: "close-absent", profile: "coder" });
   await settle();
   assert.equal(absentRetry.errorCode(37), undefined, "closed:false must release the durable lease for a new owner");
-
   const failed = new FakeWebSocket();
   handleOfficeChatConnection(failed as unknown as WebSocket, dependencies);
   await settle();
   failed.rpc(31, "session.resume", { session_id: "close-fails", profile: "coder" });
   await settle();
   hermes.failCloseFor.add("live-close-fails");
+  const resetGate = deferred<void>();
+  hermes.delayNextConnectionClose(resetGate.promise);
   failed.close(1000, "close fails");
   await settle(6);
   assert.equal(
@@ -381,12 +372,22 @@ test("disconnect cleanup releases absent sessions but retains transport-failed c
     2,
     "failed explicit closes must receive one bounded retry",
   );
+  assert.equal(observer.closed?.code, 1013, "cleanup failure terminalizes every subscriber on the stale generation");
+  let historyRead = false;
+  const history = hub.readStableHistory(async () => { historyRead = true; return undefined; });
   const retry = new FakeWebSocket();
   handleOfficeChatConnection(retry as unknown as WebSocket, dependencies);
+  await settle(4);
+  assert.equal(historyRead, false);
+  assert.equal(retry.frames().some(({ method }) => method === "office.ready"), false);
+  resetGate.resolve();
+  await history;
+  assert.equal(historyRead, true, "history cannot pass until close-on-disconnect generation reset completes");
+  hermes.failCloseFor.delete("live-close-fails");
   await settle();
   retry.rpc(32, "session.resume", { session_id: "close-fails", profile: "coder" });
   await settle();
-  assert.equal(retry.errorCode(32), -32006, "a failed explicit close keeps the lease fail-closed");
+  assert.equal(retry.errorCode(32), undefined, "replacement resumes after authoritative history and generation cleanup");
 });
 
 test("an evicted pre-bind ID remains tombstoned and never delivers a partial suffix", async () => {
@@ -728,6 +729,8 @@ class LegacyMultiLiveCoordinator extends ChatSessionCoordinator {
     this.released = true;
     return true;
   }
+
+  override releaseAll(): void { this.released = true; }
 
   override claimOwnedLeaseClose(owner: ChatSessionOwner, snapshot: ChatSessionLeaseSnapshot): symbol | undefined {
     if (owner !== this.#owner || snapshot.token !== this.#token || this.released || this.#closeToken !== undefined) return undefined;

@@ -656,7 +656,7 @@ export function reduceChatGatewayEvent(
     const replacements = index >= 0
       ? session.messages.map((message, currentIndex) => currentIndex === index ? { ...message, body, presentation, status } : message)
       : [...session.messages, { id: toolId, from: "tool" as const, body, presentation, at: nowTimestamp(), status }];
-    const change = replaceLiveMessages(session.messages, replacements);
+    const change = replaceLiveMessages(session.messages, replacements, new Set([toolId]));
     return withTranscriptChange(session, change, onTranscriptLimit, {
       ...session,
       status: event.type === "tool.complete" ? session.status : "streaming",
@@ -688,7 +688,7 @@ function withTranscriptChange(
     onTranscriptLimit?.(change.reason);
     return session;
   }
-  return { ...next, messages: change.messages };
+  return { ...next, messages: change.messages, historyPartial: next.historyPartial === true || change.windowed };
 }
 
 function withPendingInteraction(session: ChatSession, interaction: ChatPendingInteraction): ChatSession {

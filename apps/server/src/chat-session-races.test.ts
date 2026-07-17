@@ -5,7 +5,7 @@ import { WebSocket } from "ws";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { HermesChatTransportError, type HermesChatEvent, type HermesChatRequest, type HermesChatResult } from "./hermes-chat.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
-import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
+import { ChatSessionCoordinator, MAX_CHAT_SESSION_LEASES_PER_OWNER, MAX_CHAT_SESSION_LEASES_TOTAL } from "./chat-session-coordinator.js";
 import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 import { OfficeAuth, type OfficeAuthSession } from "./office-auth.js";
 
@@ -354,6 +354,20 @@ test("durable aliases stay profile-scoped when a live id collides globally", () 
   const betaRetry = coordinator.claimResume(betaOwner, "beta", "shared");
   assert.ok(betaRetry);
   coordinator.releaseFailedClaim(betaRetry);
+});
+
+test("session coordinator bounds owner and process-wide pending leases", () => {
+  const coordinator = new ChatSessionCoordinator();
+  const owners = Array.from({ length: MAX_CHAT_SESSION_LEASES_TOTAL / MAX_CHAT_SESSION_LEASES_PER_OWNER }, () => ({}));
+  for (const [ownerIndex, owner] of owners.entries()) {
+    for (let leaseIndex = 0; leaseIndex < MAX_CHAT_SESSION_LEASES_PER_OWNER; leaseIndex += 1) {
+      assert.ok(coordinator.claimCreate(owner, `profile-${ownerIndex}-${leaseIndex}`));
+    }
+  }
+  assert.equal(coordinator.canCreateLease({}), false);
+  assert.throws(() => coordinator.claimCreate({}, "overflow"), /lease limit/);
+  coordinator.releaseOwner(owners[0]!);
+  assert.equal(coordinator.canCreateLease({}), true);
 });
 
 test("an owned close reservation blocks rebind after a lease release TOCTOU", () => {

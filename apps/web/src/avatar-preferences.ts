@@ -123,18 +123,24 @@ export class AvatarPreferences {
 }
 
 export function defaultAvatarOrdinal(profileId: string): number {
+  const hash = profileAvatarHash(profileId);
+  return hash === undefined ? DEFAULT_CHARACTER_COUNT - 1 : hash >>> 0;
+}
+
+export function defaultAvatarIndex(profileId: string): number {
+  const hash = profileAvatarHash(profileId);
+  return hash === undefined ? DEFAULT_CHARACTER_COUNT - 1 : Math.abs(hash) % DEFAULT_CHARACTER_COUNT;
+}
+
+function profileAvatarHash(profileId: string): number | undefined {
   const normalized = profileId.trim().toLocaleLowerCase("en-US");
-  if (!normalized) return DEFAULT_CHARACTER_COUNT - 1;
+  if (!normalized) return undefined;
   let hash = 2166136261;
   for (const character of normalized) {
     hash ^= character.codePointAt(0) ?? 0;
     hash = Math.imul(hash, 16777619);
   }
-  return Math.abs(hash) % DEFAULT_CHARACTER_COUNT;
-}
-
-export function defaultAvatarIndex(profileId: string): number {
-  return defaultAvatarOrdinal(profileId) % DEFAULT_CHARACTER_COUNT;
+  return hash;
 }
 
 export function avatarForProfile(profileId: string): ProfileAvatar {
