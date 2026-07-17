@@ -229,6 +229,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-agent { border-color: var(--agent-color, var(--aqua)); }
 .message-tool { max-width: 100%; padding-left: 26px; border-color: var(--amber); color: var(--muted); font-family: ui-monospace, monospace; }
 .message-tool-mark { position: absolute; left: 8px; top: 8px; color: var(--amber); font-size: 12px; line-height: 1; }
+.message-steer-mark { display: block; margin-bottom: 3px; color: var(--aqua); font: 700 8px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 .message p { margin: 0; font-size: 11px; line-height: 1.55; }
 .message time { display: block; margin-top: 2px; color: rgba(243,232,209,.35); font: 500 9px/1 ui-monospace, monospace; text-align: right; }
 .message-streaming { box-shadow: inset 0 -1px 0 rgba(85,214,190,.45); }
@@ -260,6 +261,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer textarea { resize: none; min-height: 36px; max-height: 96px; padding: 9px; border: 1px solid var(--line); border-radius: 0; color: var(--paper); background: var(--night); font-size: 11px; }
 .composer button { min-width: 52px; border: 0; color: var(--night); background: var(--aqua); font-weight: 700; cursor: pointer; }
 .composer button:disabled { opacity: .35; cursor: default; }
+.composer-actions { display: flex; gap: 4px; }
 .composer .interrupt-button { color: var(--paper); background: var(--coral); }
 .workspace-empty { display: grid; place-content: center; height: 100%; color: var(--muted); text-align: center; }
 .workspace-empty span { color: var(--aqua); font: 600 9px/1 ui-monospace, monospace; }

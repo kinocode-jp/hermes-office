@@ -9,6 +9,7 @@ import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
+import { interruptChatRun, invalidatePendingSteer, steerChatRun } from "./chat-run-actions";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
 export const tasks = signal<WorkTask[]>([]);
@@ -52,11 +53,11 @@ export const selectedProfile = computed(() =>
 export const selectedProfileSessions = computed(() =>
   sessions.value.filter((session) => session.profileId === selectedProfileId.value)
 );
-
 let retryOfficeConnection = () => {};
 let ensureChatSession = (_target: ChatTarget) => {};
 let releaseChatSession = (_clientSessionId: string) => {};
 let submitChatPrompt = (_clientSessionId: string, _text: string) => {};
+let steerChatSession: (clientSessionId: string, text: string) => Promise<void> = async () => { throw new Error("Chat runtime is not registered."); };
 let interruptChatSession = (_clientSessionId: string) => {};
 let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
 let respondApproval = async (_clientSessionId: string, _approvalId: string, _choice: ApprovalChoice) => {};
@@ -105,6 +106,7 @@ export function registerChatRuntime(actions: {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
   submitPrompt(clientSessionId: string, text: string): void;
+  steer(clientSessionId: string, text: string): Promise<void>;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
   respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
@@ -112,12 +114,12 @@ export function registerChatRuntime(actions: {
   ensureChatSession = actions.ensureSession;
   releaseChatSession = actions.releaseSession;
   submitChatPrompt = actions.submitPrompt;
+  steerChatSession = actions.steer;
   interruptChatSession = actions.interrupt;
   respondClarify = actions.respondClarify;
   respondApproval = actions.respondApproval;
   for (const target of getOpenChatTargets()) ensureChatSession(target);
 }
-
 export function getOpenChatTargets(): ChatTarget[] {
   return openSessionIds.value.flatMap((clientSessionId) => {
     const session = sessions.value.find((item) => item.id === clientSessionId);
@@ -268,7 +270,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   const liveSessionIds = new Set(sessions.value.map((session) => session.id));
   const previouslyOpen = openSessionIds.value;
   openSessionIds.value = previouslyOpen.filter((id) => liveSessionIds.has(id));
-  for (const removedId of previouslyOpen.filter((id) => !liveSessionIds.has(id))) releaseChatSession(removedId);
+  for (const removedId of previouslyOpen.filter((id) => !liveSessionIds.has(id))) releaseChatTarget(removedId);
   if (!liveSessionIds.has(activeSessionId.value)) activeSessionId.value = openSessionIds.value.at(-1) ?? "";
   if (!profileList.value.some((profile) => profile.id === selectedProfileId.value)) {
     selectedProfileId.value = profileList.value[0]?.id ?? "";
@@ -319,7 +321,7 @@ export function openSession(sessionId: string): void {
     const previousIds = openSessionIds.value;
     const nextIds = appendOpenSessionId(previousIds, sessionId);
     openSessionIds.value = nextIds;
-    for (const evictedId of previousIds.filter((id) => !nextIds.includes(id))) releaseChatSession(evictedId);
+    for (const evictedId of previousIds.filter((id) => !nextIds.includes(id))) releaseChatTarget(evictedId);
   }
   activeSessionId.value = sessionId;
   const session = sessions.value.find((item) => item.id === sessionId);
@@ -336,7 +338,7 @@ export function appendOpenSessionId(currentIds: readonly string[], sessionId: st
 }
 
 export function closeSession(sessionId: string): void {
-  releaseChatSession(sessionId);
+  releaseChatTarget(sessionId);
   openSessionIds.value = openSessionIds.value.filter((id) => id !== sessionId);
   if (activeSessionId.value === sessionId) {
     activeSessionId.value = openSessionIds.value.at(-1) ?? "";
@@ -381,7 +383,7 @@ function loadExplicitDemoState(): void {
 }
 
 function clearRuntimeState(): void {
-  for (const target of getOpenChatTargets()) releaseChatSession(target.clientSessionId);
+  for (const target of getOpenChatTargets()) releaseChatTarget(target.clientSessionId);
   profileList.value = [];
   sessions.value = [];
   tasks.value = [];
@@ -418,17 +420,12 @@ export function sendMessage(sessionId: string, body: string): void {
   if (session.remoteKind !== "demo") submitChatPrompt(sessionId, trimmed);
 }
 
+export async function steerSession(sessionId: string, body: string): Promise<boolean> {
+  return steerChatRun(sessions, steerChatSession, sessionId, body);
+}
+
 export function interruptSession(sessionId: string): void {
-  const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session || session.connectionState !== "ready" || !isChatRunActive(session)) return;
-  interruptChatSession(sessionId);
-  sessions.value = sessions.value.map((item) => item.id === sessionId ? {
-    ...item,
-    status: "ready",
-    streamingMessageId: undefined,
-    pendingInteraction: undefined,
-    messages: item.messages.map((message) => message.status === "streaming" ? { ...message, status: "cancelled" } : message)
-  } : item);
+  interruptChatRun(sessions, interruptChatSession, sessionId);
 }
 
 export async function respondToClarification(sessionId: string, answer: string): Promise<void> {
@@ -573,7 +570,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     const completeText = stringValue(payload.text);
     const exists = session.messages.some((message) => message.id === messageId);
     return {
-      ...session,
+      ...invalidatePendingSteer(session),
       status: "ready",
       streamingMessageId: undefined,
       pendingInteraction: undefined,
@@ -605,7 +602,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
   if (event.type === "error") {
     const message = stringValue(payload.message) ?? "Hermesの実行中にエラーが発生しました。";
     return {
-      ...session,
+      ...invalidatePendingSteer(session),
       status: "ready",
       errorMessage: message,
       streamingMessageId: undefined,
@@ -653,6 +650,11 @@ function chatTarget(session: ChatSession): ChatTarget | undefined {
 
 function updateChatSession(sessionId: string, update: (session: ChatSession) => ChatSession): void {
   sessions.value = sessions.value.map((session) => session.id === sessionId ? update(session) : session);
+}
+
+function releaseChatTarget(sessionId: string): void {
+  updateChatSession(sessionId, reconcileChatSessionDisconnected);
+  releaseChatSession(sessionId);
 }
 
 export async function assignTask(taskId: string, profileId: string | null): Promise<void> {

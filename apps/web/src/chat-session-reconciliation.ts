@@ -1,4 +1,5 @@
 import type { ChatSession } from "./domain";
+import { invalidatePendingSteer } from "./chat-run-actions";
 
 export type ChatSessionReadyRuntime = {
   running?: boolean;
@@ -22,7 +23,8 @@ export function reconcileChatSessionReady(
   runtime?: ChatSessionReadyRuntime
 ): ChatSession {
   const runtimeStatus = sessionStatusFromRuntime(runtime);
-  const reconciled = runtimeStatus === "ready" ? terminateChatRun(session, "cancelled") : session;
+  const targetChanged = session.liveSessionId !== liveSessionId;
+  const reconciled = runtimeStatus === "ready" || targetChanged ? terminateChatRun(session, "cancelled") : session;
   return {
     ...reconciled,
     ...(storedSessionId ? { storedSessionId } : {}),
@@ -55,7 +57,7 @@ export function reconcileChatSessionError(session: ChatSession, message: string)
 
 function terminateChatRun(session: ChatSession, terminalStatus: "cancelled" | "failed"): ChatSession {
   return {
-    ...session,
+    ...invalidatePendingSteer(session),
     status: "ready",
     streamingMessageId: undefined,
     pendingInteraction: undefined,

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
 import { locale, localizeRuntimeMessage, t } from "../i18n";
-import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage } from "../store";
-import { canSubmitChatPrompt, isChatRunActive } from "../session-runtime";
+import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage, steerSession } from "../store";
+import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive } from "../session-runtime";
 
 export function ChatPane({ session, profile }: { session: ChatSession; profile: Profile }) {
   const [draft, setDraft] = useState("");
@@ -10,8 +10,11 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const isActive = activeSessionId.value === session.id;
   const isLiveChat = session.remoteKind === "stored" || session.remoteKind === "draft";
   const isConnected = !isLiveChat || session.connectionState === "ready";
+  const { canCompose, canSteer, runActive, showStop } = chatComposerState(session);
   const canSend = canSubmitChatPrompt(session);
-  const runActive = isChatRunActive(session);
+  const composerPlaceholder = session.pendingInteraction ? t("chat.answerAbove")
+    : !isConnected ? t("chat.connectingPlaceholder")
+      : runActive ? t("chat.steerPlaceholder") : t("chat.instruct", { name: profile.name });
   const statusText = useMemo(() => {
     if (session.connectionState === "error") return t("chat.status.error");
     if (session.connectionState === "connecting") return t("chat.status.connecting");
@@ -29,10 +32,14 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
     if (list) list.scrollTop = list.scrollHeight;
   }, [session.messages.length, session.messages.at(-1)?.body, session.pendingInteraction?.id]);
 
-  function submit(event: Event): void {
+  async function submit(event: Event): Promise<void> {
     event.preventDefault();
-    sendMessage(session.id, draft);
-    setDraft("");
+    if (runActive) {
+      if (await steerSession(session.id, draft)) setDraft("");
+      return;
+    }
+    if (!canSend || !draft.trim()) return;
+    sendMessage(session.id, draft); setDraft("");
   }
 
   return (
@@ -60,7 +67,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
         {session.messages.length === 0 ? (
           <div class="empty-chat">
             <span>{session.historyState === "loading" ? t("chat.loadingHistory") : isLiveChat ? t("chat.hermesSession") : t("chat.newThread")}</span>
-            <p>{session.historyState === "loading" ? t("chat.loadingSaved") : !canSend ? t("chat.connectingLive") : t("chat.firstInstruction", { name: profile.name })}</p>
+            <p>{session.historyState === "loading" ? t("chat.loadingSaved") : !isConnected ? t("chat.connectingLive") : runActive ? t("chat.runningPlaceholder") : t("chat.firstInstruction", { name: profile.name })}</p>
           </div>
         ) : session.messages.map((message) => (
           <div
@@ -68,7 +75,8 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             class={`message message-${message.from} message-${message.status ?? "complete"}`}
             style={message.from === "agent" ? { "--agent-color": profile.color } : undefined}
           >
-            <span class="visually-hidden">{message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
+            <span class="visually-hidden">{message.kind === "steer" ? t("chat.steerMessage") : message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
+            {message.kind === "steer" && <span class="message-steer-mark">{t("chat.steerMessage")}</span>}
             {message.from === "tool" && <span class="message-tool-mark" aria-hidden="true">⚙</span>}
             <p>{message.body || (message.status === "streaming" ? "…" : "")}</p>
             <time>{message.at}</time>
@@ -83,10 +91,11 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
         )}
       </div>
 
-      <form class="composer" onSubmit={submit}>
+      <form class="composer" onSubmit={(event) => void submit(event)}>
         <textarea
           value={draft}
-          disabled={!canSend}
+          disabled={!canCompose}
+          aria-busy={session.steerPending === true}
           onInput={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -94,17 +103,24 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
               event.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={session.pendingInteraction ? t("chat.answerAbove") : !isConnected ? t("chat.connectingPlaceholder") : runActive ? t("chat.runningPlaceholder") : t("chat.instruct", { name: profile.name })}
+          placeholder={composerPlaceholder}
+          aria-label={composerPlaceholder}
           rows={1}
         />
-        {runActive && isLiveChat ? (
-          <button type="button" class="interrupt-button" disabled={session.connectionState !== "ready"} onClick={() => interruptSession(session.id)}>{t("chat.stop")}</button>
-        ) : (
-          <button type="submit" disabled={!canSend || !draft.trim()}>{t("chat.send")}</button>
-        )}
+        <div class="composer-actions">
+          <button type="submit" disabled={(runActive ? !canSteer : !canSend) || !draft.trim()}>{runActive ? t("chat.steer") : t("chat.send")}</button>
+          {showStop && <button type="button" class="interrupt-button" disabled={session.connectionState !== "ready"} onClick={() => interruptSession(session.id)}>{t("chat.stop")}</button>}
+        </div>
       </form>
     </article>
   );
+}
+
+export function chatComposerState(session: ChatSession): { canCompose: boolean; canSteer: boolean; runActive: boolean; showStop: boolean } {
+  const runActive = isChatRunActive(session);
+  const canSteer = canSteerChatSession(session);
+  const showStop = runActive && (session.remoteKind === "stored" || session.remoteKind === "draft");
+  return { runActive, canSteer, canCompose: canSubmitChatPrompt(session) || canSteer, showStop };
 }
 
 function ChatInteraction({ sessionId, interaction, connected }: {

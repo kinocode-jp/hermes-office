@@ -44,6 +44,7 @@ export type ChatApiConnection = {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
   submitPrompt(clientSessionId: string, text: string): void;
+  steer(clientSessionId: string, text: string): Promise<void>;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
   respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
@@ -512,6 +513,20 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       void rpc("prompt.submit", { session_id: liveSessionId, text }).catch((error) => {
         callbacks.onSessionError(clientSessionId, errorText(error));
       });
+    },
+    async steer(clientSessionId, text) {
+      const trimmed = text.trim();
+      if (!trimmed) throw new Error("追加指示を入力してください。");
+      const active = targets.get(clientSessionId);
+      const requestSocket = socket;
+      const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
+      if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
+        throw new Error("Live Sessionが未接続です。");
+      }
+      await rpc("session.steer", { session_id: liveSessionId, text: trimmed });
+      if (!isCurrentTarget(active) || socket !== requestSocket || liveSessionIdFor(active, liveToClient) !== liveSessionId) {
+        throw new Error("追加指示の送信先が変更されました。現在のセッションで再試行してください。");
+      }
     },
     interrupt(clientSessionId) {
       const active = targets.get(clientSessionId);

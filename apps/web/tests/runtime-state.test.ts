@@ -64,6 +64,7 @@ function recordChatRuntime(): { ensured: string[]; released: string[] } {
     ensureSession: (target) => { calls.ensured.push(target.clientSessionId); },
     releaseSession: (sessionId) => { calls.released.push(sessionId); },
     submitPrompt: () => {},
+    steer: async () => {},
     interrupt: () => {},
     respondClarify: async () => {},
     respondApproval: async () => {}

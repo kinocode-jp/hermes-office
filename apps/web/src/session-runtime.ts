@@ -14,6 +14,15 @@ export function canSubmitChatPrompt(session: ChatSession): boolean {
   return connected && session.status === "ready" && !isChatRunActive(session);
 }
 
+export function canSteerChatSession(session: ChatSession): boolean {
+  return session.remoteKind !== "demo"
+    && session.connectionState === "ready"
+    && typeof session.liveSessionId === "string" && session.liveSessionId.length > 0
+    && isChatRunActive(session)
+    && session.pendingInteraction === undefined
+    && session.steerPending !== true;
+}
+
 export function isChatRunActive(session: ChatSession): boolean {
   return session.status === "streaming" || session.status === "waiting"
     || session.pendingInteraction !== undefined

@@ -132,6 +132,55 @@ test("session-in-use errors are localized and the same target can retry resume",
   harness.api.stop();
 });
 
+test("steer sends one exact live session.steer request and rejects empty or unready input", async () => {
+  const harness = await createHarness();
+  await assert.rejects(harness.api.steer("missing", "guidance"), /未接続/);
+  harness.api.ensureSession({ clientSessionId: "client-steer", profileId: "coder" });
+  await assert.rejects(harness.api.steer("client-steer", "too early"), /未接続/);
+  const create = harness.socket.frame("session.create", "coder")!;
+  harness.socket.respond(create.id, { session_id: "live-steer" });
+  harness.api.ensureSession({ clientSessionId: "other-pane", profileId: "reviewer" });
+  const otherCreate = harness.socket.frame("session.create", "reviewer")!;
+  harness.socket.respond(otherCreate.id, { session_id: "live-other" });
+  await flush();
+  await assert.rejects(harness.api.steer("client-steer", "   "), /入力/);
+
+  const request = harness.api.steer("client-steer", "  focus on tests  ");
+  const frame = harness.socket.frame("session.steer", "live-steer")!;
+  assert.deepEqual(frame.params, { session_id: "live-steer", text: "focus on tests" });
+  assert.equal(harness.socket.frames("session.steer", "live-steer").length, 1);
+  assert.equal(harness.socket.frames("session.steer", "live-other").length, 0);
+  harness.socket.respond(frame.id, { accepted: true });
+  await request;
+  harness.api.stop();
+});
+
+test("steer never crosses a target generation, release, or transport close", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "client-race", profileId: "old" });
+  const createOld = harness.socket.frame("session.create", "old")!;
+  harness.socket.respond(createOld.id, { session_id: "live-old" });
+  await flush();
+
+  const stale = harness.api.steer("client-race", "old generation only");
+  const staleFrame = harness.socket.frame("session.steer", "live-old")!;
+  harness.api.ensureSession({ clientSessionId: "client-race", profileId: "new" });
+  harness.socket.respond(staleFrame.id, { accepted: true });
+  await assert.rejects(stale, /送信先が変更/);
+  const createNew = harness.socket.frame("session.create", "new")!;
+  harness.socket.respond(createNew.id, { session_id: "live-new" });
+  await flush();
+  assert.equal(harness.socket.sent.filter(({ method }) => method === "session.steer").length, 1);
+  assert.equal(harness.socket.frames("session.steer", "live-new").length, 0);
+
+  const closing = harness.api.steer("client-race", "before disconnect");
+  assert.ok(harness.socket.frame("session.steer", "live-new"));
+  harness.socket.close(1006, "network lost");
+  await assert.rejects(closing, /切断/);
+  assert.equal(harness.socket.sent.filter(({ method }) => method === "session.steer").length, 2);
+  harness.api.stop();
+});
+
 test("more than 500 saved messages retain the latest ordered window and report older omission", async () => {
   let pages = 0;
   const harness = await createHarness(async <T>() => {

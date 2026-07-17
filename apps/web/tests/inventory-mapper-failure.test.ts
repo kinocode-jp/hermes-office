@@ -20,7 +20,7 @@ test("mixed mapper failures and unavailable fallback retain panes until authorit
   registerChatRuntime({
     ensureSession: (target) => ensured.push(target.clientSessionId),
     releaseSession: (id) => released.push(id),
-    submitPrompt: () => {}, interrupt: () => {},
+    submitPrompt: () => {}, steer: async () => {}, interrupt: () => {},
     respondClarify: async () => {}, respondApproval: async () => {},
   });
 

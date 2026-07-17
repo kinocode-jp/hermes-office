@@ -21,7 +21,7 @@ test("inventory failures retain live state while authoritative empty reads remov
   registerChatRuntime({
     ensureSession: (target) => ensured.push(target.clientSessionId),
     releaseSession: (id) => released.push(id),
-    submitPrompt: () => {}, interrupt: () => {},
+    submitPrompt: () => {}, steer: async () => {}, interrupt: () => {},
     respondClarify: async () => {}, respondApproval: async () => {},
   });
 

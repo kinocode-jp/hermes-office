@@ -19,6 +19,7 @@ export type Profile = {
 export type ChatMessage = {
   id: string;
   from: "user" | "agent" | "tool";
+  kind?: "steer" | undefined;
   body: string;
   at: string;
   status?: "streaming" | "complete" | "failed" | "cancelled";
@@ -70,6 +71,8 @@ export type ChatSession = {
   remoteKind?: "demo" | "stored" | "draft" | undefined;
   streamingMessageId?: string | undefined;
   pendingInteraction?: ChatPendingInteraction | undefined;
+  steerPending?: boolean | undefined;
+  steerOperationId?: string | undefined;
   readOnly?: boolean;
 };
 

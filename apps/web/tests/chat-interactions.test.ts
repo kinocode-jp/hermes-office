@@ -98,7 +98,7 @@ test("an older approval completion cannot clear a newly promoted approval", asyn
   let resolve!: () => void;
   const submitted: string[] = [];
   registerChatRuntime({
-    ensureSession() {}, releaseSession() {}, submitPrompt() {}, interrupt() {},
+    ensureSession() {}, releaseSession() {}, submitPrompt() {}, async steer() {}, interrupt() {},
     async respondClarify() {},
     respondApproval: async (_sessionId, approvalId) => {
       submitted.push(approvalId);

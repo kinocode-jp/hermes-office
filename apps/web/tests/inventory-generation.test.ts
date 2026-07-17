@@ -279,7 +279,7 @@ function registerRuntime(released: string[], interrupted: string[] = []): void {
   registerChatRuntime({
     ensureSession() {},
     releaseSession(sessionId) { released.push(sessionId); },
-    submitPrompt() {}, interrupt(sessionId) { interrupted.push(sessionId); },
+    submitPrompt() {}, async steer() {}, interrupt(sessionId) { interrupted.push(sessionId); },
     async respondClarify() {}, async respondApproval() {}
   });
 }
