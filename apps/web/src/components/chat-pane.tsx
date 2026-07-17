@@ -21,12 +21,13 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
     if (session.connectionState === "connecting") return t("chat.status.connecting");
     if (session.connectionState === "disconnected" && isLiveChat) return t("chat.status.reconnecting");
     if (session.historyState === "loading") return t("chat.status.loading");
+    if (session.interruptPending) return t("chat.status.stopping");
     if (session.pendingInteraction?.kind === "approval") return t("chat.status.approval");
     if (session.pendingInteraction?.kind === "clarify") return t("chat.status.clarify");
     if (session.status === "waiting") return t("chat.status.waiting");
     if (runActive) return t("chat.status.running");
     return t("chat.status.ready");
-  }, [isLiveChat, locale.value, runActive, session.connectionState, session.historyState, session.pendingInteraction?.kind, session.status]);
+  }, [isLiveChat, locale.value, runActive, session.connectionState, session.historyState, session.interruptPending, session.pendingInteraction?.kind, session.status]);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -111,7 +112,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
         />
         <div class="composer-actions">
           <button type="submit" disabled={(runActive ? !canSteer : !canSend) || !draft.trim()}>{runActive ? t("chat.steer") : t("chat.send")}</button>
-          {showStop && <button type="button" class="interrupt-button" disabled={session.connectionState !== "ready"} onClick={() => interruptSession(session.id)}>{t("chat.stop")}</button>}
+          {showStop && <button type="button" class="interrupt-button" aria-busy={session.interruptPending === true} disabled={session.connectionState !== "ready" || session.interruptPending === true} onClick={() => void interruptSession(session.id)}>{session.interruptPending ? t("chat.stopping") : t("chat.stop")}</button>}
         </div>
       </form>
     </article>

@@ -62,7 +62,7 @@ let ensureChatSession = (_target: ChatTarget) => {};
 let releaseChatSession = (_clientSessionId: string) => {};
 let submitChatPrompt: (clientSessionId: string, text: string, operationId: string) => Promise<ChatPromptResult> | void = async () => ({ status: "rejected", message: "Chat runtime is not registered." });
 let steerChatSession: (clientSessionId: string, text: string) => Promise<ChatSteerResult> = async () => { throw new Error("Chat runtime is not registered."); };
-let interruptChatSession = (_clientSessionId: string) => {};
+let interruptChatSession: (clientSessionId: string) => Promise<void> | void = (_clientSessionId: string) => {};
 let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
 let respondApproval = async (_clientSessionId: string, _approvalId: string, _choice: ApprovalChoice) => {};
 let runtimeDataSource: "none" | "demo" | "live" = "none";
@@ -73,7 +73,7 @@ export function registerChatRuntime(actions: {
   releaseSession(clientSessionId: string): void;
   submitPrompt(clientSessionId: string, text: string, operationId: string): Promise<ChatPromptResult> | void;
   steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
-  interrupt(clientSessionId: string): void;
+  interrupt(clientSessionId: string): Promise<void> | void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
   respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
 }): void {
@@ -412,8 +412,8 @@ export async function steerSession(sessionId: string, body: string): Promise<boo
   return steerChatRun(sessions, steerChatSession, sessionId, body);
 }
 
-export function interruptSession(sessionId: string): void {
-  interruptChatRun(sessions, interruptChatSession, sessionId);
+export async function interruptSession(sessionId: string): Promise<boolean> {
+  return await interruptChatRun(sessions, interruptChatSession, sessionId);
 }
 
 export async function respondToClarification(sessionId: string, answer: string): Promise<void> {
@@ -510,26 +510,12 @@ function updatePromptOperation(sessionId: string, operationId: string, result: C
   });
 }
 
-export function reconcilePromptOperationsWithHistory(local: readonly ChatMessage[], history: readonly ChatMessage[]): ChatMessage[] {
-  const remainingHistoryUsers = history.filter((message) => message.from === "user").map((message) => ({ message, matched: false }));
-  return local.filter((message) => {
-    const operation = message.promptOperation;
-    // Only the RPC acknowledgement can establish acceptance. Ambiguous and
-    // rejected operations remain visible evidence even when identical text is
-    // present in history; matching text alone must never promote them.
-    if (!operation || operation.state !== "accepted") return true;
-    const match = remainingHistoryUsers.find((candidate) => !candidate.matched && likelySamePrompt(message, candidate.message));
-    if (!match) return true;
-    match.matched = true;
-    return false;
-  });
-}
-
-function likelySamePrompt(local: ChatMessage, remote: ChatMessage): boolean {
-  if (local.body !== remote.body) return false;
-  const localTime = Date.parse(local.at);
-  const remoteTime = Date.parse(remote.at);
-  return Number.isNaN(localTime) || Number.isNaN(remoteTime) || Math.abs(localTime - remoteTime) <= 5 * 60_000;
+export function reconcilePromptOperationsWithHistory(local: readonly ChatMessage[], _history: readonly ChatMessage[]): ChatMessage[] {
+  // Hermes history does not currently carry the client operation id. Text and
+  // timestamps cannot prove causality (clocks may differ and short prompts are
+  // commonly repeated), so retain bounded local evidence. applyChatHistory
+  // still removes an operation if a future durable row has the exact same id.
+  return [...local];
 }
 
 export function setChatHistoryError(sessionId: string, message: string): void {
@@ -622,6 +608,8 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       status: "ready",
       streamingMessageId: undefined,
       pendingInteraction: undefined,
+      interruptPending: false,
+      interruptOperationId: undefined,
       messages: exists
         ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" } : message.status === "streaming" ? { ...message, status: "complete" } : message)
         : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTimestamp(), status: "complete" as const }] : [])]
@@ -631,6 +619,18 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     return isChatRunActive(session) ? mergeGatewayStatusUpdate(session, payload) : session;
   }
   if (event.type === "session.info") {
+    const status = stringValue(payload.status)?.trim().toLowerCase().replaceAll("_", "-");
+    if (session.interruptPending && (payload.running === false || status === "idle" || status === "ready")) {
+      return {
+        ...session,
+        status: "ready",
+        streamingMessageId: undefined,
+        pendingInteraction: undefined,
+        interruptPending: false,
+        interruptOperationId: undefined,
+        messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "cancelled" } : item),
+      };
+    }
     return session;
   }
   if (event.type.startsWith("tool.")) {
@@ -658,6 +658,8 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       errorMessage: upstreamText ? upstreamMessage(upstreamText) : officeMessage("runtime.chat.hermesGenericError"),
       streamingMessageId: undefined,
       pendingInteraction: undefined,
+      interruptPending: false,
+      interruptOperationId: undefined,
       messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
     };
   }

@@ -461,7 +461,12 @@ export class HermesBackend implements HermesRuntimeSource {
         redirect: "error",
         signal: controller.signal,
       });
-      if (!response.ok) throw new IncompatibleHermesError(`Hermes returned ${response.status}.`);
+      if (!response.ok) {
+        const status = response.status;
+        try { await response.body?.cancel(); } catch { /* Preserve the HTTP classification if body disposal fails. */ }
+        if (status === 429 || status >= 500) throw new Error(`Hermes temporarily returned ${status}.`);
+        throw new IncompatibleHermesError(`Hermes returned ${status}.`);
+      }
       const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
       return { value: JSON.parse(text) as unknown, bytes: Buffer.byteLength(text) };
     } finally {

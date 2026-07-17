@@ -13,6 +13,7 @@ import {
   sendMessage,
   sessions,
   setChatHistoryLoading,
+  setChatHistoryError,
   setChatSessionConnecting,
   setChatSessionDisconnected,
   setChatSessionError,
@@ -95,12 +96,14 @@ test("a new live generation terminalizes old rows while authoritative running re
 
 test("prompt start, socket close, and cold resume unlock the composer without replaying the prompt", async () => {
   const sockets: FakeWebSocket[] = [];
+  const recoveredHistory = deferred<unknown>();
+  let historyRequest = 0;
   let rpcSequence = 0;
   const callbacks: ChatApiCallbacks = {
     onSocketState() {},
-    onHistoryLoading() {},
-    onHistory() {},
-    onHistoryError() {},
+    onHistoryLoading: setChatHistoryLoading,
+    onHistory: applyChatHistory,
+    onHistoryError: setChatHistoryError,
     onSessionConnecting: setChatSessionConnecting,
     onSessionReady: setChatSessionReady,
     onSessionDisconnected: setChatSessionDisconnected,
@@ -114,11 +117,14 @@ test("prompt start, socket close, and cold resume unlock the composer without re
       sockets.push(socket);
       return socket as unknown as WebSocket;
     },
-    fetchJson: async <T>() => ({
-      sessionId: "stored-1",
-      messages: [],
-      pagination: { direction: "older", hasMore: false, returned: 0 }
-    }) as T,
+    fetchJson: async <T>() => {
+      historyRequest += 1;
+      if (historyRequest === 1) return {
+        sessionId: "stored-1", messages: [],
+        pagination: { direction: "older", hasMore: false, returned: 0 }
+      } as T;
+      return await recoveredHistory.promise as T;
+    },
     reconnectDelay: () => 0,
     randomId: () => `rpc-${++rpcSequence}`
   });
@@ -152,7 +158,20 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   const newSocket = sockets[1]!;
   await flush();
   newSocket.open();
+  await waitFor(() => historyRequest === 2);
+  assert.equal(sessions.value[0]?.historyState, "loading");
+  assert.equal(canSubmitChatPrompt(sessions.value[0]!), false);
+  assert.equal(newSocket.frame("session.resume"), undefined, "resume must wait for authoritative history after any unexpected close");
+  recoveredHistory.resolve({
+    sessionId: "stored-1",
+    messages: [
+      { index: 0, role: "user", text: "first prompt", timestamp: "2026-01-01T00:00:00.000Z" },
+      { index: 1, role: "assistant", text: "durable response after reconnect", timestamp: "2026-01-01T00:00:01.000Z" },
+    ],
+    pagination: { direction: "older", hasMore: false, returned: 2 },
+  });
   await waitFor(() => newSocket.frame("session.resume") !== undefined);
+  assert.equal(sessions.value[0]?.messages.some(({ body }) => body === "durable response after reconnect"), true);
   const coldResume = newSocket.frame("session.resume")!;
   newSocket.respond(coldResume.id, { liveSessionId: "live-new", storedSessionId: "stored-1", running: false, status: "idle" });
   await flush();
@@ -170,7 +189,7 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   assert.equal(sessions.value[0]?.streamingMessageId, "new-agent");
   assert.equal(isChatRunActive(sessions.value[0]!), true);
   assert.equal(canSubmitChatPrompt(sessions.value[0]!), false);
-  assert.equal(sessions.value[0]?.messages.find(({ body }) => body === "first prompt")?.promptOperation?.state, "unconfirmed", "a stale response must not promote commit-unknown evidence");
+  assert.equal(sessions.value[0]?.messages.find(({ body, promptOperation }) => body === "first prompt" && promptOperation !== undefined)?.promptOperation?.state, "unconfirmed", "a stale response must not promote commit-unknown evidence");
   assert.deepEqual([...oldSocket.frames("prompt.submit"), ...newSocket.frames("prompt.submit")].map(({ params }) => params.text), ["first prompt", "second prompt"]);
 
   newSocket.respond(secondPrompt.id, { status: "accepted" });
@@ -191,6 +210,72 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   newSocket.event("live-new", "message.complete", { messageId: "new-agent", text: "stale completion" });
   assert.equal(isChatRunActive(sessions.value[0]!), true);
   assert.equal([...oldSocket.frames("prompt.submit"), ...newSocket.frames("prompt.submit"), ...runningSocket.frames("prompt.submit")].length, 2);
+  api.stop();
+});
+
+test("a partial reconnect history cannot satisfy the resume barrier", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const historyErrors: string[] = [];
+  const partialHistories: number[] = [];
+  let initialHistory = true;
+  let reconnectPage = 0;
+  let retryAvailable = false;
+  let rpcSequence = 0;
+  const callbacks: ChatApiCallbacks = {
+    ...noopCallbacks(),
+    onHistory(_clientSessionId, messages) { partialHistories.push(messages.length); },
+    onHistoryError(_clientSessionId, message) { historyErrors.push(message); },
+  };
+  const api = connectChatApi(callbacks, {
+    serverUrl: "http://127.0.0.1:4317",
+    createWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    fetchJson: async <T>() => {
+      if (initialHistory) {
+        initialHistory = false;
+        return { sessionId: "stored-partial", messages: [], pagination: { direction: "older", hasMore: false, returned: 0 } } as T;
+      }
+      if (!retryAvailable) {
+        reconnectPage += 1;
+        if (reconnectPage === 1) return {
+          sessionId: "stored-partial",
+          messages: [{ index: 1, role: "assistant", text: "safe prefix" }],
+          pagination: { direction: "older", hasMore: true, nextCursor: "older", returned: 1 },
+        } as T;
+        throw new Error("older page unavailable");
+      }
+      return {
+        sessionId: "stored-partial",
+        messages: [{ index: 2, role: "assistant", text: "authoritative retry" }],
+        pagination: { direction: "older", hasMore: false, returned: 1 },
+      } as T;
+    },
+    reconnectDelay: () => 0,
+    randomId: () => `partial-rpc-${++rpcSequence}`,
+  });
+  const target = { clientSessionId: "partial-client", profileId: "coder", storedSessionId: "stored-partial" };
+  api.ensureSession(target);
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  await waitFor(() => sockets[0]!.frame("session.resume") !== undefined);
+  const initialResume = sockets[0]!.frame("session.resume")!;
+  sockets[0]!.respond(initialResume.id, { liveSessionId: "live-partial-old", storedSessionId: "stored-partial", running: false });
+  await flush();
+
+  sockets[0]!.close(1006, "network lost");
+  await waitFor(() => sockets.length === 2);
+  sockets[1]!.open();
+  await waitFor(() => historyErrors.length === 1);
+  assert.equal(partialHistories.at(-1), 1, "the safe prefix remains inspectable");
+  assert.equal(sockets[1]!.frame("session.resume"), undefined, "partial durable history must not unlock resume");
+
+  retryAvailable = true;
+  api.ensureSession(target);
+  await waitFor(() => sockets[1]!.frame("session.resume") !== undefined);
+  assert.equal(partialHistories.at(-1), 1);
   api.stop();
 });
 

@@ -55,7 +55,7 @@ export type ChatApiConnection = {
   releaseSession(clientSessionId: string): void;
   submitPrompt(clientSessionId: string, text: string, operationId: string): Promise<ChatPromptResult>;
   steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
-  interrupt(clientSessionId: string): void;
+  interrupt(clientSessionId: string): Promise<void>;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
   respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
   retry(): void;
@@ -100,6 +100,11 @@ function explicitRpcRejection(message: string): ExplicitRpcRejection {
 
 function isExplicitRpcRejection(error: unknown): error is ExplicitRpcRejection {
   return typeof error === "object" && error !== null && RPC_REJECTED in error;
+}
+
+function isCommitUnconfirmedRpcError(error: Record<string, unknown>): boolean {
+  const data = asRecord(error.data);
+  return error.code === -32008 || data?.reason === "commit_unconfirmed";
 }
 
 type ActiveTarget = { generation: number; target: ChatTarget };
@@ -190,9 +195,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     historyLoads.clear();
     targetStartOperations.clear();
     liveToClient.clear();
-    if (historyResyncRequired) {
-      loadedHistories.clear();
-      for (const clientSessionId of targets.keys()) historiesAwaitingReset.add(clientSessionId);
+    // Any unplanned transport loss can happen after Hermes committed work but
+    // before the client observed it. Re-establish durable history before resume
+    // so an apparently idle replacement socket cannot unlock stale UI state.
+    loadedHistories.clear();
+    for (const [clientSessionId, active] of targets) {
+      if (active.target.storedSessionId) historiesAwaitingReset.add(clientSessionId);
     }
     rejectPending("Chat接続が切断されました。");
     for (const clientSessionId of targets.keys()) callbacks.onSessionDisconnected(clientSessionId);
@@ -279,7 +287,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const message = error.code === -32006
         ? "このセッションは別の端末で使用中です。別の端末で閉じてから再接続してください。"
         : typeof error.message === "string" ? error.message : "Chat RPCに失敗しました。";
-      request.reject(explicitRpcRejection(message));
+      request.reject(isCommitUnconfirmedRpcError(error) ? new Error(message) : explicitRpcRejection(message));
       return;
     }
     request.resolve(frame.result);
@@ -447,8 +455,16 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (isCurrentHistoryLoad(active, operation) && history.messages.length > 0) {
         history.fail(errorText(error));
         if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
-        loadedHistories.set(target.clientSessionId, active);
         callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, history.result());
+        if (resetTranscript) {
+          // A reconnect barrier cannot be satisfied by a prefix of the durable
+          // transcript: the missing suffix may contain the commit whose result
+          // became ambiguous when the socket was lost. Preserve the safe prefix
+          // for inspection, but require an explicit retry before resume.
+          callbacks.onHistoryError(target.clientSessionId, errorText(error));
+        } else {
+          loadedHistories.set(target.clientSessionId, active);
+        }
       } else if (isCurrentHistoryLoad(active, operation)) callbacks.onHistoryError(target.clientSessionId, errorText(error));
     } finally {
       if (historyLoads.get(target.clientSessionId) === operation) historyLoads.delete(target.clientSessionId);
@@ -581,13 +597,15 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       }
       return normalizeSteerResult(raw);
     },
-    interrupt(clientSessionId) {
+    async interrupt(clientSessionId) {
       const active = targets.get(clientSessionId);
+      const requestSocket = socket;
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!liveSessionId) return;
-      void rpc("session.interrupt", { session_id: liveSessionId }).catch((error) => {
-        callbacks.onSessionError(clientSessionId, errorText(error));
-      });
+      if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) throw new Error("Live Sessionが未接続です。");
+      await rpc("session.interrupt", { session_id: liveSessionId });
+      if (!isCurrentTarget(active) || socket !== requestSocket || liveSessionIdFor(active, liveToClient) !== liveSessionId) {
+        throw new Error("停止対象のセッションが変更されました。現在の状態を確認してください。");
+      }
     },
     async respondClarify(clientSessionId, requestId, answer) {
       const active = targets.get(clientSessionId);
@@ -735,9 +753,10 @@ function messageTime(message: Record<string, unknown>): string {
     return Number.isNaN(explicit.valueOf()) ? message.at : explicit.toISOString();
   }
   const value = message.createdAt ?? message.created_at ?? message.timestamp;
+  if (value === undefined || value === null || value === "") return "";
   const date = typeof value === "number"
     ? new Date(value < 10_000_000_000 ? value * 1_000 : value)
-    : typeof value === "string" ? new Date(value) : new Date();
+    : typeof value === "string" ? new Date(value) : new Date(Number.NaN);
   return Number.isNaN(date.valueOf()) ? "" : date.toISOString();
 }
 

@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import { profileList, selectProfile } from "../store";
 import { CharacterPortrait } from "./character-portrait";
 import { StatusPill } from "./status-pill";
+import { hasOpenModal, isTopmostModal } from "../modal-layer";
 
 export function ProfileCommand() {
   const [open, setOpen] = useState(false);
@@ -21,17 +22,19 @@ export function ProfileCommand() {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
+        if (!open && hasOpenModal()) return;
         setOpen((current) => {
           if (!current) previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
           return !current;
         });
-      } else if (event.key === "Escape") {
+      } else if (event.key === "Escape" && open && isTopmostModal(dialog.current)) {
+        event.preventDefault();
         setOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -42,12 +45,13 @@ export function ProfileCommand() {
   }, [open]);
 
   const openCommand = () => {
+    if (hasOpenModal()) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setOpen(true);
   };
 
   const trapFocus = (event: KeyboardEvent) => {
-    if (event.key !== "Tab") return;
+    if (event.key !== "Tab" || !isTopmostModal(dialog.current)) return;
     const controls = [...(dialog.current?.querySelectorAll<HTMLElement>('input, button, [tabindex]:not([tabindex="-1"])') ?? [])];
     if (controls.length === 0) return;
     const first = controls[0]!;

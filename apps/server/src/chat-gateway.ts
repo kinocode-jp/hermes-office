@@ -5,7 +5,7 @@ import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { HERMES_CHAT_METHODS, type HermesChatEvent, type HermesChatMethod } from "./hermes-chat.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
 import { ChatSessionCoordinator, type ChatSessionClaim } from "./chat-session-coordinator.js";
-import { ChatUpstreamHub } from "./chat-upstream-hub.js";
+import { ChatCommitUnconfirmedError, ChatUpstreamHub } from "./chat-upstream-hub.js";
 
 const MAX_IN_FLIGHT = 4;
 const MAX_QUEUE = 16;
@@ -45,6 +45,8 @@ export interface ChatGatewayDependencies {
   deviceLimiter: ChatDeviceRateLimiter;
   limits?: Partial<ChatGatewayLimits>;
   now?: () => number;
+  sessionIsActive?: () => boolean;
+  invalidationSignal?: AbortSignal;
   sessionCoordinator: ChatSessionCoordinator;
   chatHub: ChatUpstreamHub;
 }
@@ -124,6 +126,12 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   let rateTokens = limits.socketRateCapacity;
   let rateUpdatedAt = now();
   let cleanupChain = Promise.resolve();
+  let closeWhenIdleReason: string | undefined;
+
+  const sessionIsActive = dependencies.sessionIsActive ?? (() => {
+    const expiresAt = Date.parse(officeSession.expiresAt);
+    return Number.isFinite(expiresAt) && expiresAt > now();
+  });
 
   const purgePendingLease = (leaseToken: symbol): void => {
     for (const [liveId, queue] of pendingApprovals) {
@@ -139,6 +147,39 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       await chatHub.closeOwnerSessions(sessionOwner);
     });
   };
+
+  const shutdown = (): void => {
+    if (closed) return;
+    closed = true;
+    queued.length = 0;
+    pendingApprovals.clear();
+    pendingClarifications.clear();
+    chatHub.detach(sessionOwner);
+    cleanupOwnedSessions();
+  };
+
+  const invalidate = (reason: string): void => {
+    shutdown();
+    if (client.readyState === WebSocket.OPEN) client.close(1008, reason);
+  };
+
+  const authorizeSideEffect = (): boolean => {
+    const active = dependencies.invalidationSignal?.aborted !== true && sessionIsActive();
+    if (!active) invalidate("Session expired or revoked");
+    return active;
+  };
+
+  const closeAfterInFlight = (reason: string): void => {
+    hubReady = false;
+    queued.length = 0;
+    closeWhenIdleReason = reason;
+    if (inFlight === 0 && client.readyState === WebSocket.OPEN) client.close(1013, reason);
+  };
+
+  dependencies.invalidationSignal?.addEventListener(
+    "abort", () => invalidate("Session expired or revoked"), { once: true },
+  );
+  if (dependencies.invalidationSignal?.aborted === true) invalidate("Session expired or revoked");
 
   const closeForBackpressure = (): void => {
     if (!closed && client.readyState === WebSocket.OPEN) {
@@ -197,6 +238,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   };
 
   const processFrame = async (body: string, receivedAt: number, receivedOrder: number): Promise<void> => {
+    if (!authorizeSideEffect()) return;
     let frame: unknown;
     try { frame = JSON.parse(body); } catch { client.close(1007, "Invalid JSON"); return; }
     if (!isRpcRequest(frame)) { client.close(1008, "Invalid RPC request"); return; }
@@ -274,7 +316,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       const seed = frame.method === "session.create"
         ? await runtimeSource.globalInheritance?.().sessionCreateContext()
         : undefined;
-      if (closed) { sessionCoordinator.releaseFailedClaim(sessionClaim); return; }
+      if (closed || !authorizeSideEffect()) { sessionCoordinator.releaseFailedClaim(sessionClaim); return; }
       let ownedRequest: { liveSessionId: string; leaseToken: symbol } | undefined;
       if (ownedRequestLiveId !== undefined) {
         if (ownedRequestLeaseToken === undefined) {
@@ -283,16 +325,18 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         ownedRequest = { liveSessionId: ownedRequestLiveId, leaseToken: ownedRequestLeaseToken };
       }
       const result = frame.method === "session.close" && typeof frame.params?.session_id === "string"
-        ? await chatHub.closeOwnedSession(sessionOwner, frame.params.session_id)
+        ? await chatHub.closeOwnedSession(sessionOwner, frame.params.session_id, authorizeSideEffect)
         : ownedRequest !== undefined
           ? await chatHub.requestOwnedSession(
             sessionOwner, ownedRequest.liveSessionId, ownedRequest.leaseToken,
             { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
+            authorizeSideEffect,
           )
         : await chatHub.request(
           sessionOwner,
           { method: frame.method, ...upstreamRequestParams(frame.method, frame.params) },
           seed === undefined ? undefined : { sessionCreateSystemSeed: seed },
+          authorizeSideEffect,
         );
       if (frame.method === "session.close" && targetLeaseToken !== undefined) purgePendingLease(targetLeaseToken);
       let boundLiveId: string | undefined;
@@ -316,25 +360,37 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       } else {
         cleanupOwnedSessions();
       }
-    } catch {
+    } catch (error) {
       sessionCoordinator.releaseFailedClaim(sessionClaim);
       const promoted = restoreClaim(claim, pendingApprovals, pendingClarifications, closed, now());
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       if (closed) cleanupOwnedSessions();
-      sendRpcError(send, frame.id, -32000, "Hermes request failed.");
+      if (error instanceof ChatCommitUnconfirmedError && frame.method === "prompt.submit") {
+        sendCommitUnconfirmed(send, frame.id);
+      } else {
+        sendRpcError(send, frame.id, -32000, "Hermes request failed.");
+      }
     }
   };
 
   const drain = (): void => {
     while (!closed && hubReady && inFlight < limits.maxInFlight && queued.length > 0) {
+      if (!authorizeSideEffect()) return;
       const { body, receivedAt, receivedOrder } = queued.shift()!;
       inFlight += 1;
-      void processFrame(body, receivedAt, receivedOrder).finally(() => { inFlight -= 1; drain(); });
+      void processFrame(body, receivedAt, receivedOrder).finally(() => {
+        inFlight -= 1;
+        if (inFlight === 0 && closeWhenIdleReason !== undefined && client.readyState === WebSocket.OPEN) {
+          client.close(1013, closeWhenIdleReason);
+          return;
+        }
+        drain();
+      });
     }
   };
 
   client.on("message", (data, isBinary) => {
-    if (closed) return;
+    if (closed || closeWhenIdleReason !== undefined || !authorizeSideEffect()) return;
     if (isBinary) { client.close(1003, "Text frames only"); return; }
     const currentTime = now();
     rateTokens = Math.min(limits.socketRateCapacity, rateTokens + ((currentTime - rateUpdatedAt) / 1_000) * limits.socketRatePerSecond);
@@ -346,15 +402,6 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     queued.push({ body: data.toString(), receivedAt: currentTime, receivedOrder: ++chronology });
     drain();
   });
-  const shutdown = (): void => {
-    if (closed) return;
-    closed = true;
-    queued.length = 0;
-    pendingApprovals.clear();
-    pendingClarifications.clear();
-    chatHub.detach(sessionOwner);
-    cleanupOwnedSessions();
-  };
   client.on("close", shutdown);
   client.on("error", shutdown);
 
@@ -410,7 +457,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
           payload: { status: "resync_required", message: "Hermes chat restarted. Reload session history." },
         }, maxJsonBytes));
       }
-      client.close(1013, "Hermes chat restarted; reload history");
+      closeAfterInFlight("Hermes chat restarted; reload history");
     },
   }).then(() => {
     if (closed) { chatHub.detach(sessionOwner); return; }
@@ -444,6 +491,17 @@ function chatTargetId(method: HermesChatMethod, params: Record<string, unknown> 
 
 function sendRpcError(send: (value: unknown) => void, id: string | number, code: number, message: string): void {
   send({ jsonrpc: "2.0", id, error: { code, message } });
+}
+
+function sendCommitUnconfirmed(send: (value: unknown) => void, id: string | number): void {
+  send({
+    jsonrpc: "2.0", id,
+    error: {
+      code: -32008,
+      message: "Hermes may have accepted this prompt; reload history before retrying.",
+      data: { reason: "commit_unconfirmed" },
+    },
+  });
 }
 
 function sendSessionInUse(send: (value: unknown) => void, id: string | number): void {

@@ -45,12 +45,26 @@ test("reset during hydration rejects the captured stale record and deletes it", 
   const preferences = createPreferences(store);
   const hydration = preferences.hydrate();
   await store.waitUntilBlocked();
-  preferences.reset("profile-a");
+  const reset = preferences.reset("profile-a");
   store.release();
   await hydration;
-  await preferences.whenIdle("profile-a");
+  assert.equal(await reset, true);
   assert.equal(preferences.avatars.value["profile-a"], undefined);
   assert.equal(store.records.has("profile-a"), false);
+});
+
+test("reset keeps the custom avatar visible when durable deletion fails and succeeds on retry", async () => {
+  const store = new DeferredAvatarStore([["profile-a", FIRST_IMAGE]]);
+  const preferences = createPreferences(store, { "profile-a": { kind: "custom", dataUrl: FIRST_IMAGE } });
+  store.failNextDelete = true;
+  assert.equal(await preferences.reset("profile-a"), false);
+  assert.deepEqual(preferences.avatars.value["profile-a"], { kind: "custom", dataUrl: FIRST_IMAGE });
+  assert.equal(store.records.get("profile-a"), FIRST_IMAGE);
+  assert.equal(await preferences.reset("profile-a"), true);
+  assert.equal(preferences.avatars.value["profile-a"], undefined);
+  const reloaded = createPreferences(store);
+  await reloaded.hydrate();
+  assert.equal(reloaded.avatars.value["profile-a"], undefined);
 });
 
 test("a completed custom upload is restored by a new preference instance", async () => {
@@ -68,6 +82,7 @@ function createPreferences(store: AvatarAssetStore, initial: AvatarMap = {}): Av
 
 class DeferredAvatarStore implements AvatarAssetStore {
   readonly records: Map<string, string>;
+  failNextDelete = false;
   #blockOperation: "delete" | "load" | "put" | undefined;
   #blocked: (() => void) | undefined;
   #blockedPromise: Promise<void> = Promise.resolve();
@@ -103,6 +118,7 @@ class DeferredAvatarStore implements AvatarAssetStore {
 
   async delete(profileId: string): Promise<void> {
     await this.#maybeBlock("delete");
+    if (this.failNextDelete) { this.failNextDelete = false; throw new Error("delete failed"); }
     this.records.delete(profileId);
   }
 

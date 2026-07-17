@@ -7,7 +7,7 @@ const ANSI_ESCAPE_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/gi;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const AUTHORIZATION_HEADER_PATTERN = /^([ \t]*(?:Authorization|Proxy-Authorization)[ \t]*:[ \t]*)([^\r\n]*)/gim;
-const COOKIE_HEADER_PATTERN = /^([ \t]*(?:Cookie|Set-Cookie)[ \t]*:[ \t]*)([^\r\n]*)/gim;
+const COOKIE_HEADER_PATTERN = /(^|[ \t"'`<>|])((?:Cookie|Set-Cookie)[ \t]*:[ \t]*)/gim;
 const URL_USERINFO_PATTERN = /((?:https?|postgres(?:ql)?|rediss?|mysql|mariadb|mongodb(?:\+srv)?|amqps?|ftps?|smtps?|imaps?|ldaps?):\/\/)[^/?#\s@:]*:[^/?#\s@]+@/gi;
 const QUERY_SECRET_PATTERN = /([?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+/gi;
 const GOOGLE_API_KEY_PATTERN = /\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g;
@@ -26,16 +26,53 @@ export function redactSecrets(value: string): SecretRedaction {
     .replace(PRIVATE_KEY_PATTERN, "[REDACTED PRIVATE KEY]")
     .replace(AUTHORIZATION_HEADER_PATTERN, (line: string, prefix: string, headerValue: string) =>
       headerValue.length === 0 ? line : `${prefix}[REDACTED]`)
-    .replace(COOKIE_HEADER_PATTERN, (line: string, prefix: string, headerValue: string) =>
-      headerValue.length === 0 ? line : `${prefix}[REDACTED]`)
     .replace(BEARER_PATTERN, "Bearer [REDACTED]")
     .replace(URL_USERINFO_PATTERN, "$1[REDACTED]:[REDACTED]@")
     .replace(QUERY_SECRET_PATTERN, "$1[REDACTED]")
     .replace(GOOGLE_API_KEY_PATTERN, "[REDACTED]")
     .replace(JWT_PATTERN, "[REDACTED]")
     .replace(KNOWN_CREDENTIAL_PATTERN, "[REDACTED]");
+  output = redactCookieHeaders(output);
   output = redactSensitiveAssignments(output);
   return { value: output, redacted: output !== value };
+}
+
+function redactCookieHeaders(value: string): string {
+  let copiedUntil = 0;
+  let output = "";
+  COOKIE_HEADER_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = COOKIE_HEADER_PATTERN.exec(value)) !== null) {
+    const [whole, boundary = ""] = match;
+    const valueStart = match.index + whole.length;
+    const valueEnd = cookieHeaderValueEnd(value, valueStart, cookieHeaderQuote(value, match.index, boundary));
+    if (valueEnd === valueStart) continue;
+    output += value.slice(copiedUntil, valueStart);
+    output += "[REDACTED]";
+    copiedUntil = valueEnd;
+    COOKIE_HEADER_PATTERN.lastIndex = valueEnd;
+  }
+  COOKIE_HEADER_PATTERN.lastIndex = 0;
+  return `${output}${value.slice(copiedUntil)}`;
+}
+
+function cookieHeaderQuote(value: string, boundaryIndex: number, boundary: string): string | undefined {
+  if (boundary === "\"" || boundary === "'" || boundary === "`") return boundary;
+  if (boundary !== " " && boundary !== "\t") return undefined;
+  let cursor = boundaryIndex;
+  while (cursor >= 0 && (value[cursor] === " " || value[cursor] === "\t")) cursor -= 1;
+  const candidate = value[cursor];
+  return candidate === "\"" || candidate === "'" || candidate === "`" ? candidate : undefined;
+}
+
+function cookieHeaderValueEnd(value: string, start: number, quote: string | undefined): number {
+  let end = start;
+  while (end < value.length && value[end] !== "\r" && value[end] !== "\n") {
+    if (quote !== undefined && value[end] === "\\" && end + 1 < value.length) { end += 2; continue; }
+    if (quote !== undefined && value[end] === quote) break;
+    end += 1;
+  }
+  return end;
 }
 
 /** Detect secret material on input surfaces that must reject rather than redact. */

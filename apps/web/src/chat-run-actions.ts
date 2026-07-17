@@ -40,6 +40,11 @@ export function invalidatePendingSteer(session: ChatSession): ChatSession {
   return { ...session, steerPending: false, steerOperationId: undefined };
 }
 
+export function invalidatePendingInterrupt(session: ChatSession): ChatSession {
+  if (session.interruptPending !== true && session.interruptOperationId === undefined) return session;
+  return { ...session, interruptPending: false, interruptOperationId: undefined };
+}
+
 export async function steerChatRun(
   state: SessionState,
   sendSteer: (sessionId: string, text: string) => Promise<ChatSteerResult>,
@@ -82,23 +87,43 @@ export async function steerChatRun(
   }
 }
 
-export function interruptChatRun(
+export async function interruptChatRun(
   state: SessionState,
-  sendInterrupt: (sessionId: string) => void,
+  sendInterrupt: (sessionId: string) => Promise<void> | void,
   sessionId: string,
-): void {
+): Promise<boolean> {
   const session = state.value.find((item) => item.id === sessionId);
-  if (!session || session.connectionState !== "ready" || !isChatRunActive(session)) return;
-  sendInterrupt(sessionId);
-  updateSession(state, sessionId, (item) => ({
-    ...item,
-    status: "ready",
-    streamingMessageId: undefined,
-    pendingInteraction: undefined,
-    steerPending: false,
-    steerOperationId: undefined,
-    messages: item.messages.map((message) => message.status === "streaming" ? { ...message, status: "cancelled" } : message),
-  }));
+  if (!session || session.connectionState !== "ready" || !isChatRunActive(session) || session.interruptPending) return false;
+  const operationId = crypto.randomUUID();
+  updateSession(state, sessionId, (item) => ({ ...item, interruptPending: true, interruptOperationId: operationId, errorMessage: undefined }));
+  try {
+    await sendInterrupt(sessionId);
+    let acknowledged = false;
+    updateSession(state, sessionId, (item) => {
+      if (item.interruptOperationId !== operationId) return item;
+      acknowledged = true;
+      return {
+        ...item,
+        status: "ready",
+        streamingMessageId: undefined,
+        pendingInteraction: undefined,
+        steerPending: false,
+        steerOperationId: undefined,
+        interruptPending: false,
+        interruptOperationId: undefined,
+        messages: item.messages.map((message) => message.status === "streaming" ? { ...message, status: "cancelled" } : message),
+      };
+    });
+    return acknowledged;
+  } catch {
+    updateSession(state, sessionId, (item) => item.interruptOperationId === operationId ? {
+      ...item,
+      interruptPending: false,
+      interruptOperationId: undefined,
+      errorMessage: officeMessage("runtime.chat.interruptFailed"),
+    } : item);
+    return false;
+  }
 }
 
 function updateSession(state: SessionState, sessionId: string, update: (session: ChatSession) => ChatSession): void {

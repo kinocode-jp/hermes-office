@@ -1,5 +1,5 @@
 import type { ChatSession } from "./domain";
-import { invalidatePendingSteer } from "./chat-run-actions";
+import { invalidatePendingInterrupt, invalidatePendingSteer } from "./chat-run-actions";
 import type { RuntimeMessage } from "./i18n";
 
 export type ChatSessionReadyRuntime = {
@@ -58,7 +58,7 @@ export function reconcileChatSessionError(session: ChatSession, message: Runtime
 
 function terminateChatRun(session: ChatSession, terminalStatus: "cancelled" | "failed"): ChatSession {
   return {
-    ...invalidatePendingSteer(session),
+    ...invalidatePendingInterrupt(invalidatePendingSteer(session)),
     status: "ready",
     streamingMessageId: undefined,
     pendingInteraction: undefined,

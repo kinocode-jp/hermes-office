@@ -45,8 +45,10 @@ test("a complete session generation upserts extras, prunes unseen rows, and rele
     assert.deepEqual(openSessionIds.value, [keepId]);
     assert.equal(activeSessionId.value, keepId);
     assert.equal(profileList.value[0]?.sessions, 102);
-    interruptSession(keepId);
+    const stopping = interruptSession(keepId);
     assert.deepEqual(interrupted, [keepId]);
+    assert.equal(sessions.value.find((session) => session.id === keepId)?.interruptPending, true);
+    assert.equal(await stopping, true);
     assert.equal(sessions.value.find((session) => session.id === keepId)?.status, "ready");
     assert.equal(sessions.value.find((session) => session.id === keepId)?.messages[0]?.status, "cancelled");
 

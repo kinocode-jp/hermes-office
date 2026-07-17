@@ -168,6 +168,40 @@ test("redacts complete cookie, credential URI, Google API key, and JWT container
   assert.deepEqual(twice, { value: once.value, redacted: false });
 });
 
+test("redacts cookie headers at shell and browser log boundaries without consuming adjacent text", () => {
+  const source = [
+    "curl -H 'Cookie: session=quoted-secret; theme=light' https://example.test/safe",
+    'curl -H "Set-Cookie: session=double-secret; HttpOnly" --verbose',
+    "curl -H ' Cookie: session=spaced-secret' --next-safe",
+    "> Cookie: browser-request-secret; theme=dark",
+    "< Set-Cookie: browser-response-secret; Secure",
+    "trace |Cookie: pipe-secret",
+    "X-Cookie: visible-extension=value",
+    "prefix-X-Cookie: also-visible=value",
+  ].join("\r\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+
+  assert.equal(once.value, [
+    "curl -H 'Cookie: [REDACTED]' https://example.test/safe",
+    'curl -H "Set-Cookie: [REDACTED]" --verbose',
+    "curl -H ' Cookie: [REDACTED]' --next-safe",
+    "> Cookie: [REDACTED]",
+    "< Set-Cookie: [REDACTED]",
+    "trace |Cookie: [REDACTED]",
+    "X-Cookie: visible-extension=value",
+    "prefix-X-Cookie: also-visible=value",
+  ].join("\r\n"));
+  for (const secret of ["quoted-secret", "double-secret", "spaced-secret", "browser-request-secret", "browser-response-secret", "pipe-secret"]) {
+    assert.equal(once.value.includes(secret), false);
+  }
+  for (const safe of ["https://example.test/safe", "--verbose", "--next-safe", "visible-extension=value", "also-visible=value"]) {
+    assert.equal(once.value.includes(safe), true);
+  }
+  assert.deepEqual(twice, { value: once.value, redacted: false });
+});
+
 test("redacts complete line and YAML block scalars without consuming adjacent safe fields", () => {
   const source = [
     "password: correct horse battery staple",

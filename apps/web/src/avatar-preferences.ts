@@ -63,14 +63,20 @@ export class AvatarPreferences {
     return true;
   }
 
-  reset(profileId: string): void {
-    if (!profileId) return;
-    this.begin(profileId);
+  async reset(profileId: string): Promise<boolean> {
+    if (!profileId) return false;
+    const generation = this.begin(profileId);
+    try {
+      await this.#enqueue(profileId, async () => await this.#store.delete(profileId));
+    } catch {
+      return false;
+    }
+    if (!this.isCurrent(profileId, generation)) return false;
     const next = { ...this.avatars.value };
     delete next[profileId];
     this.avatars.value = next;
     this.#persist(next);
-    void this.#enqueue(profileId, async () => await this.#store.delete(profileId)).catch(() => undefined);
+    return true;
   }
 
   async hydrate(): Promise<void> {
@@ -151,8 +157,8 @@ export async function setCustomAvatar(profileId: string, dataUrl: string, starte
   return await avatarPreferences.setCustom(profileId, dataUrl, startedGeneration);
 }
 
-export function resetProfileAvatar(profileId: string): void {
-  avatarPreferences.reset(profileId);
+export async function resetProfileAvatar(profileId: string): Promise<boolean> {
+  return await avatarPreferences.reset(profileId);
 }
 
 export function isSafeImageDataUrl(value: string): boolean {
@@ -209,9 +215,11 @@ class IndexedDbAvatarStore implements AvatarAssetStore {
   }
 
   async delete(profileId: string): Promise<void> {
-    await withAvatarStore("readwrite", async (store) => {
+    const deleted = await withAvatarStore("readwrite", async (store) => {
       await requestResult(store.delete(profileId));
+      return true;
     });
+    if (deleted !== true) throw new Error("avatar storage unavailable");
   }
 }
 

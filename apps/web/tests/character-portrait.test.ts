@@ -23,14 +23,15 @@ test("maps neutral profile ids to stable character-sheet cells", () => {
   assert.equal(characterSheetPosition("").index, 5);
 });
 
-test("stores a separate creature choice for each profile and can reset it", () => {
+test("stores separate creature choices and refuses a non-durable reset", async () => {
   profileAvatars.value = {};
   setCreatureAvatar("profile-a", 4);
   setCreatureAvatar("profile-b", 2);
   assert.deepEqual(avatarForProfile("profile-a"), { kind: "creature", index: 4 });
   assert.deepEqual(avatarForProfile("profile-b"), { kind: "creature", index: 2 });
-  resetProfileAvatar("profile-a");
-  assert.equal(profileAvatars.value["profile-a"], undefined);
+  assert.equal(await resetProfileAvatar("profile-a"), false);
+  assert.deepEqual(profileAvatars.value["profile-a"], { kind: "creature", index: 4 });
+  profileAvatars.value = {};
 });
 
 test("validates image data URLs and reports unavailable durable storage", async () => {

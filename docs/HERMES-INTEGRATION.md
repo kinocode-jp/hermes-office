@@ -136,6 +136,12 @@ Important behavior from the current server:
   Office ownership unresolved and fail-closed.
 - `prompt.submit` returns `{status: "streaming"}` before the model turn finishes.
   Completion is event-driven.
+- A timeout, transport close, oversized/invalid response, or shared-generation
+  change after `prompt.submit` may happen after Hermes accepted the prompt.
+  Office returns JSON-RPC code `-32008` with
+  `data.reason = "commit_unconfirmed"`; clients reload authoritative history and
+  never automatically replay that prompt. Explicit Hermes RPC rejection remains
+  a definitive failure.
 - Sending while a turn is busy may queue/interrupt according to Hermes behavior;
   the UI must display backend state instead of inventing its own run state.
 - `session.steer` returns `{status: "queued"}` or `{status: "rejected"}`.

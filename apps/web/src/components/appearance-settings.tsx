@@ -10,6 +10,7 @@ import {
 } from "../appearance";
 import { locale } from "../i18n";
 import { InfoTip } from "./info-tip";
+import { hasOpenModal, isTopmostModal } from "../modal-layer";
 
 const themeDetails: Record<Theme, { name: string; ja: string; en: string }> = {
   paper: { name: "Paper", ja: "白", en: "Pure white" },
@@ -45,6 +46,7 @@ export function AppearanceSettings() {
     if (!open) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!isTopmostModal(panel.current)) return;
       if (event.key === "Escape") { event.preventDefault(); setOpen(false); return; }
       if (event.key !== "Tab") return;
       const controls = [...(panel.current?.querySelectorAll<HTMLElement>('button, [tabindex]:not([tabindex="-1"])') ?? [])];
@@ -74,7 +76,7 @@ export function AppearanceSettings() {
         aria-label={copy.trigger}
         aria-expanded={open}
         aria-controls="appearance-panel"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen((current) => current ? false : hasOpenModal() ? false : true)}
       >
         <span aria-hidden="true">Aa</span>
       </button>

@@ -290,6 +290,23 @@ for (const scenario of ["404", "500", "timeout", "mapping"] as const) {
   });
 }
 
+test("an explicitly missing status route remains incompatible", async () => {
+  const fixture = await startHermesFixture((_request, response, url) => {
+    if (url.pathname === "/api/status") {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "route not found" }));
+      return;
+    }
+    return defaultFixtureRoute(_request, response, url);
+  });
+  try {
+    assert.equal((await fixture.backend.start()).state, "incompatible");
+  } finally {
+    await fixture.backend.close();
+    await fixture.close();
+  }
+});
+
 test("managed backend drains output beyond pipe capacity after readiness", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-backend-"));
   const executable = join(directory, "fake-hermes.mjs");
@@ -344,6 +361,25 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   }
 });
 
+test("initial managed start retries a transient 429 status probe and succeeds", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-initial-transient-"));
+  const executable = join(directory, "fake-hermes.mjs");
+  const countPath = join(directory, "serve-count.txt");
+  const crashPath = join(directory, "unused-crash");
+  await writeManagedRecoveryFixture(executable, countPath, crashPath, false, 1, 429);
+  const backend = new HermesBackend({
+    executable, startTimeoutMs: 2_000, requestTimeoutMs: 500,
+    globalSettingsPath: join(directory, "global-settings.json"),
+  });
+  try {
+    assert.equal((await backend.start()).state, "ready");
+    assert.equal((await readFile(countPath, "utf8")).trim(), "2", "the transient first child is replaced exactly once");
+  } finally {
+    await backend.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("managed backend invalidates a crashed generation, recovers once, and never respawns during shutdown", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-"));
   const executable = join(directory, "fake-hermes.mjs");
@@ -376,6 +412,29 @@ test("managed backend invalidates a crashed generation, recovers once, and never
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(await readFile(countPath, "utf8"), countAtClose);
     assert.equal(backend.status().state, "stopped");
+  } finally {
+    await backend.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("managed recovery retries a transient 503 status probe and reconnects", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-transient-"));
+  const executable = join(directory, "fake-hermes.mjs");
+  const countPath = join(directory, "serve-count.txt");
+  const crashPath = join(directory, "crash-first");
+  await writeManagedRecoveryFixture(executable, countPath, crashPath, false, 2, 503);
+  const backend = new HermesBackend({
+    executable, startTimeoutMs: 2_000, requestTimeoutMs: 500,
+    managedRestartAttempts: 2, managedRestartBackoffMs: 10,
+    globalSettingsPath: join(directory, "global-settings.json"),
+  });
+  try {
+    assert.equal((await backend.start()).state, "ready");
+    await writeFile(crashPath, "crash", "utf8");
+    await waitForCondition(async () => backend.status().state === "ready"
+      && Number.parseInt((await readFile(countPath, "utf8")).trim(), 10) === 3, 4_000);
+    assert.deepEqual((await backend.snapshot()).profiles.map((profile) => profile.id), ["generation-3"]);
   } finally {
     await backend.close();
     await rm(directory, { recursive: true, force: true });
@@ -487,16 +546,23 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
   throw new Error(`Timed out waiting for ${path}`);
 }
 
-async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<void> {
+async function waitForCondition(condition: () => boolean | Promise<boolean>, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (condition()) return;
+    if (await condition()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Timed out waiting for managed backend state.");
 }
 
-async function writeManagedRecoveryFixture(executable: string, countPath: string, crashPath: string, failRecovery: boolean): Promise<void> {
+async function writeManagedRecoveryFixture(
+  executable: string,
+  countPath: string,
+  crashPath: string,
+  failRecovery: boolean,
+  transientStatusGeneration?: number,
+  transientStatus = 503,
+): Promise<void> {
   await writeFile(executable, `#!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -511,7 +577,11 @@ writeFileSync(countPath, String(generation));
 if (${JSON.stringify(failRecovery)} && generation > 1) process.exit(1);
 const server = createServer((request, response) => {
   response.setHeader("Content-Type", "application/json");
-  if (request.url === "/api/status") response.end(JSON.stringify({ version: "0.18.2" }));
+  if (request.url === "/api/status" && generation === ${JSON.stringify(transientStatusGeneration ?? null)}) {
+    response.statusCode = ${JSON.stringify(transientStatus)};
+    response.end(JSON.stringify({ error: "temporary status failure" }));
+  }
+  else if (request.url === "/api/status") response.end(JSON.stringify({ version: "0.18.2" }));
   else if (request.url === "/api/profiles") response.end(JSON.stringify({ profiles: [{ name: "generation-" + generation }] }));
   else if (request.url?.startsWith("/api/profiles/sessions")) response.end(JSON.stringify({ sessions: [], total: 0, errors: [] }));
   else if (request.url === "/api/plugins/kanban/board") response.end(JSON.stringify({ columns: [], latest_event_id: 0 }));

@@ -3,6 +3,7 @@ import { avatarForProfile, beginCustomAvatarChange, DEFAULT_CHARACTER_COUNT, isA
 import { CharacterPortrait } from "./character-portrait";
 import { InfoTip } from "./info-tip";
 import { t } from "../i18n";
+import { isTopmostModal } from "../modal-layer";
 
 type AvatarPickerProps = {
   profileId: string;
@@ -18,6 +19,7 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
   const dialogRef = useRef<HTMLElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const selected = avatarForProfile(profileId);
 
   useEffect(() => {
@@ -26,6 +28,7 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
     const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button, input:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
     focusable()[0]?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (!isTopmostModal(dialogRef.current)) return;
       if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
       if (event.key !== "Tab") return;
       const controls = focusable();
@@ -58,6 +61,17 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
     }
   }
 
+  async function resetAvatar(): Promise<void> {
+    setError(null);
+    setResetting(true);
+    try {
+      if (await resetProfileAvatar(profileId)) onClose();
+      else setError(t("avatar.resetFailed"));
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section ref={dialogRef} class="avatar-picker" role="dialog" aria-modal="true" aria-labelledby="avatar-picker-title" aria-describedby="avatar-picker-description">
@@ -75,6 +89,7 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
               key={index}
               type="button"
               class={selected.kind === "creature" && selected.index === index ? "is-selected" : ""}
+              disabled={uploading || resetting}
               aria-label={t("avatar.creature", { number: index + 1 })}
               aria-pressed={selected.kind === "creature" && selected.index === index}
               onClick={() => { setCreatureAvatar(profileId, index); onClose(); }}
@@ -90,9 +105,9 @@ export function AvatarPicker({ profileId, profileName, profileIndex, onClose }: 
           ))}
         </div>
         <div class="avatar-picker-actions">
-          <input ref={inputRef} type="file" disabled={uploading} accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
-          <button type="button" class="avatar-upload-button" disabled={uploading} onClick={() => inputRef.current?.click()}>{t("avatar.upload")}</button>
-          <button type="button" class="avatar-reset-button" onClick={() => { resetProfileAvatar(profileId); onClose(); }}>{t("avatar.reset")}</button>
+          <input ref={inputRef} type="file" disabled={uploading || resetting} accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
+          <button type="button" class="avatar-upload-button" disabled={uploading || resetting} onClick={() => inputRef.current?.click()}>{t("avatar.upload")}</button>
+          <button type="button" class="avatar-reset-button" aria-busy={resetting} disabled={uploading || resetting} onClick={() => void resetAvatar()}>{resetting ? t("avatar.resetting") : t("avatar.reset")}</button>
         </div>
         {error && <p class="avatar-picker-error" role="alert">{error}</p>}
       </section>

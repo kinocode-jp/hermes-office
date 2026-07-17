@@ -111,14 +111,27 @@ test("prompt submissions expose pending, accepted, rejected, and commit-unknown 
   }
 });
 
-test("authoritative history replaces matching prompt evidence but preserves rejected and unmatched unconfirmed operations", () => {
+test("authoritative history preserves prompt operation evidence without a durable operation id", () => {
   const at = "2026-07-17T01:00:00.000Z";
   const operation = (id: string, body: string, state: "accepted" | "rejected" | "unconfirmed") => ({
     id, from: "user" as const, body, at, promptOperation: { id, state },
   });
   const local = [operation("accepted", "same", "accepted"), operation("rejected", "same", "rejected"), operation("unknown", "other", "unconfirmed")];
   const history = [{ id: "remote", from: "user" as const, body: "same", at, status: "complete" as const }];
-  assert.deepEqual(reconcilePromptOperationsWithHistory(local, history).map(({ id }) => id), ["rejected", "unknown"]);
+  assert.deepEqual(reconcilePromptOperationsWithHistory(local, history).map(({ id }) => id), ["accepted", "rejected", "unknown"]);
+});
+
+test("old or timestamp-free same-text history never erases newer accepted operation evidence", () => {
+  const local = [{
+    id: "accepted-new", from: "user" as const, body: "repeatable command", at: "2026-07-17T10:00:00.000Z",
+    promptOperation: { id: "accepted-new", state: "accepted" as const },
+  }];
+  for (const at of ["", "12:00", "2025-07-17T10:00:00.000Z"]) {
+    const history = [{ id: `old-${at}`, from: "user" as const, body: "repeatable command", at, status: "complete" as const }];
+    assert.deepEqual(reconcilePromptOperationsWithHistory(local, history).map(({ id }) => id), ["accepted-new"]);
+  }
+  const closeInTime = [{ id: "close-in-time", from: "user" as const, body: "repeatable command", at: "2026-07-17T10:00:01.000Z", status: "complete" as const }];
+  assert.deepEqual(reconcilePromptOperationsWithHistory(local, closeInTime).map(({ id }) => id), ["accepted-new"]);
 });
 
 test("chat timestamps render by selected locale without rewriting legacy clock text", () => {
@@ -326,12 +339,48 @@ test("a delayed steer acknowledgement cannot overwrite a local stop", async () =
   });
   sessions.value = [{ ...ready, status: "streaming" }];
   const steering = steerSession(ready.id, "late guidance");
-  interruptSession(ready.id);
+  const stopping = interruptSession(ready.id);
+  assert.equal(sessions.value[0]?.interruptPending, true);
   operation.resolve();
+  assert.equal(await stopping, true);
   assert.equal(await steering, false);
   assert.deepEqual(interrupts, [ready.id]);
   assert.equal(sessions.value[0]?.status, "ready");
   assert.equal(sessions.value[0]?.messages.length, 0);
+});
+
+test("stop blocks duplicate prompts until acknowledgement and restores the active run on failure", async () => {
+  const operation = deferred<void>();
+  const prompts: string[] = [];
+  let interruptCalls = 0;
+  registerChatRuntime({
+    ensureSession() {}, releaseSession() {},
+    submitPrompt(_sessionId, text) { prompts.push(text); },
+    async steer() { return { status: "queued" }; },
+    interrupt() { interruptCalls += 1; return operation.promise; },
+    async respondClarify() {}, async respondApproval() {},
+  });
+  sessions.value = [{ ...ready, status: "streaming", streamingMessageId: "agent-active", messages: [{ id: "agent-active", from: "agent", body: "working", at: "00:00", status: "streaming" }] }];
+  const stopping = interruptSession(ready.id);
+  assert.equal(sessions.value[0]?.interruptPending, true);
+  assert.equal(sessions.value[0]?.status, "streaming");
+  assert.equal(canSubmitChatPrompt(sessions.value[0]!), false);
+  sendMessage(ready.id, "must stay blocked");
+  assert.deepEqual(prompts, []);
+  assert.equal(await interruptSession(ready.id), false);
+  assert.equal(interruptCalls, 1);
+  operation.reject(new Error("network failure"));
+  assert.equal(await stopping, false);
+  assert.equal(sessions.value[0]?.interruptPending, false);
+  assert.equal(isChatRunActive(sessions.value[0]!), true);
+  assert.equal(sessions.value[0]?.messages[0]?.status, "streaming");
+  assert.match(localizeRuntimeMessage(sessions.value[0]!.errorMessage!), /停止を確認できません/);
+
+  const authoritativeIdle = reduceChatGatewayEvent({ ...sessions.value[0]!, interruptPending: true, interruptOperationId: "stop-2" }, {
+    type: "session.info", liveSessionId: "live", payload: { running: false, status: "idle" },
+  });
+  assert.equal(authoritativeIdle.interruptPending, false);
+  assert.equal(isChatRunActive(authoritativeIdle), false);
 });
 
 test("same-target terminal events retain steering until queued or rejected acknowledgement", async (context) => {
@@ -508,7 +557,7 @@ test("tool progress and approval waits remain active across status notifications
   assert.equal(isChatRunActive(afterWaitingNotice), true);
 });
 
-test("completion, interruption, and error are authoritative run terminators", () => {
+test("completion, interruption, and error are authoritative run terminators", async () => {
   const active: ChatSession = {
     ...ready,
     status: "streaming",
@@ -547,16 +596,21 @@ test("completion, interruption, and error are authoritative run terminators", ()
     async respondClarify() {}, async respondApproval() {}
   });
   sessions.value = [active];
-  interruptSession(active.id);
-  interruptSession(active.id);
+  const firstStop = interruptSession(active.id);
+  const duplicateStop = interruptSession(active.id);
   assert.deepEqual(interrupts, [active.id]);
+  assert.equal(isChatRunActive(sessions.value[0]!), true);
+  assert.equal(await duplicateStop, false);
+  assert.equal(await firstStop, true);
   assert.equal(isChatRunActive(sessions.value[0]!), false);
   assert.deepEqual(sessions.value[0]?.messages.map(({ status }) => status), ["cancelled", "cancelled"]);
 
   sessions.value = [pending];
-  interruptSession(active.id);
-  interruptSession(active.id);
+  const pendingStop = interruptSession(active.id);
+  const duplicatePendingStop = interruptSession(active.id);
   assert.deepEqual(interrupts, [active.id, active.id]);
+  assert.equal(await duplicatePendingStop, false);
+  assert.equal(await pendingStop, true);
   assert.equal(sessions.value[0]?.pendingInteraction, undefined);
   assert.equal(isChatRunActive(sessions.value[0]!), false);
 });

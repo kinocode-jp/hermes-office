@@ -33,6 +33,14 @@ type BufferedEvents = {
   dropped: boolean;
 };
 
+/** A prompt may have reached Hermes, but Office could not observe its authoritative result. */
+export class ChatCommitUnconfirmedError extends Error {
+  constructor() {
+    super("Hermes prompt commit could not be confirmed.");
+    this.name = "ChatCommitUnconfirmedError";
+  }
+}
+
 /** One process-wide Hermes transport shared by every downstream Chat socket. */
 export class ChatUpstreamHub {
   readonly #runtimeSource: HermesRuntimeSource;
@@ -73,6 +81,7 @@ export class ChatUpstreamHub {
     owner: ChatSessionOwner,
     request: HermesChatRequest,
     internal?: HermesChatInternalRequestOptions,
+    authorize?: () => boolean,
   ): Promise<HermesChatResult> {
     if (this.#stopping) throw new Error("Chat hub is stopping.");
     if (request.method === "session.close") {
@@ -87,10 +96,14 @@ export class ChatUpstreamHub {
       }
       return await this.#requestUnchecked(
         request, internal,
-        () => this.#subscribers.has(owner) && this.#coordinator.ownsLiveLease(owner, sessionId, leaseToken),
+        () => this.#subscribers.has(owner) && this.#coordinator.ownsLiveLease(owner, sessionId, leaseToken)
+          && (authorize?.() ?? true),
       );
     }
-    return await this.#requestUnchecked(request, internal, () => this.#subscribers.has(owner));
+    return await this.#requestUnchecked(
+      request, internal,
+      () => this.#subscribers.has(owner) && (authorize?.() ?? true),
+    );
   }
 
   async requestOwnedSession(
@@ -98,6 +111,7 @@ export class ChatUpstreamHub {
     liveSessionId: string,
     expectedLeaseToken: symbol,
     request: HermesChatRequest,
+    authorize?: () => boolean,
   ): Promise<HermesChatResult> {
     if (this.#stopping) throw new Error("Chat hub is stopping.");
     if (!OWNED_SESSION_REQUEST_METHODS.has(request.method)) {
@@ -113,7 +127,8 @@ export class ChatUpstreamHub {
     return await this.#requestUnchecked(
       request, undefined,
       () => this.#subscribers.has(owner)
-        && this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken),
+        && this.#coordinator.ownsLiveLease(owner, liveSessionId, expectedLeaseToken)
+        && (authorize?.() ?? true),
     );
   }
 
@@ -127,13 +142,19 @@ export class ChatUpstreamHub {
     const generation = this.#generation;
     try {
       const result = await connection.request(request, internal);
-      if (generation !== this.#generation || connection !== this.#connection) throw new Error("Hermes chat generation changed.");
+      if (generation !== this.#generation || connection !== this.#connection) {
+        if (request.method === "prompt.submit") throw new ChatCommitUnconfirmedError();
+        throw new Error("Hermes chat generation changed.");
+      }
       return result;
     } catch (error) {
       if ((request.method === "session.create" || request.method === "session.resume")
         && error instanceof HermesChatTransportError && error.code === "timed_out"
         && generation === this.#generation) {
         try { await connection.close(); } finally { this.#upstreamUnavailable(generation); }
+      }
+      if (request.method === "prompt.submit" && promptCommitCouldBeUnconfirmed(error)) {
+        throw new ChatCommitUnconfirmedError();
       }
       throw error;
     }
@@ -172,7 +193,11 @@ export class ChatUpstreamHub {
     return this.#coordinator.ownedSessionLeases(owner).length === 0;
   }
 
-  async closeOwnedSession(owner: ChatSessionOwner, sessionId: string): Promise<HermesChatResult> {
+  async closeOwnedSession(
+    owner: ChatSessionOwner,
+    sessionId: string,
+    authorize?: () => boolean,
+  ): Promise<HermesChatResult> {
     const lease = this.#coordinator.leaseForSession(owner, sessionId);
     if (lease === undefined) {
       throw new Error("Hermes session is not owned by this Office connection.");
@@ -183,7 +208,7 @@ export class ChatUpstreamHub {
       // that pending claim or report a synthetic success.
       throw new Error(lease.pending ? "Hermes session identity is still pending." : "Hermes live session is unavailable.");
     }
-    const outcome = await this.#closeLease(owner, lease, 2, sessionId);
+    const outcome = await this.#closeLease(owner, lease, 2, sessionId, authorize);
     if (!outcome.completed) throw new Error("Hermes session close could not be confirmed.");
     return outcome.targetResult ?? { method: "session.close", value: { closed: true } };
   }
@@ -219,6 +244,7 @@ export class ChatUpstreamHub {
     lease: ChatSessionLeaseSnapshot,
     maxAttempts: number,
     targetSessionId?: string,
+    authorize?: () => boolean,
   ): Promise<{ completed: boolean; targetResult?: HermesChatResult }> {
     const closeToken = this.#coordinator.claimOwnedLeaseClose(owner, lease);
     if (closeToken === undefined) return { completed: false };
@@ -229,7 +255,9 @@ export class ChatUpstreamHub {
         for (const liveId of [...remaining]) {
           this.discardBufferedSession(liveId);
           try {
-            const result = await this.#requestUnchecked({ method: "session.close", params: { session_id: liveId } });
+            const result = await this.#requestUnchecked(
+              { method: "session.close", params: { session_id: liveId } }, undefined, authorize,
+            );
             if (typeof result.value.closed !== "boolean") continue;
             remaining.delete(liveId);
             if (liveId === targetSessionId) targetResult = result;
@@ -408,4 +436,11 @@ export class ChatUpstreamHub {
       catch { /* Every subscriber still receives an independent terminal signal. */ }
     }
   }
+}
+
+function promptCommitCouldBeUnconfirmed(error: unknown): boolean {
+  if (error instanceof ChatCommitUnconfirmedError) return true;
+  if (!(error instanceof HermesChatTransportError)) return true;
+  if (error.code === "invalid_request" || error.code === "connection_failed") return false;
+  return error.code !== "backend_rejected" || error.rpcCode === undefined;
 }

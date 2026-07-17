@@ -84,6 +84,8 @@ export type ChatSession = {
   pendingInteraction?: ChatPendingInteraction | undefined;
   steerPending?: boolean | undefined;
   steerOperationId?: string | undefined;
+  interruptPending?: boolean | undefined;
+  interruptOperationId?: string | undefined;
   readOnly?: boolean;
 };
 

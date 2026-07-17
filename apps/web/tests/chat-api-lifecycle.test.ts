@@ -187,11 +187,38 @@ test("prompt submit distinguishes explicit RPC rejection from commit-unknown tra
   harness.socket.respond(rejectedFrame.id, undefined, { code: -32000, message: "policy denied" });
   assert.deepEqual(await rejected, { status: "rejected", message: "policy denied" });
 
+  for (const error of [
+    { code: -32008, message: "commit outcome unknown" },
+    { code: -32000, message: "write acknowledgement lost", data: { reason: "commit_unconfirmed" } },
+  ]) {
+    const downstreamUnknown = harness.api.submitPrompt("client-prompt", "downstream maybe committed", `operation-${error.code}-${JSON.stringify(error.data)}`);
+    const downstreamFrame = harness.socket.frames("prompt.submit", "live-prompt").at(-1)!;
+    harness.socket.respond(downstreamFrame.id, undefined, error);
+    assert.deepEqual(await downstreamUnknown, { status: "unconfirmed", message: error.message });
+  }
+
   const unconfirmed = harness.api.submitPrompt("client-prompt", "maybe committed", "operation-unknown");
-  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 2);
+  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 4);
   harness.socket.close(1006, "network lost after send");
   assert.deepEqual(await unconfirmed, { status: "unconfirmed", message: "Chat接続が切断されました。" });
-  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 2, "prompt.submit must not be replayed");
+  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 4, "prompt.submit must not be replayed");
+  harness.api.stop();
+});
+
+test("interrupt resolves only after its RPC acknowledgement", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "client-stop", profileId: "coder" });
+  await flush();
+  const create = harness.socket.frame("session.create", "coder")!;
+  harness.socket.respond(create.id, { session_id: "live-stop" });
+  await flush();
+  let settled = false;
+  const stopping = harness.api.interrupt("client-stop").then(() => { settled = true; });
+  const frame = harness.socket.frame("session.interrupt", "live-stop")!;
+  assert.equal(settled, false);
+  harness.socket.respond(frame.id, { status: "accepted" });
+  await stopping;
+  assert.equal(settled, true);
   harness.api.stop();
 });
 

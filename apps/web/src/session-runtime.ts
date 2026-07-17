@@ -11,7 +11,7 @@ export function mergeServerSessionStatus(previous: ChatSession | undefined, acti
 
 export function canSubmitChatPrompt(session: ChatSession): boolean {
   const connected = session.remoteKind === "demo" || session.connectionState === "ready";
-  return connected && session.status === "ready" && session.steerPending !== true && !isChatRunActive(session);
+  return connected && session.status === "ready" && session.steerPending !== true && session.interruptPending !== true && !isChatRunActive(session);
 }
 
 export function canSteerChatSession(session: ChatSession): boolean {
@@ -20,7 +20,8 @@ export function canSteerChatSession(session: ChatSession): boolean {
     && typeof session.liveSessionId === "string" && session.liveSessionId.length > 0
     && isChatRunActive(session)
     && session.pendingInteraction === undefined
-    && session.steerPending !== true;
+    && session.steerPending !== true
+    && session.interruptPending !== true;
 }
 
 export function isChatRunActive(session: ChatSession): boolean {

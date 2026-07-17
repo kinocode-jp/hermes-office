@@ -8,6 +8,7 @@ import { isKanbanHttpPath, isKanbanMutation, routeKanbanHttp } from "./kanban-ht
 import { isSettingsHttpPath, isSettingsMutation, routeSettingsHttp } from "./settings-http.js";
 import { DeviceAuthBodyError, readDeviceAuthBody } from "./device-auth-http.js";
 import { ChatDeviceRateLimiter, handleOfficeChatConnection } from "./chat-gateway.js";
+import { createChatSocketAuthGuard, invalidateChatSocket, type ChatSocketAuthGuard } from "./chat-socket-auth.js";
 import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
 import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
@@ -88,6 +89,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const eventSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
   const chatSocketPrincipals = new WeakMap<WebSocket, string>();
   const chatSocketSessions = new WeakMap<WebSocket, import("./office-auth.js").OfficeAuthSession>();
+  const chatSocketAuthGuards = new WeakMap<WebSocket, ChatSocketAuthGuard>();
   const chatDeviceLimiter = new ChatDeviceRateLimiter();
   const chatSessionCoordinator = new ChatSessionCoordinator();
   const chatUpstreamHub = runtimeSource === undefined ? undefined : new ChatUpstreamHub(runtimeSource, chatSessionCoordinator, maxJsonBytes);
@@ -116,7 +118,10 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         if (eventSocketPrincipals.get(client) === record.actorId) client.close(1008, "Session revoked");
       }
       for (const client of chatWebSocketServer.clients) {
-        if (chatSocketPrincipals.get(client) === record.actorId) client.close(1008, "Session revoked");
+        if (chatSocketPrincipals.get(client) === record.actorId) {
+          invalidateChatSocket(client, chatSocketAuthGuards);
+          client.close(1008, "Session revoked");
+        }
       }
     }
   };
@@ -293,7 +298,10 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       catch { writeError(response, 400, "bad_request", "Device identifier is malformed.", maxJsonBytes); return; }
       if (!await auth.revokeDevice(access.session, deviceId)) { writeError(response, 404, "not_found", "Active device was not found.", maxJsonBytes); return; }
       for (const client of websocketServer.clients) if (eventSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
-      for (const client of chatWebSocketServer.clients) if (chatSocketPrincipals.get(client) === deviceId) client.close(1008, "Device revoked");
+      for (const client of chatWebSocketServer.clients) if (chatSocketPrincipals.get(client) === deviceId) {
+        invalidateChatSocket(client, chatSocketAuthGuards);
+        client.close(1008, "Device revoked");
+      }
       writeJson(response, 200, { ok: true }, maxResponseJsonBytes);
       return;
     }
@@ -452,8 +460,12 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       (isChat ? chatSocketPrincipals : eventSocketPrincipals).set(websocket, authenticatedSession.principal.id);
       if (isChat) chatSocketSessions.set(websocket, authenticatedSession);
       else eventSocketSessions.set(websocket, authenticatedSession);
+      if (isChat) chatSocketAuthGuards.set(websocket, createChatSocketAuthGuard(auth, request, authenticatedSession));
       const expiryDelay = Math.max(1, Date.parse(authenticatedSession.expiresAt) - Date.now());
-      const expiryTimer = setTimeout(() => websocket.close(1008, "Session expired"), expiryDelay);
+      const expiryTimer = setTimeout(() => {
+        if (isChat) invalidateChatSocket(websocket, chatSocketAuthGuards);
+        websocket.close(1008, "Session expired");
+      }, expiryDelay);
       websocket.once("close", () => clearTimeout(expiryTimer));
       targetServer.emit("connection", websocket, request);
     });
@@ -478,9 +490,11 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   chatWebSocketServer.on("connection", (client) => {
     if (runtimeSource === undefined || chatUpstreamHub === undefined) { client.close(1013, "Hermes runtime unavailable"); return; }
     const officeSession = chatSocketSessions.get(client);
-    if (officeSession === undefined) { client.close(1008, "Office session unavailable"); return; }
+    const authGuard = chatSocketAuthGuards.get(client);
+    if (officeSession === undefined || authGuard === undefined) { client.close(1008, "Office session unavailable"); return; }
     handleOfficeChatConnection(client, {
       auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter, sessionCoordinator: chatSessionCoordinator, chatHub: chatUpstreamHub,
+      sessionIsActive: authGuard.isActive, invalidationSignal: authGuard.signal,
     });
   });
 
