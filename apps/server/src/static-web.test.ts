@@ -11,9 +11,13 @@ test("serves the app shell and immutable built assets", async () => {
     const assets = new StaticWebAssets(root);
     const shell = await assets.read("/");
     const script = await assets.read("/assets/app-123.js");
+    const atlas = await assets.read("/characters/hermes-office-character-atlas-v4.webp");
+    const manifest = await assets.read("/manifest.webmanifest");
     assert.equal(shell?.body.toString(), "<main>Office</main>");
     assert.equal(shell?.cacheControl, "no-cache");
     assert.equal(script?.contentType, "text/javascript; charset=utf-8");
+    assert.equal(atlas?.contentType, "image/webp");
+    assert.equal(manifest?.contentType, "application/manifest+json; charset=utf-8");
     assert.match(script?.cacheControl ?? "", /immutable/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -63,7 +67,10 @@ test("does not follow a web-root symlink to files outside the configured directo
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hermes-office-web-"));
   await mkdir(join(root, "assets"));
+  await mkdir(join(root, "characters"));
   await writeFile(join(root, "index.html"), "<main>Office</main>");
   await writeFile(join(root, "assets/app-123.js"), "export {};");
+  await writeFile(join(root, "characters/hermes-office-character-atlas-v4.webp"), "webp");
+  await writeFile(join(root, "manifest.webmanifest"), "{}");
   return root;
 }

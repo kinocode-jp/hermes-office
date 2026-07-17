@@ -5,11 +5,13 @@ import { reconcileChatSessionConnecting, reconcileChatSessionReady } from "../sr
 import type { ChatSession } from "../src/domain.ts";
 import { canSubmitChatPrompt, isChatRunActive } from "../src/session-runtime.ts";
 import {
+  applyChatHistory,
   applyChatGatewayEvent,
   reduceChatGatewayEvent,
   registerChatRuntime,
   sendMessage,
   sessions,
+  setChatHistoryLoading,
   setChatSessionConnecting,
   setChatSessionDisconnected,
   setChatSessionError,
@@ -187,6 +189,87 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   api.stop();
 });
 
+test("1013 reload-history resets the old transcript before preserving only the new live tail", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const resyncHistory = deferred<unknown>();
+  const resetSignals: boolean[] = [];
+  let historyRequest = 0;
+  let rpcSequence = 0;
+  const api = connectChatApi({
+    onSocketState() {},
+    onHistoryLoading(sessionId, resetTranscript) {
+      resetSignals.push(resetTranscript === true);
+      setChatHistoryLoading(sessionId, resetTranscript);
+    },
+    onHistory: applyChatHistory,
+    onHistoryError() {},
+    onSessionConnecting: setChatSessionConnecting,
+    onSessionReady: setChatSessionReady,
+    onSessionDisconnected: setChatSessionDisconnected,
+    onSessionError: setChatSessionError,
+    onEvent: applyChatGatewayEvent,
+  }, {
+    serverUrl: "http://127.0.0.1:4317",
+    createWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    fetchJson: async <T>() => {
+      historyRequest += 1;
+      if (historyRequest === 1) return savedHistory() as T;
+      return await resyncHistory.promise as T;
+    },
+    reconnectDelay: () => 0,
+    randomId: () => `resync-rpc-${++rpcSequence}`,
+  });
+  registerChatRuntime(api);
+  sessions.value = [{ ...baseSession, messages: [] }];
+  api.ensureSession({ clientSessionId: baseSession.id, profileId: baseSession.profileId, storedSessionId: baseSession.storedSessionId });
+
+  await waitFor(() => sockets.length === 1);
+  const oldSocket = sockets[0]!;
+  await flush();
+  oldSocket.open();
+  await waitFor(() => oldSocket.frame("session.resume") !== undefined && sessions.value[0]?.historyState === "loaded");
+  oldSocket.respond(oldSocket.frame("session.resume")!.id, { liveSessionId: "live-old", storedSessionId: "stored-1", running: false });
+  await flush();
+  oldSocket.event("live-old", "message.complete", { messageId: "old-live-copy", text: "saved answer" });
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["saved-user", "saved-agent", "old-live-copy"]);
+
+  oldSocket.close(1013, "Hermes chat restarted; reload history");
+  await waitFor(() => sockets.length === 2);
+  const newSocket = sockets[1]!;
+  await flush();
+  newSocket.open();
+  await waitFor(() => historyRequest === 2 && newSocket.frame("session.resume") !== undefined);
+  assert.deepEqual(resetSignals, [false, true]);
+  assert.equal(sessions.value[0]?.historyState, "loading");
+  assert.deepEqual(sessions.value[0]?.messages, []);
+
+  newSocket.respond(newSocket.frame("session.resume")!.id, { liveSessionId: "live-new", storedSessionId: "stored-1", running: true });
+  await flush();
+  newSocket.event("live-new", "message.start", { messageId: "fresh-tail" });
+  newSocket.event("live-new", "message.delta", { messageId: "fresh-tail", text: "new tail" });
+  resyncHistory.resolve(savedHistory());
+  await waitFor(() => sessions.value[0]?.historyState === "loaded");
+
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["saved-user", "saved-agent", "fresh-tail"]);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ body }) => body), ["saved prompt", "saved answer", "new tail"]);
+  api.stop();
+});
+
+function savedHistory(): unknown {
+  return {
+    sessionId: "stored-1",
+    messages: [
+      { id: "saved-user", role: "user", text: "saved prompt" },
+      { id: "saved-agent", role: "assistant", text: "saved answer" },
+    ],
+    pagination: { direction: "older", hasMore: false, returned: 2 },
+  };
+}
+
 type RpcFrame = { id: string; method: string; params: Record<string, string> };
 
 class FakeWebSocket {
@@ -217,6 +300,11 @@ class FakeWebSocket {
 }
 
 async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;

@@ -14,8 +14,8 @@ const session: ChatSession = {
   remoteKind: "stored"
 };
 
-test("resumed history keeps its ordered latest window before newer live messages", () => {
-  sessions.value = [{ ...session, messages: [{ id: "live-501", from: "agent", body: "live", at: "12:03", status: "complete" }] }];
+test("resumed history keeps its ordered latest window before a legitimate same-text live message", () => {
+  sessions.value = [{ ...session, messages: [{ id: "live-501", from: "agent", body: "saved agent", at: "12:03", status: "complete" }] }];
   applyChatHistory(session.id, [
     { id: "saved-499", from: "user", body: "saved user", at: "12:01", status: "complete" },
     { id: "saved-500", from: "agent", body: "saved agent", at: "12:02", status: "complete" },
@@ -98,7 +98,7 @@ test("an older approval completion cannot clear a newly promoted approval", asyn
   let resolve!: () => void;
   const submitted: string[] = [];
   registerChatRuntime({
-    ensureSession() {}, releaseSession() {}, submitPrompt() {}, async steer() {}, interrupt() {},
+    ensureSession() {}, releaseSession() {}, submitPrompt() {}, async steer() { return { status: "queued" }; }, interrupt() {},
     async respondClarify() {},
     respondApproval: async (_sessionId, approvalId) => {
       submitted.push(approvalId);

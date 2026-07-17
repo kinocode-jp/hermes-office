@@ -11,7 +11,7 @@ export function mergeServerSessionStatus(previous: ChatSession | undefined, acti
 
 export function canSubmitChatPrompt(session: ChatSession): boolean {
   const connected = session.remoteKind === "demo" || session.connectionState === "ready";
-  return connected && session.status === "ready" && !isChatRunActive(session);
+  return connected && session.status === "ready" && session.steerPending !== true && !isChatRunActive(session);
 }
 
 export function canSteerChatSession(session: ChatSession): boolean {

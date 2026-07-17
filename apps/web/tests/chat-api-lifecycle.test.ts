@@ -150,8 +150,23 @@ test("steer sends one exact live session.steer request and rejects empty or unre
   assert.deepEqual(frame.params, { session_id: "live-steer", text: "focus on tests" });
   assert.equal(harness.socket.frames("session.steer", "live-steer").length, 1);
   assert.equal(harness.socket.frames("session.steer", "live-other").length, 0);
-  harness.socket.respond(frame.id, { accepted: true });
-  await request;
+  harness.socket.respond(frame.id, { status: "queued" });
+  assert.deepEqual(await request, { status: "queued" });
+
+  const enveloped = harness.api.steer("client-steer", "enveloped response");
+  const envelopedFrame = harness.socket.frames("session.steer", "live-steer").at(-1)!;
+  harness.socket.respond(envelopedFrame.id, { method: "session.steer", value: { status: "queued" } });
+  assert.deepEqual(await enveloped, { status: "queued" });
+
+  const rejected = harness.api.steer("client-steer", "reject this");
+  const rejectedFrame = harness.socket.frames("session.steer", "live-steer").at(-1)!;
+  harness.socket.respond(rejectedFrame.id, { status: "rejected" });
+  assert.deepEqual(await rejected, { status: "rejected" });
+
+  const malformed = harness.api.steer("client-steer", "invalid ack");
+  const malformedFrame = harness.socket.frames("session.steer", "live-steer").at(-1)!;
+  harness.socket.respond(malformedFrame.id, { status: "accepted" });
+  assert.deepEqual(await malformed, { status: "invalid" });
   harness.api.stop();
 });
 
@@ -165,7 +180,7 @@ test("steer never crosses a target generation, release, or transport close", asy
   const stale = harness.api.steer("client-race", "old generation only");
   const staleFrame = harness.socket.frame("session.steer", "live-old")!;
   harness.api.ensureSession({ clientSessionId: "client-race", profileId: "new" });
-  harness.socket.respond(staleFrame.id, { accepted: true });
+  harness.socket.respond(staleFrame.id, { status: "queued" });
   await assert.rejects(stale, /送信先が変更/);
   const createNew = harness.socket.frame("session.create", "new")!;
   harness.socket.respond(createNew.id, { session_id: "live-new" });

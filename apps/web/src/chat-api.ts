@@ -28,7 +28,7 @@ export type ChatGatewayEvent = {
 
 export type ChatApiCallbacks = {
   onSocketState(state: "disconnected" | "connecting" | "ready" | "error", message?: string): void;
-  onHistoryLoading(clientSessionId: string): void;
+  onHistoryLoading(clientSessionId: string, resetTranscript?: boolean): void;
   onHistory(clientSessionId: string, messages: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void;
   onHistoryError(clientSessionId: string, message: string): void;
   onSessionConnecting(clientSessionId: string): void;
@@ -40,11 +40,16 @@ export type ChatApiCallbacks = {
 
 export type ChatSessionRuntime = { running?: boolean; status?: string };
 
+export type ChatSteerResult =
+  | { status: "queued" }
+  | { status: "rejected" }
+  | { status: "invalid" };
+
 export type ChatApiConnection = {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
   submitPrompt(clientSessionId: string, text: string): void;
-  steer(clientSessionId: string, text: string): Promise<void>;
+  steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
   respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
@@ -107,6 +112,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   const opening = new Map<string, symbol>();
   const historyLoads = new Map<string, symbol>();
   const loadedHistories = new Map<string, ActiveTarget>();
+  const historiesAwaitingReset = new Set<string>();
   let nextGeneration = 0;
   let socket: WebSocket | undefined;
   let socketOpening = false;
@@ -163,8 +169,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     socketOpened = false;
     socketFailedBeforeOpen = false;
     opening.clear();
+    historyLoads.clear();
     liveToClient.clear();
-    if (historyResyncRequired) loadedHistories.clear();
+    if (historyResyncRequired) {
+      loadedHistories.clear();
+      for (const clientSessionId of targets.keys()) historiesAwaitingReset.add(clientSessionId);
+    }
     rejectPending("Chat接続が切断されました。");
     for (const clientSessionId of targets.keys()) callbacks.onSessionDisconnected(clientSessionId);
     callbacks.onSocketState(
@@ -383,14 +393,16 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     const target = active.target;
     const operation = Symbol("history");
     if (!isCurrentTarget(active) || loadedHistories.get(target.clientSessionId) === active || historyLoads.has(target.clientSessionId)) return;
+    const resetTranscript = historiesAwaitingReset.delete(target.clientSessionId);
     if (!target.storedSessionId) {
       if (!isCurrentTarget(active)) return;
+      if (resetTranscript) callbacks.onHistoryLoading(target.clientSessionId, true);
       loadedHistories.set(target.clientSessionId, active);
       callbacks.onHistory(target.clientSessionId, []);
       return;
     }
     historyLoads.set(target.clientSessionId, operation);
-    callbacks.onHistoryLoading(target.clientSessionId);
+    callbacks.onHistoryLoading(target.clientSessionId, resetTranscript);
     const history = new HistoryAccumulator();
     let resolvedStoredSessionId: string | undefined;
     try {
@@ -403,7 +415,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
           { timeoutMs: HISTORY_TIMEOUT_MS },
           serverUrl
         );
-        if (!isCurrentTarget(active)) return;
+        if (!isCurrentHistoryLoad(active, operation)) return;
         const page = normalizeHistoryPage(body, target.storedSessionId);
         resolvedStoredSessionId = page.resolvedStoredSessionId ?? resolvedStoredSessionId;
         const shouldContinue = history.append(page);
@@ -411,23 +423,26 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         if (page.nextCursor === undefined || page.messages.length === 0 || pageNumber === MAX_HISTORY_PAGES - 1) throw new Error("保存済み履歴の継続情報が安全上限と一致しません。");
         cursor = page.nextCursor;
       }
-      if (!isCurrentTarget(active)) return;
+      if (!isCurrentHistoryLoad(active, operation)) return;
       if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
       loadedHistories.set(target.clientSessionId, active);
       callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, history.result());
     } catch (error) {
-      if (isCurrentTarget(active) && history.messages.length > 0) {
+      if (isCurrentHistoryLoad(active, operation) && history.messages.length > 0) {
         history.fail(errorText(error));
         if (resolvedStoredSessionId) active.target = { ...active.target, storedSessionId: resolvedStoredSessionId };
         loadedHistories.set(target.clientSessionId, active);
         callbacks.onHistory(target.clientSessionId, history.messages, resolvedStoredSessionId, history.result());
-      } else if (isCurrentTarget(active)) callbacks.onHistoryError(target.clientSessionId, errorText(error));
+      } else if (isCurrentHistoryLoad(active, operation)) callbacks.onHistoryError(target.clientSessionId, errorText(error));
     } finally {
       if (historyLoads.get(target.clientSessionId) === operation) historyLoads.delete(target.clientSessionId);
     }
   };
 
   const isCurrentTarget = (active: ActiveTarget): boolean => targets.get(active.target.clientSessionId) === active;
+  const isCurrentHistoryLoad = (active: ActiveTarget, operation: symbol): boolean => (
+    isCurrentTarget(active) && historyLoads.get(active.target.clientSessionId) === operation
+  );
 
   const bestEffortClose = (liveSessionId: string): void => {
     if (socket?.readyState === WebSocket.OPEN) void rpc("session.close", { session_id: liveSessionId }).catch(() => undefined);
@@ -440,6 +455,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     opening.delete(clientSessionId);
     historyLoads.delete(clientSessionId);
     loadedHistories.delete(clientSessionId);
+    historiesAwaitingReset.delete(clientSessionId);
     for (const [liveSessionId, mapped] of liveToClient) {
       if (mapped.clientSessionId !== clientSessionId || mapped.generation !== active.generation) continue;
       liveToClient.delete(liveSessionId);
@@ -523,10 +539,11 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
         throw new Error("Live Sessionが未接続です。");
       }
-      await rpc("session.steer", { session_id: liveSessionId, text: trimmed });
+      const raw = await rpc("session.steer", { session_id: liveSessionId, text: trimmed });
       if (!isCurrentTarget(active) || socket !== requestSocket || liveSessionIdFor(active, liveToClient) !== liveSessionId) {
         throw new Error("追加指示の送信先が変更されました。現在のセッションで再試行してください。");
       }
+      return normalizeSteerResult(raw);
     },
     interrupt(clientSessionId) {
       const active = targets.get(clientSessionId);
@@ -597,6 +614,14 @@ function targetsMatch(current: ChatTarget, incoming: ChatTarget): boolean {
   return current.clientSessionId === incoming.clientSessionId
     && current.profileId === incoming.profileId
     && (incoming.storedSessionId === undefined || current.storedSessionId === incoming.storedSessionId);
+}
+
+export function normalizeSteerResult(value: unknown): ChatSteerResult {
+  const outer = asRecord(value);
+  const result = asRecord(outer?.value) ?? outer;
+  if (result?.status === "queued") return { status: "queued" };
+  if (result?.status === "rejected") return { status: "rejected" };
+  return { status: "invalid" };
 }
 
 export function normalizeHistoryPage(value: unknown, storedSessionId: string): {

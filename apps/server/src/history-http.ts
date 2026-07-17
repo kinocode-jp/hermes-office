@@ -225,16 +225,19 @@ function encodeCursor(state: HistoryCursorState, requestedSessionId: string, pro
 
 function decodeCursor(value: string, requestedSessionId: string, profile: string, limits: HistoryAggregateLimits): HistoryCursorState {
   if (value.length > 512) throw new HistoryHttpInputError("History cursor is invalid.");
-  let decoded: string;
-  try { decoded = Buffer.from(value, "base64url").toString("utf8"); }
-  catch { throw new HistoryHttpInputError("History cursor is invalid."); }
+  const outer = decodeCanonicalBase64Url(value);
+  if (outer === undefined) throw new HistoryHttpInputError("History cursor is invalid.");
+  const decoded = outer.toString("utf8");
   const match = /^v3:([A-Za-z0-9_-]{2,171}):(0|[1-9][0-9]{0,8}):(0|[1-9][0-9]{0,8}):(0|[1-9][0-9]{0,8}):(0|[1-9][0-9]{0,2}):(0|[1-9][0-9]{0,5}):(0|[1-9][0-9]{0,8}):([A-Za-z0-9_-]{43})$/.exec(decoded);
   if (match === null) throw new HistoryHttpInputError("History cursor is invalid.");
+  const resolvedId = decodeCanonicalBase64Url(match[1]!);
+  const actual = decodeCanonicalBase64Url(match[8]!);
+  if (resolvedId === undefined || actual === undefined) throw new HistoryHttpInputError("History cursor is invalid.");
   const payload = decoded.slice(0, decoded.lastIndexOf(":"));
   const expected = signCursor(payload, requestedSessionId, profile);
-  const actual = Buffer.from(match[8]!, "base64url");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HistoryHttpInputError("History cursor is invalid.");
-  const sessionId = Buffer.from(match[1]!, "base64url").toString("utf8");
+  const sessionId = resolvedId.toString("utf8");
+  if (!Buffer.from(sessionId, "utf8").equals(resolvedId)) throw new HistoryHttpInputError("History cursor is invalid.");
   const state = { sessionId, start: Number(match[2]), end: Number(match[3]), offset: Number(match[4]), pages: Number(match[5]), messages: Number(match[6]), bytes: Number(match[7]) };
   if (!ID_PATTERN.test(sessionId) || !Object.values(state).slice(1).every(Number.isSafeInteger)
     || state.start > state.offset || state.offset > state.end || state.end > MAX_HISTORY_OFFSET || state.end - state.start > limits.maxMessages
@@ -242,6 +245,16 @@ function decodeCursor(value: string, requestedSessionId: string, profile: string
     throw new HistoryHttpInputError("History cursor is outside the allowed continuation range.");
   }
   return state;
+}
+
+function decodeCanonicalBase64Url(value: string): Buffer | undefined {
+  if (value.length === 0 || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
+  try {
+    const decoded = Buffer.from(value, "base64url");
+    return decoded.toString("base64url") === value ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function signCursor(payload: string, requestedSessionId: string, profile: string): Buffer {

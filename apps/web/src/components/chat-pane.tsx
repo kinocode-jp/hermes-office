@@ -76,7 +76,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             style={message.from === "agent" ? { "--agent-color": profile.color } : undefined}
           >
             <span class="visually-hidden">{message.kind === "steer" ? t("chat.steerMessage") : message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
-            {message.kind === "steer" && <span class="message-steer-mark">{t("chat.steerMessage")}</span>}
+            {message.kind === "steer" && <ChatSteerMark />}
             {message.from === "tool" && <span class="message-tool-mark" aria-hidden="true">⚙</span>}
             <p>{message.body || (message.status === "streaming" ? "…" : "")}</p>
             <time>{message.at}</time>
@@ -98,7 +98,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
           aria-busy={session.steerPending === true}
           onInput={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (shouldSubmitComposerKey(event)) {
               event.preventDefault();
               event.currentTarget.form?.requestSubmit();
             }
@@ -114,6 +114,14 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
       </form>
     </article>
   );
+}
+
+export function shouldSubmitComposerKey(event: Pick<KeyboardEvent, "key" | "shiftKey" | "isComposing" | "keyCode">): boolean {
+  return event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
+}
+
+export function ChatSteerMark() {
+  return <span class="message-steer-mark" aria-hidden="true">{t("chat.steerMessage")}</span>;
 }
 
 export function chatComposerState(session: ChatSession): { canCompose: boolean; canSteer: boolean; runActive: boolean; showStop: boolean } {

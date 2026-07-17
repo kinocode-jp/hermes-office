@@ -36,6 +36,13 @@ test("production web assets are public, HEAD-aware, cache-safe, and use a functi
     assert.equal(head.headers.get("content-length"), Buffer.byteLength("export {};").toString());
     assert.match(head.headers.get("cache-control") ?? "", /immutable/);
 
+    const atlas = await fetch(`${base}/characters/hermes-office-character-atlas-v4.webp`);
+    assert.equal(atlas.headers.get("content-type"), "image/webp");
+    assert.equal(atlas.headers.get("x-content-type-options"), "nosniff");
+    const manifest = await fetch(`${base}/manifest.webmanifest`);
+    assert.equal(manifest.headers.get("content-type"), "application/manifest+json; charset=utf-8");
+    assert.equal(manifest.headers.get("x-content-type-options"), "nosniff");
+
     const appRoute = await fetch(`${base}/settings`);
     assert.equal(await appRoute.text(), "<main>Hermes Office</main>");
     const missingAsset = await fetch(`${base}/assets/missing.js`);
@@ -83,7 +90,10 @@ test("API paths retain API routing and never receive the SPA shell", async () =>
 async function webFixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hermes-office-production-web-"));
   await mkdir(join(root, "assets"));
+  await mkdir(join(root, "characters"));
   await writeFile(join(root, "index.html"), "<main>Hermes Office</main>");
   await writeFile(join(root, "assets/app-123.js"), "export {};");
+  await writeFile(join(root, "characters/hermes-office-character-atlas-v4.webp"), "webp");
+  await writeFile(join(root, "manifest.webmanifest"), "{}");
   return root;
 }

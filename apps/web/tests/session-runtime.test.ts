@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ChatSteerResult } from "../src/chat-api.ts";
 import type { ChatSession } from "../src/domain.ts";
 import { locale, localizeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
-import { chatComposerState } from "../src/components/chat-pane.tsx";
+import { ChatSteerMark, chatComposerState, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "../src/session-runtime.ts";
 import {
   closeSession,
@@ -49,7 +50,7 @@ test("approval and clarification interactions remain waiting across stale invent
 test("sendMessage rejects every in-flight shape and atomically blocks a second prompt", () => {
   const submitted: string[] = [];
   registerChatRuntime({
-    ensureSession() {}, releaseSession() {}, async steer() {}, interrupt() {},
+    ensureSession() {}, releaseSession() {}, async steer() { return { status: "queued" }; }, interrupt() {},
     submitPrompt(_sessionId, text) { submitted.push(text); },
     async respondClarify() {}, async respondApproval() {}
   });
@@ -74,7 +75,7 @@ test("active runs steer once without changing authoritative run state", async ()
   const operation = deferred<void>();
   registerChatRuntime({
     ensureSession() {}, releaseSession() {}, submitPrompt() {}, interrupt() {},
-    async steer(sessionId, text) { requests.push({ sessionId, text }); await operation.promise; },
+    async steer(sessionId, text) { requests.push({ sessionId, text }); await operation.promise; return { status: "queued" }; },
     async respondClarify() {}, async respondApproval() {}
   });
   sessions.value = [{ ...ready, status: "streaming", liveSessionId: "live" }];
@@ -92,6 +93,10 @@ test("active runs steer once without changing authoritative run state", async ()
   assert.deepEqual(sessions.value[0]?.messages.map(({ from, kind, body }) => ({ from, kind, body })), [
     { from: "user", kind: "steer", body: "add mobile coverage" },
   ]);
+  sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, {
+    type: "message.complete", liveSessionId: "live", payload: { messageId: "agent-done", text: "done" }
+  })];
+  assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, 1);
 });
 
 test("steer eligibility fails closed while idle, disconnected, empty, or awaiting interaction", async () => {
@@ -100,7 +105,7 @@ test("steer eligibility fails closed while idle, disconnected, empty, or awaitin
   registerChatRuntime({
     ensureSession() {}, releaseSession() {}, interrupt() {},
     submitPrompt(_sessionId, text) { prompts.push(text); },
-    async steer(_sessionId, text) { requests.push(text); },
+    async steer(_sessionId, text) { requests.push(text); return { status: "queued" }; },
     async respondClarify() {}, async respondApproval() {}
   });
   sessions.value = [{ ...ready }];
@@ -129,15 +134,32 @@ test("running composer exposes Steer and Stop together but interactions take inp
   assert.deepEqual(chatComposerState(ready), { runActive: false, canSteer: false, canCompose: true, showStop: false });
 });
 
-test("steering labels, placeholders, and failures are localized in Japanese and English", () => {
+test("steering labels, placeholders, and failures are localized without overstating queue acceptance", () => {
   const previous = locale.value;
   try {
     setLocale("ja");
-    assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["追加指示", "実行中のHermesに追加指示…", "追加指示"]);
+    assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["追加指示", "実行中のHermesに追加指示…", "Hermesキュー受理"]);
     setLocale("en");
-    assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["Steer", "Add guidance for the running Hermes session…", "Steering instruction"]);
+    assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["Steer", "Add guidance for the running Hermes session…", "Accepted by Hermes queue"]);
     assert.match(localizeRuntimeMessage("追加指示を送信できませんでした。接続を確認して再試行してください。"), /Unable to send steering guidance/);
   } finally { setLocale(previous); }
+});
+
+test("composer Enter ignores IME composition in prompt and steer modes", () => {
+  const ordinaryEnter = { key: "Enter", shiftKey: false, isComposing: false, keyCode: 13 };
+  for (const current of [ready, { ...ready, status: "streaming" as const }]) {
+    assert.equal(chatComposerState(current).canCompose, true);
+    assert.equal(shouldSubmitComposerKey({ ...ordinaryEnter, isComposing: true }), false);
+    assert.equal(shouldSubmitComposerKey({ ...ordinaryEnter, keyCode: 229 }), false);
+    assert.equal(shouldSubmitComposerKey({ ...ordinaryEnter, shiftKey: true }), false);
+    assert.equal(shouldSubmitComposerKey(ordinaryEnter), true);
+  }
+});
+
+test("steer badge is decorative so its hidden semantic label is read once", () => {
+  const badge = ChatSteerMark();
+  assert.equal(badge.props["aria-hidden"], "true");
+  assert.equal(badge.props.children, t("chat.steerMessage"));
 });
 
 test("failed steering keeps the run active and reports failure without a local message", async () => {
@@ -153,12 +175,33 @@ test("failed steering keeps the run active and reports failure without a local m
   assert.match(sessions.value[0]?.errorMessage ?? "", /追加指示/);
 });
 
+test("rejected and malformed steering acknowledgements retain input and never add a success message", async (context) => {
+  for (const result of [{ status: "rejected" }, { status: "invalid" }] as const) {
+    await context.test(result.status, async () => {
+      registerChatRuntime({
+        ensureSession() {}, releaseSession() {}, submitPrompt() {}, interrupt() {},
+        async steer() { return result; },
+        async respondClarify() {}, async respondApproval() {}
+      });
+      sessions.value = [{ ...ready, status: "streaming" }];
+      assert.equal(await steerSession(ready.id, `keep ${result.status}`), false);
+      assert.equal(sessions.value[0]?.steerPending, false);
+      assert.equal(sessions.value[0]?.messages.some(({ kind }) => kind === "steer"), false);
+      assert.match(sessions.value[0]?.errorMessage ?? "", result.status === "rejected" ? /拒否/ : /受付結果/);
+      sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, {
+        type: "message.complete", liveSessionId: "live", payload: { messageId: "agent-done", text: "done" }
+      })];
+      assert.equal(sessions.value[0]?.messages.some(({ kind }) => kind === "steer"), false);
+    });
+  }
+});
+
 test("a delayed steer acknowledgement cannot overwrite a local stop", async () => {
   const operation = deferred<void>();
   const interrupts: string[] = [];
   registerChatRuntime({
     ensureSession() {}, releaseSession() {}, submitPrompt() {},
-    async steer() { await operation.promise; },
+    async steer() { await operation.promise; return { status: "queued" }; },
     interrupt(sessionId) { interrupts.push(sessionId); },
     async respondClarify() {}, async respondApproval() {}
   });
@@ -172,46 +215,50 @@ test("a delayed steer acknowledgement cannot overwrite a local stop", async () =
   assert.equal(sessions.value[0]?.messages.length, 0);
 });
 
-test("a terminal event followed by a new prompt rejects both successful and failed stale steer acknowledgements", async (context) => {
-  for (const outcome of ["success", "failure"] as const) {
-    await context.test(outcome, async () => {
-      const operation = deferred<void>();
-      const prompts: string[] = [];
-      registerChatRuntime({
-        ensureSession() {}, releaseSession() {}, interrupt() {},
-        submitPrompt(_sessionId, text) { prompts.push(text); },
-        async steer() { await operation.promise; },
-        async respondClarify() {}, async respondApproval() {}
+test("same-target terminal events retain steering until queued or rejected acknowledgement", async (context) => {
+  for (const terminal of ["message.complete", "error"] as const) {
+    for (const outcome of ["queued", "rejected"] as const) {
+      await context.test(`${terminal} before ${outcome}`, async () => {
+        const operation = deferred<ChatSteerResult>();
+        const prompts: string[] = [];
+        registerChatRuntime({
+          ensureSession() {}, releaseSession() {}, interrupt() {},
+          submitPrompt(_sessionId, text) { prompts.push(text); },
+          async steer() { return operation.promise; },
+          async respondClarify() {}, async respondApproval() {}
+        });
+        sessions.value = [{
+          ...ready,
+          status: "streaming",
+          streamingMessageId: "old-agent",
+          messages: [{ id: "old-agent", from: "agent", body: "old run", at: "00:00", status: "streaming" }],
+        }];
+
+        const pendingSteer = steerSession(ready.id, `${terminal} ${outcome}`);
+        sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, terminal === "message.complete" ? {
+          type: terminal, liveSessionId: "live", payload: { messageId: "old-agent", text: "old done" }
+        } : {
+          type: terminal, liveSessionId: "live", payload: { message: "old failed" }
+        })];
+        assert.ok(sessions.value[0]?.steerOperationId);
+        assert.equal(sessions.value[0]?.steerPending, true);
+        assert.equal(canSubmitChatPrompt(sessions.value[0]!), false);
+        sendMessage(ready.id, "new prompt");
+        assert.deepEqual(prompts, []);
+
+        operation.resolve({ status: outcome });
+        assert.equal(await pendingSteer, outcome === "queued");
+        assert.equal(sessions.value[0]?.steerPending, false);
+        assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, outcome === "queued" ? 1 : 0);
+        assert.equal(canSubmitChatPrompt(sessions.value[0]!), true);
+        if (outcome === "rejected") assert.match(sessions.value[0]?.errorMessage ?? "", /拒否/);
       });
-      sessions.value = [{
-        ...ready,
-        status: "streaming",
-        streamingMessageId: "old-agent",
-        messages: [{ id: "old-agent", from: "agent", body: "old run", at: "00:00", status: "streaming" }],
-      }];
-
-      const staleSteer = steerSession(ready.id, `stale ${outcome}`);
-      sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, {
-        type: "message.complete", liveSessionId: "live", payload: { messageId: "old-agent", text: "old done" }
-      })];
-      assert.equal(sessions.value[0]?.steerOperationId, undefined);
-      sendMessage(ready.id, "new prompt");
-      const nextRun = sessions.value[0]!;
-      assert.equal(nextRun.status, "streaming");
-      assert.deepEqual(prompts, ["new prompt"]);
-
-      if (outcome === "success") operation.resolve();
-      else operation.reject(new Error("late upstream rejection"));
-      assert.equal(await staleSteer, false);
-      assert.deepEqual(sessions.value[0], nextRun);
-      assert.equal(sessions.value[0]?.errorMessage, undefined);
-      assert.equal(sessions.value[0]?.messages.some(({ kind }) => kind === "steer"), false);
-    });
+    }
   }
 });
 
-test("error, disconnect, live target replacement, and close invalidate pending steer acknowledgements", async (context) => {
-  const scenarios = ["error", "disconnect", "target", "close"] as const;
+test("disconnect, live target replacement, and close invalidate pending steer acknowledgements", async (context) => {
+  const scenarios = ["disconnect", "target", "close"] as const;
   for (const scenario of scenarios) {
     await context.test(scenario, async () => {
       const operation = deferred<void>();
@@ -219,7 +266,7 @@ test("error, disconnect, live target replacement, and close invalidate pending s
       registerChatRuntime({
         ensureSession() {}, submitPrompt() {}, interrupt() {},
         releaseSession(sessionId) { released.push(sessionId); },
-        async steer() { await operation.promise; },
+        async steer() { await operation.promise; return { status: "queued" }; },
         async respondClarify() {}, async respondApproval() {}
       });
       sessions.value = [{
@@ -231,11 +278,7 @@ test("error, disconnect, live target replacement, and close invalidate pending s
       openSessionIds.value = scenario === "close" ? [ready.id] : [];
       const staleSteer = steerSession(ready.id, `stale ${scenario}`);
 
-      if (scenario === "error") {
-        sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, {
-          type: "error", liveSessionId: "live", payload: { message: "run failed" }
-        })];
-      } else if (scenario === "disconnect") {
+      if (scenario === "disconnect") {
         setChatSessionDisconnected(ready.id);
       } else if (scenario === "target") {
         setChatSessionReady(ready.id, "live-replacement", "stored", { running: true });
@@ -272,7 +315,7 @@ test("error, disconnect, live target replacement, and close invalidate pending s
 test("canonical Hermes status notifications cannot create a run and preserve an active run", () => {
   const submitted: string[] = [];
   registerChatRuntime({
-    ensureSession() {}, releaseSession() {}, async steer() {}, interrupt() {},
+    ensureSession() {}, releaseSession() {}, async steer() { return { status: "queued" }; }, interrupt() {},
     submitPrompt(_sessionId, text) { submitted.push(text); },
     async respondClarify() {}, async respondApproval() {}
   });
@@ -380,7 +423,7 @@ test("completion, interruption, and error are authoritative run terminators", ()
 
   const interrupts: string[] = [];
   registerChatRuntime({
-    ensureSession() {}, releaseSession() {}, submitPrompt() {}, async steer() {},
+    ensureSession() {}, releaseSession() {}, submitPrompt() {}, async steer() { return { status: "queued" }; },
     interrupt(sessionId) { interrupts.push(sessionId); },
     async respondClarify() {}, async respondApproval() {}
   });

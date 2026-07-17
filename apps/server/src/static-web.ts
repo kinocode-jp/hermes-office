@@ -82,9 +82,11 @@ function contentType(path: string): string {
     case ".html": return "text/html; charset=utf-8";
     case ".js": case ".mjs": return "text/javascript; charset=utf-8";
     case ".css": return "text/css; charset=utf-8";
-    case ".json": case ".webmanifest": return "application/json; charset=utf-8";
+    case ".json": return "application/json; charset=utf-8";
+    case ".webmanifest": return "application/manifest+json; charset=utf-8";
     case ".svg": return "image/svg+xml";
     case ".png": return "image/png";
+    case ".webp": return "image/webp";
     case ".ico": return "image/x-icon";
     case ".woff": return "font/woff";
     case ".woff2": return "font/woff2";

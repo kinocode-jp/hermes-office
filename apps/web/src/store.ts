@@ -1,7 +1,7 @@
 import { computed, signal } from "@preact/signals";
 import { officeInventoryReliability } from "@hermes-office/protocol";
 import { initialSessions, profiles } from "./demo-data";
-import type { ChatGatewayEvent, ChatHistoryResult, ChatTarget } from "./chat-api";
+import type { ChatGatewayEvent, ChatHistoryResult, ChatSteerResult, ChatTarget } from "./chat-api";
 import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import type { KanbanApi } from "./kanban-api";
@@ -9,7 +9,7 @@ import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
-import { interruptChatRun, invalidatePendingSteer, steerChatRun } from "./chat-run-actions";
+import { interruptChatRun, steerChatRun } from "./chat-run-actions";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
 export const tasks = signal<WorkTask[]>([]);
@@ -57,7 +57,7 @@ let retryOfficeConnection = () => {};
 let ensureChatSession = (_target: ChatTarget) => {};
 let releaseChatSession = (_clientSessionId: string) => {};
 let submitChatPrompt = (_clientSessionId: string, _text: string) => {};
-let steerChatSession: (clientSessionId: string, text: string) => Promise<void> = async () => { throw new Error("Chat runtime is not registered."); };
+let steerChatSession: (clientSessionId: string, text: string) => Promise<ChatSteerResult> = async () => { throw new Error("Chat runtime is not registered."); };
 let interruptChatSession = (_clientSessionId: string) => {};
 let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
 let respondApproval = async (_clientSessionId: string, _approvalId: string, _choice: ApprovalChoice) => {};
@@ -106,7 +106,7 @@ export function registerChatRuntime(actions: {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
   submitPrompt(clientSessionId: string, text: string): void;
-  steer(clientSessionId: string, text: string): Promise<void>;
+  steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
   respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
@@ -466,8 +466,17 @@ export function setChatSocketState(state: ChatConnectionState, message = ""): vo
   chatSocketState.value = { state, message };
 }
 
-export function setChatHistoryLoading(sessionId: string): void {
-  updateChatSession(sessionId, (session) => ({ ...session, historyState: "loading" }));
+export function setChatHistoryLoading(sessionId: string, resetTranscript = false): void {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    historyState: "loading",
+    ...(resetTranscript ? {
+      messages: [],
+      streamingMessageId: undefined,
+      historyPartial: false,
+      historyNotice: undefined,
+    } : {}),
+  }));
 }
 
 export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void {
@@ -570,7 +579,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     const completeText = stringValue(payload.text);
     const exists = session.messages.some((message) => message.id === messageId);
     return {
-      ...invalidatePendingSteer(session),
+      ...session,
       status: "ready",
       streamingMessageId: undefined,
       pendingInteraction: undefined,
@@ -602,7 +611,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
   if (event.type === "error") {
     const message = stringValue(payload.message) ?? "Hermesの実行中にエラーが発生しました。";
     return {
-      ...invalidatePendingSteer(session),
+      ...session,
       status: "ready",
       errorMessage: message,
       streamingMessageId: undefined,

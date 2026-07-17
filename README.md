@@ -39,6 +39,16 @@ Deliberate exclusions include raw Memory-file editing, destructive Memory
 reset, provider-secret entry, Skill installation/deletion, arbitrary Hermes
 RPC, and public multi-user administration.
 
+> [!NOTE]
+> A steering message shown as **Hermes queue accepted** means stock Hermes
+> returned `status: "queued"`; it does not prove that the running turn applied
+> the message. In the pinned Hermes version, guidance accepted as a turn is
+> finishing can be returned as `pending_steer` by the turn finalizer, but the
+> TUI gateway does not forward that leftover into another turn. Hermes Office
+> therefore cannot guarantee delivery at that boundary without forking Hermes,
+> and it deliberately does not retry automatically because doing so could apply
+> the same instruction twice.
+
 ## Repository layout
 
 ```text

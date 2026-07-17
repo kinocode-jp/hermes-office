@@ -1,5 +1,6 @@
 import type { Signal } from "@preact/signals";
 import type { ChatSession } from "./domain";
+import type { ChatSteerResult } from "./chat-api";
 import { canSteerChatSession, isChatRunActive } from "./session-runtime";
 import { nowTime } from "./chat-store-utils";
 
@@ -12,7 +13,7 @@ export function invalidatePendingSteer(session: ChatSession): ChatSession {
 
 export async function steerChatRun(
   state: SessionState,
-  sendSteer: (sessionId: string, text: string) => Promise<void>,
+  sendSteer: (sessionId: string, text: string) => Promise<ChatSteerResult>,
   sessionId: string,
   body: string,
 ): Promise<boolean> {
@@ -22,7 +23,18 @@ export async function steerChatRun(
   const operationId = crypto.randomUUID();
   updateSession(state, sessionId, (item) => ({ ...item, steerPending: true, steerOperationId: operationId, errorMessage: undefined }));
   try {
-    await sendSteer(sessionId, trimmed);
+    const result = await sendSteer(sessionId, trimmed);
+    if (result.status !== "queued") {
+      updateSession(state, sessionId, (item) => item.steerOperationId === operationId ? {
+        ...item,
+        steerPending: false,
+        steerOperationId: undefined,
+        errorMessage: result.status === "rejected"
+          ? "Hermesが追加指示を拒否しました。内容を確認して再試行してください。"
+          : "Hermesが追加指示の受付結果を返しませんでした。内容を保持しています。",
+      } : item);
+      return false;
+    }
     updateSession(state, sessionId, (item) => item.steerOperationId === operationId ? {
       ...item,
       steerPending: false,

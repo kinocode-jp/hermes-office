@@ -138,6 +138,16 @@ Important behavior from the current server:
   Completion is event-driven.
 - Sending while a turn is busy may queue/interrupt according to Hermes behavior;
   the UI must display backend state instead of inventing its own run state.
+- `session.steer` returns `{status: "queued"}` or `{status: "rejected"}`.
+  Office records only `queued` as **Hermes queue accepted**. This acknowledges
+  the upstream in-memory queue, not model application. At pinned commit
+  `1f89f310`, a steer arriving after the last tool batch can be drained by
+  `turn_finalizer` as `pending_steer`, while `tui_gateway/server.py` does not
+  forward that leftover to a later turn or emit an applied/deferred event.
+  Delivery at this end-of-turn boundary is therefore not guaranteed. Office
+  neither claims exactly-once delivery nor retries the text as a prompt, because
+  stock Hermes exposes no operation identity and an automatic retry could
+  duplicate a steer that was already applied.
 
 ## REST surfaces used by Office
 

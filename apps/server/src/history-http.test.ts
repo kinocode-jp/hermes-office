@@ -35,9 +35,39 @@ test("history query rejects unbounded limits, forged cursors, and cross-session 
   );
   const first = await fetchOfficeHistoryPage(chat, new URL("http://office.local/messages?limit=1"), "stored-1", 1024 * 1024);
   const cursor = first.pagination.nextCursor!;
-  const tampered = `${cursor.slice(0, -1)}${cursor.endsWith("A") ? "B" : "A"}`;
-  await assert.rejects(fetchOfficeHistoryPage(chat, new URL(`http://office.local/messages?limit=1&cursor=${tampered}`), "stored-1", 1024 * 1024), HistoryHttpInputError);
   await assert.rejects(fetchOfficeHistoryPage(chat, new URL(`http://office.local/messages?limit=1&cursor=${cursor}`), "other-session", 1024 * 1024), HistoryHttpInputError);
+});
+
+test("history cursors reject non-canonical outer, session, and signature encodings", async () => {
+  const chat = historyFixture([shortMessage(0), shortMessage(1)]);
+  const cursor = await continuationCursor(chat);
+  await assert.rejects(fetchWithCursor(chat, `${cursor}=`), HistoryHttpInputError);
+
+  const fields = decodeCursorFields(cursor);
+  fields[1] = nonCanonicalAlias(fields[1]!);
+  await assert.rejects(fetchWithCursor(chat, encodeCursorFields(fields)), HistoryHttpInputError);
+
+  const signatureAlias = decodeCursorFields(cursor);
+  signatureAlias[8] = nonCanonicalAlias(signatureAlias[8]!);
+  await assert.rejects(fetchWithCursor(chat, encodeCursorFields(signatureAlias)), HistoryHttpInputError);
+});
+
+test("history cursors reject deterministic semantic payload tampering", async () => {
+  const chat = historyFixture([shortMessage(0), shortMessage(1)]);
+  const cursor = await continuationCursor(chat);
+  const payloadTamper = decodeCursorFields(cursor);
+  payloadTamper[4] = payloadTamper[4] === "0" ? "1" : "0";
+  await assert.rejects(fetchWithCursor(chat, encodeCursorFields(payloadTamper)), HistoryHttpInputError);
+});
+
+test("history cursors reject deterministic signature bit tampering", async () => {
+  const chat = historyFixture([shortMessage(0), shortMessage(1)]);
+  const cursor = await continuationCursor(chat);
+  const signatureTamper = decodeCursorFields(cursor);
+  const signature = Buffer.from(signatureTamper[8]!, "base64url");
+  signature[0] = signature[0]! ^ 0x01;
+  signatureTamper[8] = signature.toString("base64url");
+  await assert.rejects(fetchWithCursor(chat, encodeCursorFields(signatureTamper)), HistoryHttpInputError);
 });
 
 test("normal tail pages are returned newest-first by page and reconstruct insertion order", async () => {
@@ -206,6 +236,34 @@ async function collectHistory(chat: HermesChatTransport, limit: number, limits?:
 
 function historyUrl(page: OfficeHistoryPage, limit = page.pagination.limit): URL {
   return new URL(`http://office.local/messages?limit=${limit}&cursor=${page.pagination.nextCursor!}`);
+}
+
+async function continuationCursor(chat: HermesChatTransport): Promise<string> {
+  const page = await fetchOfficeHistoryPage(chat, new URL("http://office.local/messages?limit=1"), "stored-1", 1024 * 1024);
+  return page.pagination.nextCursor!;
+}
+
+function fetchWithCursor(chat: HermesChatTransport, cursor: string): Promise<OfficeHistoryPage> {
+  return fetchOfficeHistoryPage(chat, new URL(`http://office.local/messages?limit=1&cursor=${encodeURIComponent(cursor)}`), "stored-1", 1024 * 1024);
+}
+
+function decodeCursorFields(cursor: string): string[] {
+  return Buffer.from(cursor, "base64url").toString("utf8").split(":");
+}
+
+function encodeCursorFields(fields: string[]): string {
+  return Buffer.from(fields.join(":"), "utf8").toString("base64url");
+}
+
+function nonCanonicalAlias(value: string): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const last = alphabet.indexOf(value.at(-1)!);
+  const unusedBits = value.length % 4 === 2 ? 4 : value.length % 4 === 3 ? 2 : 0;
+  if (last < 0 || unusedBits === 0) return `${value}=`;
+  const alias = alphabet[(last & ~((1 << unusedBits) - 1)) | 1]!;
+  assert.notEqual(alias, value.at(-1));
+  assert.deepEqual(Buffer.from(`${value.slice(0, -1)}${alias}`, "base64url"), Buffer.from(value, "base64url"));
+  return `${value.slice(0, -1)}${alias}`;
 }
 
 function shortMessage(index: number, text = `message-${index}`): HermesHistoryMessageDto {
