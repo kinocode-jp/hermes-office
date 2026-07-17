@@ -126,7 +126,7 @@ test("responsive and nested modals register with one shared keyboard owner", asy
   assert.match(overlay, /kind === "modal" \? registerModal\(overlay\)/);
   assert.match(overlay, /kind === "modal" \? !isTopmostModal\(overlay\) : hasOpenModal\(\)/);
   assert.match(avatar, /registerModal\(dialog\)/);
-  assert.match(avatar, /isTopmostModal\(dialogRef\.current\)/);
+  assert.match(avatar, /const currentDialog = dialogRef\.current;\s*if \(!currentDialog \|\| !isTopmostModal\(currentDialog\)\) return;/);
   const registry = await readFile(new URL("../src/modal-layer.ts", import.meta.url), "utf8");
   assert.match(registry, /backgroundLocks/);
   assert.match(registry, /lock\.count \+= 1/);

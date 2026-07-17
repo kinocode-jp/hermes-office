@@ -328,7 +328,7 @@ test("small phones preserve scaled primary navigation, safe areas, and touch tar
 
 test("compact Profile overlays keep 44px controls through 768, 1024, and 1279px", async () => {
   const appearance = await readFile(new URL("../src/appearance.css", import.meta.url), "utf8");
-  const compactRule = appearance.match(/@media \(max-width: (\d+)px\) \{([\s\S]*?)\n\}\n\n@media \(max-width: 767px\)/);
+  const compactRule = appearance.match(/@media \(max-width: (1279)px\) \{([\s\S]*?)\n\}\n\n@media \(max-width: 767px\)/);
   assert.ok(compactRule, "compact touch-target rules must precede the phone-only rules");
   const maxWidth = Number(compactRule[1]);
   for (const viewport of [768, 1024, 1279]) {
