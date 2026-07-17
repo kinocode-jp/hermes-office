@@ -99,6 +99,44 @@ test("gateway delivers a bounded multibyte event instead of silently dropping it
   assert.equal(event.params.payload.truncated, true);
 });
 
+test("gateway terminalizes a bound live stream after its cumulative event budget", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => { publish = onEvent; return connection(); }),
+    maxJsonBytes: 1_024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    limits: { maxLiveEventCount: 2, maxLiveEventBytes: 8 * 1_024 },
+  });
+  await flush();
+  await bindSessions(client, "bounded-live");
+  publish({ type: "message.delta", sessionId: "bounded-live", payload: { text: "one" } });
+  publish({ type: "message.delta", sessionId: "bounded-live", payload: { text: "two" } });
+  publish({ type: "message.delta", sessionId: "bounded-live", payload: { text: "three" } });
+
+  const terminal = client.events().at(-1);
+  assert.equal(terminal?.type, "error");
+  assert.equal((terminal?.payload as { status?: string } | undefined)?.status, "resync_required");
+  assert.deepEqual(client.closed, { code: 1013, reason: "Live event safety limit exceeded; reload history" });
+
+  let publishByBytes!: (event: HermesChatEvent) => void;
+  const byteLimited = new FakeWebSocket();
+  handleOfficeChatConnection(byteLimited as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: { ...REMOTE_SESSION, principal: { ...REMOTE_SESSION.principal, id: "byte-limited" } },
+    runtimeSource: runtimeWithConnections((onEvent) => { publishByBytes = onEvent; return connection(); }),
+    maxJsonBytes: 1_024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    limits: { maxLiveEventCount: 100, maxLiveEventBytes: 1 },
+  });
+  await flush();
+  await bindSessions(byteLimited, "byte-live");
+  publishByBytes({ type: "message.delta", sessionId: "byte-live", payload: { text: "oversized cumulatively" } });
+  assert.equal(byteLimited.events().at(-1)?.type, "error");
+  assert.equal((byteLimited.events().at(-1)?.payload as { status?: string } | undefined)?.status, "resync_required");
+  assert.equal(byteLimited.closed?.code, 1013);
+});
+
 test("gateway fails closed when its shared session coordinator is not injected", () => {
   const client = new FakeWebSocket();
   const incomplete = {
@@ -303,6 +341,51 @@ test("approval and clarification claims are exclusive and recover only after tim
   await flush();
   assert.equal(requests.length, 5);
   assert.equal(client.errorCode(29), -32004);
+});
+
+test("malformed interaction acknowledgements restore the pending claim", async () => {
+  let publish!: (event: HermesChatEvent) => void;
+  let approvalAttempts = 0;
+  let clarifyAttempts = 0;
+  const client = new FakeWebSocket();
+  handleOfficeChatConnection(client as unknown as WebSocket, {
+    auth: new OfficeAuth(), officeSession: REMOTE_SESSION,
+    runtimeSource: runtimeWithConnections((onEvent) => {
+      publish = onEvent;
+      return connection(async (request) => {
+        if (request.method === "approval.respond") {
+          approvalAttempts += 1;
+          return { method: request.method, value: { resolved: approvalAttempts > 1 } };
+        }
+        if (request.method === "clarify.respond") {
+          clarifyAttempts += 1;
+          return { method: request.method, value: { status: clarifyAttempts > 1 ? "ok" : "rejected" } };
+        }
+        return { method: request.method, value: { status: "ok" } };
+      });
+    }),
+    maxJsonBytes: 64 * 1024,
+    deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    limits: { socketRateCapacity: 100 },
+  });
+  await flush();
+  await bindSessions(client, "s-malformed");
+
+  publish({ type: "approval.request", sessionId: "s-malformed", payload: { choices: ["once"], allowPermanent: false } });
+  client.rpc(110, "approval.respond", { session_id: "s-malformed", choice: "once" });
+  await flush();
+  assert.equal(client.errorCode(110), -32000);
+  client.rpc(111, "approval.respond", { session_id: "s-malformed", choice: "once" });
+  await flush();
+  assert.equal(client.errorCode(111), undefined);
+
+  publish({ type: "clarify.request", sessionId: "s-malformed", payload: { requestId: "q-malformed", question: "Retry?" } });
+  client.rpc(112, "clarify.respond", { request_id: "q-malformed", answer: "first" });
+  await flush();
+  assert.equal(client.errorCode(112), -32000);
+  client.rpc(113, "clarify.respond", { request_id: "q-malformed", answer: "second" });
+  await flush();
+  assert.equal(client.errorCode(113), undefined);
 });
 
 test("a same-session approval arriving during a claim survives both success and failure of its predecessor", async () => {
@@ -605,7 +688,10 @@ function connection(
         const sessionId = String(input.params?.session_id);
         return { method: input.method, value: { liveSessionId: sessionId, storedSessionId: sessionId, running: false, status: "idle" } };
       }
-      return await request(input);
+      const result = await request(input);
+      return input.method === "approval.respond" && result.value.status === "ok" && result.value.resolved === undefined
+        ? { method: input.method, value: { resolved: true } }
+        : result;
     },
     close: close ?? (async () => undefined),
   };

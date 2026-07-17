@@ -619,7 +619,14 @@ class BareWebSocket {
     this.#listeners.set(type, listeners);
   }
   send(): void {}
-  open(): void { if (!this.#closed) { this.readyState = BareWebSocket.OPEN; this.#emit("open", new Event("open")); } }
+  open(): void {
+    if (this.#closed) return;
+    this.readyState = BareWebSocket.OPEN;
+    this.#emit("open", new Event("open"));
+    if (new URL(this.url).pathname === "/api/v1/chat") {
+      this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", method: "office.ready", params: {} }) } as MessageEvent);
+    }
+  }
   close(code = 1000, reason = ""): void { this.serverClose(code, reason); }
   serverClose(code: number, reason: string): void {
     if (this.#closed) return;

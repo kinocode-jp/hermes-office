@@ -26,6 +26,24 @@ test("resumed history keeps its ordered latest window before a legitimate same-t
   assert.equal(sessions.value[0]?.historyPartial, true);
 });
 
+test("a full history plus a later live row remains bounded and explicitly partial", () => {
+  sessions.value = [{ ...session, messages: [{ id: "live-500", from: "agent", body: "latest live", at: "12:03", status: "complete" }] }];
+  const history = Array.from({ length: 500 }, (_, index) => ({
+    id: `saved-${index}`,
+    from: "agent" as const,
+    body: `saved ${index}`,
+    at: "12:02",
+    status: "complete" as const,
+  }));
+  applyChatHistory(session.id, history, "resolved-session", {
+    truncated: false, partial: false, loadedPages: 20, loadedMessages: 500, loadedBytes: 8_000,
+  });
+  assert.equal(sessions.value[0]?.messages.length, 500);
+  assert.equal(sessions.value[0]?.messages[0]?.id, "saved-1");
+  assert.equal(sessions.value[0]?.messages.at(-1)?.id, "live-500");
+  assert.equal(sessions.value[0]?.historyPartial, true, "the omitted oldest row is never silent");
+});
+
 test("malformed saved history exposes its safe notice in chat state", () => {
   sessions.value = [{ ...session }];
   applyChatHistory(session.id, [

@@ -364,10 +364,11 @@ class FakeWebSocket {
   }
 
   send(): void {}
-  open(): void {
+  open(sendOfficeReady = true): void {
     if (this.#closed) return;
     this.readyState = WebSocket.OPEN;
     this.#emit("open", new Event("open"));
+    if (sendOfficeReady) this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", method: "office.ready", params: {} }) } as MessageEvent);
   }
   close(code = 1000, reason = ""): void {
     this.serverClose(code, reason);

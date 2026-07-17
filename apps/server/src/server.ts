@@ -392,9 +392,9 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       try { sessionId = decodeURIComponent(historyMatch[1]!); }
       catch { writeError(response, 400, "bad_request", "Session identifier is malformed.", maxJsonBytes); return; }
       try {
-        const history = await fetchOfficeHistoryPage(
+        const history = await chatUpstreamHub!.readStableHistory(async () => await fetchOfficeHistoryPage(
           runtimeSource.chat(), requestUrl, sessionId, maxResponseJsonBytes,
-        );
+        ));
         writeJson(response, 200, history, maxResponseJsonBytes);
       } catch (error) {
         if (error instanceof HistoryHttpInputError) {

@@ -588,7 +588,9 @@ class RaceFakeHermes {
       if (this.#holdInteractionResponses) {
         return await new Promise<HermesChatResult>((_resolve, reject) => { this.#heldInteractionRejects.push(reject); });
       }
-      return { method: request.method, value: { status: "ok" } };
+      return request.method === "approval.respond"
+        ? { method: request.method, value: { resolved: true } }
+        : { method: request.method, value: { status: "ok" } };
     }
     if (request.method === "session.close") {
       const liveId = String(request.params?.session_id);

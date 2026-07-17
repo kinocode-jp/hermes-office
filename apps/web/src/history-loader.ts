@@ -1,9 +1,11 @@
 import type { ChatMessage } from "./domain";
+import { CHAT_TRANSCRIPT_LIMITS } from "./chat-transcript-limits";
+import { chatMessageBytes } from "./live-transcript";
 
 export const DEFAULT_CLIENT_HISTORY_LIMITS: ClientHistoryLimits = {
-  maxPages: 40,
-  maxMessages: 500,
-  maxBytes: 8 * 1024 * 1024,
+  maxPages: CHAT_TRANSCRIPT_LIMITS.maxPages,
+  maxMessages: CHAT_TRANSCRIPT_LIMITS.maxRows,
+  maxBytes: CHAT_TRANSCRIPT_LIMITS.maxBytes,
 };
 
 export type HistoryLimitReason = "page_limit" | "message_limit" | "byte_limit" | "server_limit" | "upstream_error" | "upstream_invalid_rows";
@@ -26,8 +28,6 @@ export type ChatHistoryResult = {
   error?: string;
 };
 
-const encoder = new TextEncoder();
-
 export class HistoryAccumulator {
   readonly messages: ChatMessage[] = [];
   readonly #limits: ClientHistoryLimits;
@@ -48,7 +48,7 @@ export class HistoryAccumulator {
     const candidates = page.direction === "older" ? [...page.messages].reverse() : page.messages;
     for (const message of candidates) {
       if (this.messages.length + accepted.length >= this.#limits.maxMessages) { this.#reason = "message_limit"; break; }
-      const bytes = encoder.encode(JSON.stringify(message)).byteLength + 1;
+      const bytes = chatMessageBytes(message);
       if (this.#bytes + bytes > this.#limits.maxBytes) { this.#reason = "byte_limit"; break; }
       if (page.direction === "older") accepted.unshift(message);
       else accepted.push(message);
@@ -86,6 +86,11 @@ export class HistoryAccumulator {
       ...(this.#error === undefined ? {} : { error: this.#error }),
     };
   }
+}
+
+export function historyCanSatisfyReconnectBarrier(result: ChatHistoryResult): boolean {
+  if (result.reason === "message_limit") return true;
+  return !result.partial && result.reason === undefined;
 }
 
 function normalizeReason(value: string | undefined): HistoryLimitReason {

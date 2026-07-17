@@ -109,10 +109,14 @@ test("profile-scoped client IDs isolate resume, history, and events for equal st
 });
 
 test("session-in-use errors are localized and the same target can retry resume", async () => {
-  const harness = await createHarness(async <T>() => ({
-    sessionId: "stored-busy", messages: [],
-    pagination: { direction: "older", hasMore: false, returned: 0 },
-  }) as T);
+  let historyLoads = 0;
+  const harness = await createHarness(async <T>() => {
+    historyLoads += 1;
+    return {
+      sessionId: "stored-busy", messages: [],
+      pagination: { direction: "older", hasMore: false, returned: 0 },
+    } as T;
+  });
   const target = { clientSessionId: "busy-client", profileId: "coder", storedSessionId: "stored-busy" };
   harness.api.ensureSession(target);
   await flush();
@@ -130,7 +134,28 @@ test("session-in-use errors are localized and the same target can retry resume",
 
   harness.api.ensureSession(target);
   await flush();
+  assert.equal(historyLoads, 2, "retry re-fetches history after the prior owner's cleanup race");
   assert.equal(harness.socket.frames("session.resume", "stored-busy").length, 2);
+  harness.api.stop();
+});
+
+test("interaction methods reject malformed success acknowledgements", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "interaction-client", profileId: "coder" });
+  await flush();
+  const create = harness.socket.frame("session.create", "coder")!;
+  harness.socket.respond(create.id, { session_id: "live-interaction" });
+  await flush();
+
+  const approval = harness.api.respondApproval("interaction-client", "approval-1", "once");
+  const approvalFrame = harness.socket.frames("approval.respond", "approval-1").at(-1)!;
+  harness.socket.respond(approvalFrame.id, { resolved: false });
+  await assert.rejects(approval, /不正な承認確認/);
+
+  const clarification = harness.api.respondClarify("interaction-client", "clarify-1", "answer");
+  const clarifyFrame = harness.socket.frames("clarify.respond", "clarify-1").at(-1)!;
+  harness.socket.respond(clarifyFrame.id, { status: "rejected" });
+  await assert.rejects(clarification, /不正な回答確認/);
   harness.api.stop();
 });
 
@@ -217,6 +242,26 @@ test("commit_unconfirmed data is ambiguous even when the generic RPC code is use
   });
   assert.deepEqual(await submission, { status: "unconfirmed", message: "write acknowledgement lost" });
   assert.equal(harness.socket.frames("prompt.submit", "live-reason").length, 1);
+  harness.api.stop();
+});
+
+test("a client transcript overflow enters the durable history barrier instead of trimming a suffix", async () => {
+  const harness = await createHarness(async <T>() => ({
+    sessionId: "stored-bounded", messages: [],
+    pagination: { direction: "older", hasMore: false, returned: 0 },
+  }) as T, () => "resync-required");
+  harness.api.ensureSession({ clientSessionId: "bounded-client", profileId: "coder", storedSessionId: "stored-bounded" });
+  await waitFor(() => harness.socket.frames("session.resume", "stored-bounded").length === 1);
+  const resume = harness.socket.frame("session.resume", "stored-bounded")!;
+  harness.socket.respond(resume.id, { session_id: "live-bounded", stored_session_id: "stored-bounded" });
+  await flush();
+
+  harness.socket.event("live-bounded", "message.delta");
+  assert.deepEqual(harness.socket.closes[0], {
+    code: 4001,
+    reason: "Live transcript safety limit exceeded; reload history",
+  });
+  assert.ok(harness.disconnections.filter((id) => id === "bounded-client").length >= 1);
   harness.api.stop();
 });
 
@@ -352,7 +397,10 @@ test("a history error blocks resume until an explicit retry establishes the snap
   harness.api.stop();
 });
 
-async function createHarness(fetchJson?: <T>(path: string, options?: unknown, serverUrl?: string) => Promise<T>) {
+async function createHarness(
+  fetchJson?: <T>(path: string, options?: unknown, serverUrl?: string) => Promise<T>,
+  eventResult?: (clientSessionId: string) => "resync-required" | void,
+) {
   const socket = new FakeWebSocket();
   const ready: Array<{ clientSessionId: string; liveSessionId: string }> = [];
   const histories: string[] = [];
@@ -360,15 +408,17 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   const historyResults: Array<{ clientSessionId: string; messages: number; result: Pick<ChatHistoryResult, "truncated" | "partial" | "reason"> }> = [];
   const historyErrors: Array<{ clientSessionId: string; message: string }> = [];
   const events: string[] = [];
+  const disconnections: string[] = [];
   const errors: Array<{ clientSessionId: string; message: string }> = [];
   let sequence = 0;
   const callbacks: ChatApiCallbacks = {
-    onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {},
+    onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {},
+    onSessionDisconnected(clientSessionId) { disconnections.push(clientSessionId); },
     onHistoryError(clientSessionId, message) { historyErrors.push({ clientSessionId, message }); },
     onSessionError(clientSessionId, message) { errors.push({ clientSessionId, message }); },
     onHistory(clientSessionId, messages, _storedSessionId, result) { histories.push(clientSessionId); historyBodies.push(messages.map(({ body }) => body)); if (result) historyResults.push({ clientSessionId, messages: messages.length, result: { truncated: result.truncated, partial: result.partial, ...(result.reason ? { reason: result.reason } : {}) } }); },
     onSessionReady(clientSessionId, liveSessionId) { ready.push({ clientSessionId, liveSessionId }); },
-    onEvent(clientSessionId) { events.push(clientSessionId); },
+    onEvent(clientSessionId) { events.push(clientSessionId); return eventResult?.(clientSessionId); },
   };
   const api = connectChatApi(callbacks, {
     serverUrl: "http://127.0.0.1:4317",
@@ -379,7 +429,7 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   await flush();
   socket.open();
   await flush();
-  return { api, socket, ready, histories, historyBodies, historyResults, historyErrors, events, errors };
+  return { api, socket, ready, histories, historyBodies, historyResults, historyErrors, events, errors, disconnections };
 }
 
 type RpcFrame = { id: string; method: string; params: Record<string, string> };
@@ -387,6 +437,7 @@ type RpcFrame = { id: string; method: string; params: Record<string, string> };
 class FakeWebSocket {
   readyState = WebSocket.CONNECTING;
   readonly sent: RpcFrame[] = [];
+  readonly closes: Array<{ code: number; reason: string }> = [];
   readonly #listeners = new Map<string, Set<(event: { data?: string; code?: number; reason?: string }) => void>>();
 
   addEventListener(type: string, listener: (event: { data?: string; code?: number; reason?: string }) => void): void {
@@ -396,8 +447,9 @@ class FakeWebSocket {
   }
 
   send(body: string): void { this.sent.push(JSON.parse(body) as RpcFrame); }
-  close(code = 1000, reason = ""): void { this.readyState = WebSocket.CLOSED; this.#emit("close", { code, reason }); }
-  open(): void { this.readyState = WebSocket.OPEN; this.#emit("open", {}); }
+  close(code = 1000, reason = ""): void { this.closes.push({ code, reason }); this.readyState = WebSocket.CLOSED; this.#emit("close", { code, reason }); }
+  open(sendOfficeReady = true): void { this.readyState = WebSocket.OPEN; this.#emit("open", {}); if (sendOfficeReady) this.officeReady(); }
+  officeReady(): void { this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", method: "office.ready", params: {} }) }); }
   respond(id: string, result?: unknown, error?: unknown): void {
     this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id, ...(error === undefined ? { result } : { error }) }) });
   }

@@ -49,12 +49,15 @@ export class ChatUpstreamHub {
   readonly #subscribers = new Map<ChatSessionOwner, ChatHubSubscriber>();
   readonly #unbound = new Map<string, BufferedEvents>();
   readonly #droppedUnbound = new Set<string>();
+  readonly #ownerCleanup = new Map<ChatSessionOwner, Promise<boolean>>();
+  readonly #cleanupOperations = new Set<Promise<boolean>>();
   #unboundEventCount = 0;
   #unboundBytes = 0;
   #connection: HermesChatConnection | undefined;
   #connecting: Promise<HermesChatConnection> | undefined;
   #resetting: Promise<void> | undefined;
   #generation = 0;
+  #cleanupEpoch = 0;
   #stopping = false;
 
   constructor(runtimeSource: HermesRuntimeSource, coordinator: ChatSessionCoordinator, maxEventBytes: number) {
@@ -66,7 +69,14 @@ export class ChatUpstreamHub {
   async attach(owner: ChatSessionOwner, subscriber: ChatHubSubscriber): Promise<void> {
     if (this.#stopping) throw new Error("Chat hub is stopping.");
     this.#subscribers.set(owner, subscriber);
-    try { await this.#ensureConnection(); }
+    try {
+      while (true) {
+        await this.#waitForCleanup();
+        const cleanupEpoch = this.#cleanupEpoch;
+        await this.#ensureConnection();
+        if (this.#cleanupOperations.size === 0 && cleanupEpoch === this.#cleanupEpoch) break;
+      }
+    }
     catch (error) {
       if (this.#subscribers.get(owner) === subscriber) this.#subscribers.delete(owner);
       throw error;
@@ -146,6 +156,13 @@ export class ChatUpstreamHub {
         if (request.method === "prompt.submit") throw new ChatCommitUnconfirmedError();
         throw new Error("Hermes chat generation changed.");
       }
+      if (authorize !== undefined && OWNED_SESSION_REQUEST_METHODS.has(request.method) && !authorize()) {
+        if (request.method === "prompt.submit") {
+          this.#resetGeneration(generation);
+          throw new ChatCommitUnconfirmedError();
+        }
+        throw new Error("Hermes live session ownership changed.");
+      }
       return result;
     } catch (error) {
       if ((request.method === "session.create" || request.method === "session.resume")
@@ -192,11 +209,45 @@ export class ChatUpstreamHub {
     this.#droppedUnbound.delete(liveSessionId);
   }
 
-  async closeOwnerSessions(owner: ChatSessionOwner): Promise<boolean> {
-    for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
-      await this.#closeLease(owner, lease, 2);
+  closeOwnerSessions(owner: ChatSessionOwner): Promise<boolean> {
+    const previous = this.#ownerCleanup.get(owner);
+    this.#cleanupEpoch += 1;
+    let operation: Promise<boolean>;
+    operation = (async () => {
+      if (previous !== undefined) await previous.catch(() => false);
+      for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
+        await this.#closeLease(owner, lease, 2);
+      }
+      return this.#coordinator.ownedSessionLeases(owner).length === 0;
+    })().finally(() => {
+      this.#cleanupOperations.delete(operation);
+      if (this.#ownerCleanup.get(owner) === operation) this.#ownerCleanup.delete(owner);
+    });
+    this.#ownerCleanup.set(owner, operation);
+    this.#cleanupOperations.add(operation);
+    return operation;
+  }
+
+  async readStableHistory<T>(read: () => Promise<T>): Promise<T> {
+    while (true) {
+      await this.#waitForCleanup();
+      await this.#resetting;
+      if (this.#cleanupOperations.size === 0) break;
     }
-    return this.#coordinator.ownedSessionLeases(owner).length === 0;
+    const generation = this.#generation;
+    const cleanupEpoch = this.#cleanupEpoch;
+    const result = await read();
+    if (this.#resetting !== undefined || generation !== this.#generation
+      || this.#cleanupOperations.size > 0 || cleanupEpoch !== this.#cleanupEpoch) {
+      throw new Error("Hermes chat state changed during history read.");
+    }
+    return result;
+  }
+
+  async #waitForCleanup(): Promise<void> {
+    while (this.#cleanupOperations.size > 0) {
+      await Promise.allSettled([...this.#cleanupOperations]);
+    }
   }
 
   async closeOwnedSession(

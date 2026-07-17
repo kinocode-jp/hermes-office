@@ -2,9 +2,11 @@ import type { ChatPromptResult, ChatSteerResult } from "./chat-api";
 
 const RPC_REJECTED = Symbol("rpc-rejected");
 const RPC_COMMIT_UNCONFIRMED = Symbol("rpc-commit-unconfirmed");
+const RPC_SESSION_IN_USE = Symbol("rpc-session-in-use");
 
 type ExplicitRpcRejection = Error & { [RPC_REJECTED]: true };
 type CommitUnconfirmedRpcError = Error & { [RPC_COMMIT_UNCONFIRMED]: true };
+type SessionInUseRpcError = Error & { [RPC_REJECTED]: true; [RPC_SESSION_IN_USE]: true };
 
 export function explicitRpcRejection(message: string): ExplicitRpcRejection {
   return Object.assign(new Error(message), { [RPC_REJECTED]: true as const });
@@ -14,12 +16,20 @@ export function commitUnconfirmedRpcError(message: string): CommitUnconfirmedRpc
   return Object.assign(new Error(message), { [RPC_COMMIT_UNCONFIRMED]: true as const });
 }
 
+export function sessionInUseRpcError(message: string): SessionInUseRpcError {
+  return Object.assign(new Error(message), { [RPC_REJECTED]: true as const, [RPC_SESSION_IN_USE]: true as const });
+}
+
 export function isExplicitRpcRejection(error: unknown): error is ExplicitRpcRejection {
   return typeof error === "object" && error !== null && RPC_REJECTED in error;
 }
 
 export function isCommitUnconfirmedRpcError(error: unknown): error is CommitUnconfirmedRpcError {
   return typeof error === "object" && error !== null && RPC_COMMIT_UNCONFIRMED in error;
+}
+
+export function isSessionInUseRpcError(error: unknown): error is SessionInUseRpcError {
+  return typeof error === "object" && error !== null && RPC_SESSION_IN_USE in error;
 }
 
 export function isCommitUnconfirmedRpcFrame(error: Record<string, unknown>): boolean {
@@ -34,6 +44,11 @@ export function normalizePromptResult(value: unknown): ChatPromptResult | undefi
 
 export function interruptResultWasAccepted(value: unknown): boolean {
   return resultRecord(value)?.status === "interrupted";
+}
+
+export function interactionResultWasAccepted(method: "approval.respond" | "clarify.respond", value: unknown): boolean {
+  const result = resultRecord(value);
+  return method === "approval.respond" ? result?.resolved === true : result?.status === "ok";
 }
 
 export function normalizeSteerResult(value: unknown): ChatSteerResult {

@@ -303,6 +303,7 @@ test("commit-unconfirmed on an open socket blocks the composer until an explicit
   api.ensureSession(target);
   await waitFor(() => sockets.length === 1);
   const oldSocket = sockets[0]!;
+  await flush();
   oldSocket.open();
   await waitFor(() => oldSocket.frame("session.resume") !== undefined);
   oldSocket.respond(oldSocket.frame("session.resume")!.id, { liveSessionId: "live-open", storedSessionId: "stored-1", running: false });
@@ -315,7 +316,11 @@ test("commit-unconfirmed on an open socket blocks the composer until an explicit
   assert.equal(oldSocket.readyState, WebSocket.CLOSED, "an ambiguous live generation is never reused");
   oldSocket.event("live-open", "message.complete", { messageId: "lost-old-event", text: "must stay stale" });
   const recoverySocket = sockets[1]!;
-  recoverySocket.open();
+  recoverySocket.open(false);
+  await flush();
+  assert.equal(historyRequest, 1, "history cannot race ahead of office.ready and Hub cleanup");
+  assert.equal(recoverySocket.frame("session.resume"), undefined);
+  recoverySocket.officeReady();
   await waitFor(() => sessions.value[0]?.historyState === "error");
   assert.equal(sessions.value[0]?.connectionState, "disconnected", "the API enters the barrier before its result unlocks the store");
   assert.equal(historyRequest, 2);
@@ -370,6 +375,7 @@ test("an oldest-tail message-limit partial safely satisfies a reconnect barrier"
   const target = { clientSessionId: "limited-client", profileId: "coder", storedSessionId: "stored-limited" };
   api.ensureSession(target);
   await waitFor(() => sockets.length === 1);
+  await flush();
   sockets[0]!.open();
   await waitFor(() => sockets[0]!.frame("session.resume") !== undefined);
   sockets[0]!.respond(sockets[0]!.frame("session.resume")!.id, { liveSessionId: "live-limited-old", storedSessionId: "stored-limited" });
@@ -427,6 +433,7 @@ test("a partial reconnect history cannot satisfy the resume barrier", async () =
   const target = { clientSessionId: "partial-client", profileId: "coder", storedSessionId: "stored-partial" };
   api.ensureSession(target);
   await waitFor(() => sockets.length === 1);
+  await flush();
   sockets[0]!.open();
   await waitFor(() => sockets[0]!.frame("session.resume") !== undefined);
   const initialResume = sockets[0]!.frame("session.resume")!;
@@ -467,6 +474,7 @@ test("initial stored connect coalesces callers and waits for production-shaped h
   api.ensureSession(target);
   await waitFor(() => sockets.length === 1);
   const socket = sockets[0]!;
+  await flush();
   socket.open();
   await flush();
   api.ensureSession(target);
@@ -620,7 +628,8 @@ class FakeWebSocket {
 
   send(body: string): void { this.sent.push(JSON.parse(body) as RpcFrame); }
   close(code = 1000, reason = ""): void { this.readyState = WebSocket.CLOSED; this.#emit("close", { code, reason }); }
-  open(): void { this.readyState = WebSocket.OPEN; this.#emit("open", {}); }
+  open(sendOfficeReady = true): void { this.readyState = WebSocket.OPEN; this.#emit("open", {}); if (sendOfficeReady) this.officeReady(); }
+  officeReady(): void { this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", method: "office.ready", params: {} }) }); }
   respond(id: string, result?: unknown, error?: unknown): void {
     this.#emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id, ...(error === undefined ? { result } : { error }) }) });
   }

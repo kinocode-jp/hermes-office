@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { WebSocket } from "ws";
 import type { Operation } from "@hermes-office/protocol";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
-import { HERMES_CHAT_METHODS, type HermesChatEvent, type HermesChatMethod } from "./hermes-chat.js";
+import { HERMES_CHAT_METHODS, type HermesChatEvent, type HermesChatMethod, type HermesChatResult } from "./hermes-chat.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
 import { ChatSessionCoordinator, type ChatSessionClaim } from "./chat-session-coordinator.js";
 import { ChatCommitUnconfirmedError, ChatUpstreamHub } from "./chat-upstream-hub.js";
@@ -15,6 +15,8 @@ const APPROVAL_TTL_MS = 5 * 60_000;
 const MAX_BUFFERED_BYTES = 256 * 1024;
 const MAX_APPROVAL_QUEUE = 8;
 const MAX_APPROVAL_SESSIONS = 128;
+const MAX_LIVE_EVENT_COUNT = 4_096;
+const MAX_LIVE_EVENT_BYTES = 8 * 1024 * 1024;
 const OWNED_LIVE_METHODS = new Set<HermesChatMethod>(["prompt.submit", "session.steer", "session.interrupt"]);
 
 export interface ChatGatewayLimits {
@@ -25,6 +27,8 @@ export interface ChatGatewayLimits {
   approvalTtlMs: number;
   maxBufferedBytes: number;
   maxApprovalQueue: number;
+  maxLiveEventCount: number;
+  maxLiveEventBytes: number;
 }
 
 const DEFAULT_LIMITS: ChatGatewayLimits = {
@@ -35,6 +39,8 @@ const DEFAULT_LIMITS: ChatGatewayLimits = {
   approvalTtlMs: APPROVAL_TTL_MS,
   maxBufferedBytes: MAX_BUFFERED_BYTES,
   maxApprovalQueue: MAX_APPROVAL_QUEUE,
+  maxLiveEventCount: MAX_LIVE_EVENT_COUNT,
+  maxLiveEventBytes: MAX_LIVE_EVENT_BYTES,
 };
 
 export interface ChatGatewayDependencies {
@@ -119,13 +125,13 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   const queued: Array<{ body: string; receivedAt: number; receivedOrder: number }> = [];
   const pendingApprovals = new Map<string, PendingApproval[]>();
   const pendingClarifications = new Map<string, PendingResponse>();
+  const liveEventBudgets = new Map<string, { leaseToken: symbol; count: number; bytes: number }>();
   let hubReady = false;
   let closed = false;
   let inFlight = 0;
   let chronology = 0;
   let rateTokens = limits.socketRateCapacity;
   let rateUpdatedAt = now();
-  let cleanupChain = Promise.resolve();
   let closeWhenIdleReason: string | undefined;
 
   const sessionIsActive = dependencies.sessionIsActive ?? (() => {
@@ -140,12 +146,13 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     for (const [requestId, entry] of pendingClarifications) {
       if (entry.leaseToken === leaseToken) pendingClarifications.delete(requestId);
     }
+    for (const [liveId, budget] of liveEventBudgets) {
+      if (budget.leaseToken === leaseToken) liveEventBudgets.delete(liveId);
+    }
   };
 
   const cleanupOwnedSessions = (): void => {
-    cleanupChain = cleanupChain.then(async () => { await chatHub.closeOwnerSessions(sessionOwner); }, async () => {
-      await chatHub.closeOwnerSessions(sessionOwner);
-    });
+    void chatHub.closeOwnerSessions(sessionOwner).catch(() => undefined);
   };
 
   const shutdown = (): void => {
@@ -154,6 +161,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
     queued.length = 0;
     pendingApprovals.clear();
     pendingClarifications.clear();
+    liveEventBudgets.clear();
     chatHub.detach(sessionOwner);
     cleanupOwnedSessions();
   };
@@ -352,6 +360,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         }
         boundLiveId = identities.liveSessionId;
       }
+      if (!interactionResultAccepted(frame.method, result.value)) throw new Error("Hermes returned an invalid interaction acknowledgement.");
       const promoted = consumeClaim(claim, pendingApprovals, pendingClarifications);
       if (promoted !== undefined) sendWire(serializeOfficeChatEvent(activateApproval(promoted, now(), ++chronology, limits.approvalTtlMs), maxJsonBytes));
       if (!closed) {
@@ -406,7 +415,25 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   client.on("error", shutdown);
 
   const handleUpstreamEvent = (event: HermesChatEvent): void => {
-    if (closed) return;
+    if (closed || closeWhenIdleReason !== undefined) return;
+    if (event.sessionId !== undefined) {
+      const leaseToken = sessionCoordinator.liveLeaseToken(sessionOwner, event.sessionId);
+      if (leaseToken === undefined) return;
+      const prior = liveEventBudgets.get(event.sessionId);
+      const budget = prior?.leaseToken === leaseToken ? prior : { leaseToken, count: 0, bytes: 0 };
+      const eventBytes = Buffer.byteLength(serializeOfficeChatEvent(event, maxJsonBytes));
+      if (budget.count + 1 > limits.maxLiveEventCount || budget.bytes + eventBytes > limits.maxLiveEventBytes) {
+        sendWire(serializeOfficeChatEvent({
+          type: "error", sessionId: event.sessionId,
+          payload: { status: "resync_required", message: "Live event safety limit exceeded. Reload session history." },
+        }, maxJsonBytes));
+        closeAfterInFlight("Live event safety limit exceeded; reload history");
+        return;
+      }
+      budget.count += 1;
+      budget.bytes += eventBytes;
+      liveEventBudgets.set(event.sessionId, budget);
+    }
     if (event.type === "approval.request" && event.sessionId !== undefined) {
       const leaseToken = sessionCoordinator.liveLeaseToken(sessionOwner, event.sessionId);
       if (leaseToken === undefined) return;
@@ -509,6 +536,12 @@ function sendSessionInUse(send: (value: unknown) => void, id: string | number): 
     jsonrpc: "2.0", id,
     error: { code: -32006, message: "Session is already in use by another Office client.", data: { reason: "session_in_use" } },
   });
+}
+
+function interactionResultAccepted(method: HermesChatMethod, value: HermesChatResult["value"]): boolean {
+  if (method === "approval.respond") return value.resolved === true;
+  if (method === "clarify.respond") return value.status === "ok";
+  return true;
 }
 
 function sessionIdentities(value: Record<string, boolean | number | string | null>): { storedSessionId?: string; liveSessionId?: string } {

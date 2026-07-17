@@ -3,7 +3,9 @@ export interface SecretRedaction {
   redacted: boolean;
 }
 
-const ANSI_ESCAPE_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const ESCAPE = 0x1b;
+const STRING_TERMINATOR = 0x9c;
+const MAX_TERMINAL_SEQUENCE_LENGTH = 8_192;
 const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/gi;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const AUTHORIZATION_HEADER_PATTERN = /^([ \t]*(?:Authorization|Proxy-Authorization)[ \t]*:[ \t]*)([^\r\n]*)/gim;
@@ -23,12 +25,113 @@ const BENIGN_METADATA_SEGMENTS = new Set([
 /** Redact credential-shaped text before it crosses an Office trust boundary. */
 export function redactSecrets(value: string): SecretRedaction {
   const normalized = normalizeTerminalText(value);
-  const output = redactCredentialMaterial(normalized);
+  if (normalized.malformed) {
+    // A malformed or deliberately overlong terminal sequence has ambiguous
+    // display boundaries. Drop the complete field rather than risk exposing
+    // credential text that a terminal could hide or reinterpret.
+    return { value: "[REDACTED TERMINAL DATA]", redacted: value !== "[REDACTED TERMINAL DATA]" };
+  }
+  const output = redactCredentialMaterial(normalized.value);
   return { value: output, redacted: output !== value };
 }
 
-function normalizeTerminalText(value: string): string {
-  return value.replace(ANSI_ESCAPE_PATTERN, "");
+interface TerminalNormalization {
+  value: string;
+  malformed: boolean;
+}
+
+interface TerminalSequence {
+  end: number;
+  malformed: boolean;
+}
+
+function normalizeTerminalText(value: string): TerminalNormalization {
+  const chunks: string[] = [];
+  let copiedUntil = 0;
+  let cursor = 0;
+  let malformed = false;
+  while (cursor < value.length) {
+    const sequence = terminalSequenceAt(value, cursor);
+    if (sequence === undefined) { cursor += 1; continue; }
+    if (copiedUntil < cursor) chunks.push(value.slice(copiedUntil, cursor));
+    malformed ||= sequence.malformed;
+    cursor = Math.max(cursor + 1, sequence.end);
+    copiedUntil = cursor;
+  }
+  if (copiedUntil < value.length) chunks.push(value.slice(copiedUntil));
+  return { value: chunks.join(""), malformed };
+}
+
+function terminalSequenceAt(value: string, start: number): TerminalSequence | undefined {
+  const code = value.charCodeAt(start);
+  if (code === ESCAPE) return escapeSequenceEnd(value, start);
+  if (code === 0x9b) return controlSequenceEnd(value, start, start + 1);
+  if ([0x90, 0x98, 0x9d, 0x9e, 0x9f].includes(code)) {
+    return terminalStringEnd(value, start, start + 1, code === 0x9d);
+  }
+  if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+    return { end: start + 1, malformed: false };
+  }
+  return undefined;
+}
+
+function escapeSequenceEnd(value: string, start: number): TerminalSequence {
+  const next = value.charCodeAt(start + 1);
+  if (!Number.isFinite(next)) return { end: start + 1, malformed: true };
+  if (next === 0x5b) return controlSequenceEnd(value, start, start + 2);
+  if ([0x50, 0x58, 0x5d, 0x5e, 0x5f].includes(next)) {
+    return terminalStringEnd(value, start, start + 2, next === 0x5d);
+  }
+  if (next === 0x5c) return { end: start + 2, malformed: false };
+  if (next >= 0x30 && next <= 0x7e) return { end: start + 2, malformed: false };
+  if (next >= 0x20 && next <= 0x2f) {
+    let cursor = start + 2;
+    while (cursor < value.length && value.charCodeAt(cursor) >= 0x20 && value.charCodeAt(cursor) <= 0x2f) {
+      if (cursor - start >= MAX_TERMINAL_SEQUENCE_LENGTH) return { end: value.length, malformed: true };
+      cursor += 1;
+    }
+    const final = value.charCodeAt(cursor);
+    return Number.isFinite(final) && final >= 0x30 && final <= 0x7e
+      ? { end: cursor + 1, malformed: cursor + 1 - start > MAX_TERMINAL_SEQUENCE_LENGTH }
+      : { end: cursor, malformed: true };
+  }
+  return { end: start + 1, malformed: true };
+}
+
+function controlSequenceEnd(value: string, sequenceStart: number, contentStart: number): TerminalSequence {
+  let cursor = contentStart;
+  let intermediate = false;
+  let malformed = false;
+  while (cursor < value.length) {
+    if (cursor - sequenceStart >= MAX_TERMINAL_SEQUENCE_LENGTH) return { end: value.length, malformed: true };
+    const code = value.charCodeAt(cursor);
+    if (code >= 0x40 && code <= 0x7e) {
+      const end = cursor + 1;
+      return { end, malformed: malformed || end - sequenceStart > MAX_TERMINAL_SEQUENCE_LENGTH };
+    }
+    if (code >= 0x20 && code <= 0x2f) intermediate = true;
+    else if (code < 0x30 || code > 0x3f || intermediate) malformed = true;
+    cursor += 1;
+  }
+  return { end: value.length, malformed: true };
+}
+
+function terminalStringEnd(value: string, sequenceStart: number, contentStart: number, belTerminates: boolean): TerminalSequence {
+  let cursor = contentStart;
+  while (cursor < value.length) {
+    if (cursor - sequenceStart >= MAX_TERMINAL_SEQUENCE_LENGTH) return { end: value.length, malformed: true };
+    const code = value.charCodeAt(cursor);
+    if ((belTerminates && code === 0x07) || code === STRING_TERMINATOR) {
+      const end = cursor + 1;
+      return { end, malformed: end - sequenceStart > MAX_TERMINAL_SEQUENCE_LENGTH };
+    }
+    if (code === ESCAPE && value.charCodeAt(cursor + 1) === 0x5c) {
+      const end = cursor + 2;
+      return { end, malformed: end - sequenceStart > MAX_TERMINAL_SEQUENCE_LENGTH };
+    }
+    cursor += 1;
+  }
+  return { end: value.length, malformed: true };
 }
 
 function redactCredentialMaterial(value: string): string {
@@ -108,7 +211,7 @@ function cookieHeaderValueEnd(value: string, start: number, quote: string | unde
 /** Detect secret material on input surfaces that must reject rather than redact. */
 export function containsLikelySecret(value: string): boolean {
   const normalized = normalizeTerminalText(value);
-  return redactCredentialMaterial(normalized) !== normalized;
+  return normalized.malformed || redactCredentialMaterial(normalized.value) !== normalized.value;
 }
 
 export function isLikelySecretIdentifier(identifier: string): boolean {

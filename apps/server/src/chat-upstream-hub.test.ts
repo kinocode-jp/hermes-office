@@ -183,6 +183,62 @@ test("an ambiguous prompt resets leases before a replacement resume and waits fo
   assert.equal(replacement.errorCode(72), undefined, "replacement does not lose a cleanup race to session_in_use");
 });
 
+test("ordinary disconnect cleanup gates replacement readiness and history", async () => {
+  const hermes = new NativeFakeHermes();
+  const closeGate = deferred<void>();
+  const coordinator = new ChatSessionCoordinator();
+  const runtime = hermes.runtime();
+  const hub = new ChatUpstreamHub(runtime, coordinator, 64 * 1024);
+  const dependencies = {
+    auth: new OfficeAuth(), officeSession: SESSION, runtimeSource: runtime,
+    maxJsonBytes: 64 * 1024, deviceLimiter: new ChatDeviceRateLimiter({ capacity: 100, ratePerSecond: 0 }),
+    sessionCoordinator: coordinator, chatHub: hub,
+  };
+  const oldClient = new FakeWebSocket();
+  handleOfficeChatConnection(oldClient as unknown as WebSocket, dependencies);
+  await settle();
+  oldClient.rpc(73, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle();
+  hermes.delaySessionClose("live-main", closeGate.promise);
+  oldClient.close(1006, "network lost");
+  await settle();
+
+  let historyStarted = false;
+  const history = hub.readStableHistory(async () => { historyStarted = true; return "fresh"; });
+  const replacement = new FakeWebSocket();
+  handleOfficeChatConnection(replacement as unknown as WebSocket, dependencies);
+  replacement.rpc(74, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(4);
+  assert.equal(historyStarted, false, "history waits for the previous owner's close-on-disconnect cleanup");
+  assert.equal(replacement.frames().some(({ method }) => method === "office.ready"), false);
+  assert.equal(hermes.resumeRequests.length, 1, "replacement resume remains queued before office.ready");
+
+  closeGate.resolve();
+  assert.equal(await history, "fresh");
+  await settle(6);
+  assert.equal(replacement.frames().some(({ method }) => method === "office.ready"), true);
+  assert.equal(hermes.resumeRequests.length, 2);
+  assert.equal(replacement.errorCode(74), undefined);
+});
+
+test("history fails closed when owner cleanup starts during the read", async () => {
+  const hermes = new NativeFakeHermes();
+  const coordinator = new ChatSessionCoordinator();
+  const owner = {};
+  const claim = coordinator.claimResume(owner, "coder", "parent");
+  assert.ok(claim);
+  assert.equal(coordinator.bind(claim, { storedSessionId: "parent", liveSessionId: "live-main" }, false), "bound");
+  hermes.seedLive("live-main", "parent");
+  const hub = new ChatUpstreamHub(hermes.runtime(), coordinator, 64 * 1024);
+  await hub.attach(owner, { onEvent: () => undefined, onUnavailable: () => undefined });
+  const readGate = deferred<void>();
+  const history = hub.readStableHistory(async () => { await readGate.promise; return "stale"; });
+  await settle();
+  assert.equal(await hub.closeOwnerSessions(owner), true);
+  readGate.resolve();
+  await assert.rejects(history, /state changed during history read/);
+});
+
 test("coordinator converges durable aliases without ever adding a second live id", () => {
   const owner = {};
   const coordinator = new ChatSessionCoordinator();
@@ -469,6 +525,7 @@ class NativeFakeHermes {
   #parentReturnsDuplicate = false;
   #createSequence = 0;
   #connectionCloseGate: Promise<void> | undefined;
+  readonly #sessionCloseGates = new Map<string, Promise<void>>();
 
   runtime(): HermesRuntimeSource {
     return {
@@ -499,6 +556,7 @@ class NativeFakeHermes {
 
   emit(event: HermesChatEvent): void { this.#events.at(-1)?.(event); }
   delayNextConnectionClose(gate: Promise<void>): void { this.#connectionCloseGate = gate; }
+  delaySessionClose(liveSessionId: string, gate: Promise<void>): void { this.#sessionCloseGates.set(liveSessionId, gate); }
   eventEmitter(generation: number): (event: HermesChatEvent) => void { return this.#events[generation]!; }
   isLive(liveId: string): boolean { return this.#live.has(liveId); }
   markAlreadyAbsent(liveId: string): void { this.#live.delete(liveId); }
@@ -526,6 +584,9 @@ class NativeFakeHermes {
       const liveId = String(request.params?.session_id);
       this.sessionCloseRequests.push(liveId);
       if (this.failCloseFor.has(liveId)) throw new HermesChatTransportError("timed_out", "fake close timeout");
+      const closeGate = this.#sessionCloseGates.get(liveId);
+      this.#sessionCloseGates.delete(liveId);
+      await closeGate;
       const closed = this.#live.delete(liveId);
       return { method: request.method, value: { closed } };
     }
@@ -549,7 +610,9 @@ class NativeFakeHermes {
     if (request.method === "prompt.submit" && this.failPromptAmbiguously) {
       throw new HermesChatTransportError("backend_rejected", "malformed prompt acknowledgement");
     }
-    if (request.method !== "session.resume") return { method: request.method, value: { status: "ok" } };
+    if (request.method !== "session.resume") return request.method === "approval.respond"
+      ? { method: request.method, value: { resolved: true } }
+      : { method: request.method, value: { status: "ok" } };
     const sessionId = String(request.params?.session_id);
     const profile = String(request.params?.profile ?? "default");
     this.resumeRequests.push({ sessionId, profile, closeOnDisconnect: request.params?.close_on_disconnect === true });

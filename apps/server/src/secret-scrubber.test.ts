@@ -63,6 +63,83 @@ test("ANSI normalization alone is not classified as credential material", () => 
   assert.equal(containsLikelySecret(decoratedSecret), true);
 });
 
+test("ECMA-48 strings cannot split secret labels or values", () => {
+  const oscBel = "\u001b]0;window title\u0007";
+  const oscSt = "\u001b]8;;https://example.test\u001b\\";
+  const c1Osc = "\u009d0;c1 title\u009c";
+  const dcs = "\u001bP1;2|ignored device control\u001b\\";
+  const source = [
+    `API${oscBel}_KEY=osc-label-secret`,
+    `Coo${oscSt}kie: session=osc-cookie-secret`,
+    `client${c1Osc}Secret=c1-label-secret`,
+    `password=cred${oscBel}ential`,
+    `access\u001b[31mToken=csi-label-secret`,
+    `signing_${dcs}key=dcs-label-secret`,
+    `ghp_ABCDEFGHIJKLMNO${oscSt}PQRSTUVWXYZabcdefghij`,
+    `{"Coo${c1Osc}kie":"session=json-cookie-secret","safe":true}`,
+  ].join("\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+  assert.equal(once.value, [
+    "API_KEY=[REDACTED]",
+    "Cookie: [REDACTED]",
+    "clientSecret=[REDACTED]",
+    "password=[REDACTED]",
+    "accessToken=[REDACTED]",
+    "signing_key=[REDACTED]",
+    "[REDACTED]",
+    '{"Cookie":"[REDACTED]","safe":true}',
+  ].join("\n"));
+  for (const line of source.split("\n")) assert.equal(containsLikelySecret(line), true);
+  assert.equal(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(once.value), false);
+  assert.deepEqual(twice, { value: once.value, redacted: false });
+});
+
+test("well-formed terminal normalization alone stays non-secret and idempotent", () => {
+  const source = [
+    "safe\u001b]0;window title\u0007 prose",
+    "safe\u001b]8;;https://example.test\u001b\\ link",
+    "safe\u001bP1;2|device control\u001b\\ text",
+    "safe\u009d0;c1 title\u009c text",
+  ].join("\n");
+  const normalized = ["safe prose", "safe link", "safe text", "safe text"].join("\n");
+
+  assert.equal(containsLikelySecret(source), false);
+  assert.deepEqual(redactSecrets(source), { value: normalized, redacted: true });
+  assert.deepEqual(redactSecrets(normalized), { value: normalized, redacted: false });
+});
+
+test("unterminated and overlong terminal strings fail closed in linear scans", () => {
+  const longPayload = "x".repeat(128 * 1024);
+  const unterminated = `safe-prefix API\u001b]0;${longPayload}_KEY=buried-secret`;
+  const overlong = `API\u001b]0;${longPayload}\u0007_KEY=overlong-secret`;
+  const malformedCsi = "API\u001b[\u001b[X_KEY=malformed-csi-secret";
+
+  const unterminatedResult = redactSecrets(unterminated);
+  const overlongResult = redactSecrets(overlong);
+  assert.deepEqual(unterminatedResult, { value: "[REDACTED TERMINAL DATA]", redacted: true });
+  assert.deepEqual(overlongResult, { value: "[REDACTED TERMINAL DATA]", redacted: true });
+  assert.deepEqual(redactSecrets(malformedCsi), { value: "[REDACTED TERMINAL DATA]", redacted: true });
+  assert.equal(unterminatedResult.value.includes("buried-secret"), false);
+  assert.equal(overlongResult.value.includes("overlong-secret"), false);
+  assert.equal(containsLikelySecret(unterminated), true);
+  assert.equal(containsLikelySecret(overlong), true);
+  assert.equal(containsLikelySecret(malformedCsi), true);
+  assert.deepEqual(redactSecrets(unterminatedResult.value), { value: unterminatedResult.value, redacted: false });
+  assert.deepEqual(redactSecrets(overlongResult.value), { value: overlongResult.value, redacted: false });
+});
+
+test("terminal string length boundary is explicit and fail-closed", () => {
+  const atLimit = `safe\u001b]${"x".repeat(8_189)}\u0007text`;
+  const beyondLimit = `safe\u001b]${"x".repeat(8_190)}\u0007text`;
+
+  assert.deepEqual(redactSecrets(atLimit), { value: "safetext", redacted: true });
+  assert.equal(containsLikelySecret(atLimit), false);
+  assert.deepEqual(redactSecrets(beyondLimit), { value: "[REDACTED TERMINAL DATA]", redacted: true });
+  assert.equal(containsLikelySecret(beyondLimit), true);
+});
+
 test("redacts short explicit assignments, Basic auth, and HTTP URL userinfo", () => {
   const source = [
     "password=x",

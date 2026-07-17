@@ -429,7 +429,14 @@ function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<stri
     if (value.status !== "interrupted") throw publicError("backend_rejected", "Hermes returned an invalid interrupt result.");
     return { status: "interrupted" };
   }
-  if (method === "approval.respond") return { resolved: value.resolved === true };
+  if (method === "approval.respond") {
+    if (value.resolved !== true) throw publicError("backend_rejected", "Hermes returned an invalid approval result.");
+    return { resolved: true };
+  }
+  if (method === "clarify.respond") {
+    if (value.status !== "ok") throw publicError("backend_rejected", "Hermes returned an invalid clarification result.");
+    return { status: "ok" };
+  }
   return compact({ status: safePublicText(value.status, 80), taskId: safeId(value.task_id) });
 }
 

@@ -11,6 +11,7 @@ import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeSe
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTimestamp, stringArray, stringValue } from "./chat-store-utils";
 import { boundedOperationEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
+import { appendLiveDelta, appendLiveMessage, boundedTranscriptSuffix, replaceLiveMessages, type TranscriptChange } from "./live-transcript";
 import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
 export const profileList = signal<Profile[]>([]);
@@ -474,13 +475,14 @@ export function applyChatHistory(sessionId: string, history: ChatMessage[], reso
     const historyIds = new Set(history.map((message) => message.id));
     const localMessages = migrated.messages
       .filter((message) => !historyIds.has(message.id));
+    const merged = boundedTranscriptSuffix([...history, ...localMessages]);
     return {
       ...migrated,
       ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
       historyState: "loaded",
-      historyPartial: result?.partial === true, historyNotice: result?.error ? officeRuntimeMessage(result.error) : undefined,
+      historyPartial: result?.partial === true || merged.truncated, historyNotice: result?.error ? officeRuntimeMessage(result.error) : undefined,
       errorMessage: session.connectionState === "error" ? session.errorMessage : undefined,
-      messages: [...history, ...localMessages]
+      messages: merged.messages
     };
   });
 }
@@ -549,11 +551,17 @@ export function setChatSessionError(sessionId: string, message: string): void {
   updateChatSession(sessionId, (session) => reconcileChatSessionError(session, officeRuntimeMessage(message)));
 }
 
-export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent): void {
-  updateChatSession(sessionId, (session) => reduceChatGatewayEvent(session, event));
+export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent): "resync-required" | void {
+  let resyncRequired = false;
+  updateChatSession(sessionId, (session) => reduceChatGatewayEvent(session, event, () => { resyncRequired = true; }));
+  return resyncRequired ? "resync-required" : undefined;
 }
 
-export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayEvent): ChatSession {
+export function reduceChatGatewayEvent(
+  session: ChatSession,
+  event: ChatGatewayEvent,
+  onTranscriptLimit?: (reason: Extract<TranscriptChange, { status: "resync-required" }>["reason"]) => void,
+): ChatSession {
   if (session.liveSessionId && event.liveSessionId !== session.liveSessionId) return session;
   const payload = event.payload ?? {};
   if (event.type === "clarify.request") {
@@ -590,42 +598,43 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
   }
   if (event.type === "message.start") {
     const messageId = gatewayMessageId(payload) ?? `stream-${event.liveSessionId}-${Date.now()}`;
-    return {
+    const change = appendLiveMessage(session.messages, { id: messageId, from: "agent", body: "", at: nowTimestamp(), status: "streaming" });
+    return withTranscriptChange(session, change, onTranscriptLimit, {
       ...session,
       status: "streaming",
       streamingMessageId: messageId,
-      messages: [...session.messages, { id: messageId, from: "agent", body: "", at: nowTimestamp(), status: "streaming" }]
-    };
+    });
   }
   if (event.type === "message.delta") {
     const delta = stringValue(payload.text) ?? stringValue(payload.delta) ?? "";
     if (!delta) return session;
     const messageId = gatewayMessageId(payload) ?? session.streamingMessageId ?? `stream-${event.liveSessionId}`;
     const exists = session.messages.some((message) => message.id === messageId);
-    return {
+    const change = exists
+      ? appendLiveDelta(session.messages, messageId, delta)
+      : appendLiveMessage(session.messages, { id: messageId, from: "agent", body: delta, at: nowTimestamp(), status: "streaming" });
+    return withTranscriptChange(session, change, onTranscriptLimit, {
       ...session,
       status: "streaming",
       streamingMessageId: messageId,
-      messages: exists
-        ? session.messages.map((message) => message.id === messageId ? { ...message, body: message.body + delta, status: "streaming" } : message)
-        : [...session.messages, { id: messageId, from: "agent", body: delta, at: nowTimestamp(), status: "streaming" }]
-    };
+    });
   }
   if (event.type === "message.complete") {
     const messageId = gatewayMessageId(payload) ?? session.streamingMessageId ?? `complete-${event.liveSessionId}-${Date.now()}`;
     const completeText = stringValue(payload.text);
     const exists = session.messages.some((message) => message.id === messageId);
-    return {
+    const replacements = exists
+      ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" as const } : message.status === "streaming" ? { ...message, status: "complete" as const } : message)
+      : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTimestamp(), status: "complete" as const }] : [])];
+    const change = replaceLiveMessages(session.messages, replacements, new Set([messageId]));
+    return withTranscriptChange(session, change, onTranscriptLimit, {
       ...session,
       status: "ready",
       streamingMessageId: undefined,
       pendingInteraction: undefined,
       interruptPending: false,
       interruptOperationId: undefined,
-      messages: exists
-        ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" } : message.status === "streaming" ? { ...message, status: "complete" } : message)
-        : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTimestamp(), status: "complete" as const }] : [])]
-    };
+    });
   }
   if (event.type === "status.update") {
     return isChatRunActive(session) ? mergeGatewayStatusUpdate(session, payload) : session;
@@ -643,14 +652,15 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     const status = phase === "complete" ? "complete" as const : "streaming" as const;
     const body = detail ? `${name ?? "Tool"}: ${detail}` : "";
     const presentation = detail ? undefined : { kind: "tool-fallback" as const, ...(name ? { name } : {}), phase };
-    const exists = session.messages.some((message) => message.id === toolId);
-    return {
+    const index = session.messages.findIndex((message) => message.id === toolId);
+    const replacements = index >= 0
+      ? session.messages.map((message, currentIndex) => currentIndex === index ? { ...message, body, presentation, status } : message)
+      : [...session.messages, { id: toolId, from: "tool" as const, body, presentation, at: nowTimestamp(), status }];
+    const change = replaceLiveMessages(session.messages, replacements);
+    return withTranscriptChange(session, change, onTranscriptLimit, {
       ...session,
       status: event.type === "tool.complete" ? session.status : "streaming",
-      messages: exists
-        ? session.messages.map((message) => message.id === toolId ? { ...message, body, presentation, status } : message)
-        : [...session.messages, { id: toolId, from: "tool", body, presentation, at: nowTimestamp(), status }]
-    };
+    });
   }
   if (event.type === "error") {
     const upstreamText = stringValue(payload.message);
@@ -666,6 +676,19 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     };
   }
   return session;
+}
+
+function withTranscriptChange(
+  session: ChatSession,
+  change: TranscriptChange,
+  onTranscriptLimit: ((reason: Extract<TranscriptChange, { status: "resync-required" }>["reason"]) => void) | undefined,
+  next: ChatSession,
+): ChatSession {
+  if (change.status === "resync-required") {
+    onTranscriptLimit?.(change.reason);
+    return session;
+  }
+  return { ...next, messages: change.messages };
 }
 
 function withPendingInteraction(session: ChatSession, interaction: ChatPendingInteraction): ChatSession {
