@@ -48,6 +48,32 @@ test("board reads are allowlisted and strip paths, secrets, and unknown fields",
   assert.equal(serialized.includes("workspace_path"), false);
 });
 
+test("board and detail redact secret assignments from every free-form Hermes field", async () => {
+  const secret = "dashboard-example-value-123456";
+  const card = {
+    ...CARD,
+    title: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}`,
+    body: `OPENAI_API_KEY=${secret}`,
+    latest_summary: `clientSecret=${secret}`,
+  };
+  const adapter = mockAdapter((request) => request.path.includes("/tasks/")
+    ? {
+        task: card,
+        comments: [{
+          id: 1,
+          task_id: CARD.id,
+          author: `service_token=${secret}`,
+          body: `credential: AWS_SECRET_ACCESS_KEY=${secret}`,
+          created_at: 101,
+        }],
+      }
+    : { columns: [{ name: "todo", tasks: [card] }], assignees: ["mina"], latest_event_id: 1, now: 2 });
+
+  const serialized = JSON.stringify({ board: await adapter.getBoard(), detail: await adapter.getCard(CARD.id) });
+  assert.equal(serialized.includes(secret), false);
+  assert.equal(serialized.includes("[REDACTED]"), true);
+});
+
 test("create, assignment, status, and comments send only bounded allowlisted JSON", async () => {
   const requests: HermesKanbanRequest[] = [];
   const adapter = mockAdapter((request) => {

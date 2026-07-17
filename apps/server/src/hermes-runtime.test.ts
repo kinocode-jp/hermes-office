@@ -39,6 +39,29 @@ test("ready status is validated and reduced to a secret-free DTO", async () => {
   }
 });
 
+test("runtime display metadata is redacted before it reaches a public DTO", async () => {
+  const secret = "dashboard-example-value-123456";
+  const fixture = await statusServer({
+    version: "0.18.2",
+    release_date: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}`,
+    config_version: 1,
+    latest_config_version: 1,
+    gateway_running: true,
+    gateway_state: `OPENAI_API_KEY=${secret}`,
+    active_sessions: 1,
+    auth_required: true,
+    auth_providers: [`clientSecret=${secret}`],
+  });
+  try {
+    const result = await discoverHermesRuntime({ baseUrl: fixture.baseUrl, timeoutMs: 500 });
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(secret), false);
+    assert.equal(serialized.includes("[REDACTED]"), true);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("reachable non-Hermes responses are incompatible", async () => {
   const fixture = await statusServer({ ok: true });
   try {

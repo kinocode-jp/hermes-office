@@ -314,11 +314,11 @@ export async function confirmUnconfirmedComment(taskId: string): Promise<boolean
   const pending = unconfirmedTaskComments.value[taskId];
   const runtime = runtimeGeneration;
   if (!pending || pending.checking) return false;
-  const detailRevision = taskComments.successRevision();
+  const detailGeneration = taskComments.currentLoadGeneration();
   unconfirmedTaskComments.value = updateUnconfirmedComment(taskId, { ...pending, checking: true });
   await refreshKanbanBoard();
   if (!isCurrentUnconfirmedComment(taskId, pending, runtime)) return false;
-  let succeeded = taskComments.hasSuccessfulLoadAfter(taskId, detailRevision);
+  let succeeded = taskComments.hasSuccessfulLoadStartedAfter(taskId, detailGeneration);
   if (!succeeded && expandedTaskId.value === taskId) {
     succeeded = await taskComments.refreshIfExpanded(taskId) === true;
   }

@@ -24,7 +24,7 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
   const expandedTaskId = signal("");
   const taskCommentDetail = signal<TaskCommentDetailState>(idleState());
   let loadGeneration = 0;
-  let successfulLoadRevision = 0;
+  let successfulLoadGeneration = 0;
 
   async function toggle(taskId: string): Promise<void> {
     if (expandedTaskId.value === taskId) {
@@ -76,7 +76,7 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
         truncated: detail.truncated,
         message: ""
       };
-      successfulLoadRevision += 1;
+      successfulLoadGeneration = generation;
       return true;
     } catch (error) {
       if (generation !== loadGeneration || expandedTaskId.value !== cardId || api !== getApi()) return false;
@@ -90,12 +90,12 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
     }
   }
 
-  function successRevision(): number {
-    return successfulLoadRevision;
+  function currentLoadGeneration(): number {
+    return loadGeneration;
   }
 
-  function hasSuccessfulLoadAfter(cardId: string, revision: number): boolean {
-    return successfulLoadRevision > revision
+  function hasSuccessfulLoadStartedAfter(cardId: string, generation: number): boolean {
+    return successfulLoadGeneration > generation
       && taskCommentDetail.value.cardId === cardId
       && taskCommentDetail.value.state === "ready";
   }
@@ -107,7 +107,7 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
     collapse,
     retry,
     refreshIfExpanded,
-    successRevision,
-    hasSuccessfulLoadAfter
+    currentLoadGeneration,
+    hasSuccessfulLoadStartedAfter
   };
 }

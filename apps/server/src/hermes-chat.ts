@@ -413,7 +413,7 @@ function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<stri
       resumedSessionId: safeId(value.resumed),
       messageCount: finiteNumber(value.message_count),
       running: typeof value.running === "boolean" ? value.running : undefined,
-      status: safeShortText(value.status, 80),
+      status: safePublicText(value.status, 80),
     });
   }
   if (method === "session.close") {
@@ -421,7 +421,7 @@ function normalizeRpcResult(method: HermesChatMethod, raw: unknown): Record<stri
     return { closed: value.closed };
   }
   if (method === "approval.respond") return { resolved: value.resolved === true };
-  return compact({ status: safeShortText(value.status, 80), taskId: safeId(value.task_id) });
+  return compact({ status: safePublicText(value.status, 80), taskId: safeId(value.task_id) });
 }
 
 function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | undefined {
@@ -440,19 +440,19 @@ function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | u
     const requestId = safeId(payload.request_id);
     const question = sanitizeText(firstString(payload, ["question"]), Math.min(maxTextBytes, 16 * 1024));
     if (requestId === undefined || question === undefined) return undefined;
-    return { ...base, payload: compact({ requestId, question, choices: safeStringArray(payload.choices, 16, 200) }) };
+    return { ...base, payload: compact({ requestId, question, choices: safePublicStringArray(payload.choices, 16, 200) }) };
   }
   if (raw.type === "approval.request") {
-    return { ...base, payload: compact({ command: sanitizeText(firstString(payload, ["command"]), 8 * 1024), description: sanitizeText(firstString(payload, ["description"]), 2 * 1024), choices: safeStringArray(payload.choices, 8, 32), allowPermanent: typeof payload.allow_permanent === "boolean" ? payload.allow_permanent : undefined, smartDenied: payload.smart_denied === true }) };
+    return { ...base, payload: compact({ command: sanitizeText(firstString(payload, ["command"]), 8 * 1024), description: sanitizeText(firstString(payload, ["description"]), 2 * 1024), choices: safePublicStringArray(payload.choices, 8, 32), allowPermanent: typeof payload.allow_permanent === "boolean" ? payload.allow_permanent : undefined, smartDenied: payload.smart_denied === true }) };
   }
   if (["tool.start", "tool.generating", "tool.progress", "tool.complete"].includes(raw.type)) {
-    return { ...base, payload: compact({ toolId: safeId(firstValue(payload, ["tool_id", "id"])), name: safeShortText(firstValue(payload, ["name", "tool_name"]), 120), status: safeShortText(payload.status, 80), summary: sanitizeText(firstString(payload, ["summary"]), 2 * 1024), error: typeof payload.error === "boolean" ? payload.error : undefined, durationSeconds: finiteNumber(payload.duration_s) }) };
+    return { ...base, payload: compact({ toolId: safeId(firstValue(payload, ["tool_id", "id"])), name: safePublicText(firstValue(payload, ["name", "tool_name"]), 120), status: safePublicText(payload.status, 80), summary: sanitizeText(firstString(payload, ["summary"]), 2 * 1024), error: typeof payload.error === "boolean" ? payload.error : undefined, durationSeconds: finiteNumber(payload.duration_s) }) };
   }
   if (raw.type === "status.update") {
-    return { ...base, payload: compact({ kind: safeShortText(payload.kind, 80), status: safeShortText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024) }) };
+    return { ...base, payload: compact({ kind: safePublicText(payload.kind, 80), status: safePublicText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024) }) };
   }
   if (["gateway.ready", "session.info", "error"].includes(raw.type)) {
-    return { ...base, payload: compact({ status: safeShortText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024), model: safeShortText(payload.model, 200), provider: safeShortText(payload.provider, 100), running: typeof payload.running === "boolean" ? payload.running : undefined, storedSessionId: safeId(payload.stored_session_id), version: safeShortText(payload.version, 80) }) };
+    return { ...base, payload: compact({ status: safePublicText(payload.status, 80), message: sanitizeText(firstString(payload, ["message", "text"]), 2 * 1024), model: safePublicText(payload.model, 200), provider: safePublicText(payload.provider, 100), running: typeof payload.running === "boolean" ? payload.running : undefined, storedSessionId: safeId(payload.stored_session_id), version: safePublicText(payload.version, 80) }) };
   }
   return undefined;
 }
@@ -465,7 +465,7 @@ function normalizeHistory(raw: unknown, requestedId: string, profile: string, li
     if (!isRecord(item) || !isRole(item.role)) return [];
     const timestamp = normalizeTimestamp(item.timestamp);
     if (item.timestamp !== undefined && timestamp === undefined) return [];
-    const toolName = safeShortText(item.tool_name, 120);
+    const toolName = safePublicText(item.tool_name, 120);
     if (item.role === "system") return [{ index: offset + index, role: "system", text: "[System message hidden]", redacted: true, ...(timestamp === undefined ? {} : { timestamp }) }];
     if (item.role === "tool") return [{ index: offset + index, role: "tool", text: "[Tool output hidden]", redacted: true, ...(toolName === undefined ? {} : { toolName }), ...(timestamp === undefined ? {} : { timestamp }) }];
     const original = contentText(item.content);
@@ -553,9 +553,18 @@ function optionalBoolean(value: unknown, name: string): boolean | undefined { if
 function optionalInteger(value: unknown, name: string, min: number, max: number): number | undefined { if (value === undefined) return undefined; if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw publicError("invalid_request", `${name} is invalid.`); return value; }
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }
 function finiteNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
-function safeShortText(value: unknown, max: number): string | undefined { return typeof value === "string" ? value.slice(0, max).replace(/[\u0000-\u001f\u007f]/g, "") : undefined; }
+function safePublicText(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return redactSecrets(value).value.slice(0, maxChars).replace(/[\u0000-\u001f\u007f]/g, "");
+}
 function safeEnum(value: unknown, allowed: readonly string[]): string | undefined { return typeof value === "string" && allowed.includes(value) ? value : undefined; }
-function safeStringArray(value: unknown, maxItems: number, maxChars: number): string[] | undefined { if (!Array.isArray(value)) return undefined; return value.filter((item): item is string => typeof item === "string").slice(0, maxItems).map((item) => item.slice(0, maxChars)); }
+function safePublicStringArray(value: unknown, maxItems: number, maxChars: number): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, maxItems).flatMap((item): string[] => {
+    const safe = safePublicText(item, maxChars);
+    return safe === undefined ? [] : [safe];
+  });
+}
 function firstValue(value: Record<string, unknown>, keys: readonly string[]): unknown { for (const key of keys) if (value[key] !== undefined) return value[key]; return undefined; }
 function firstString(value: Record<string, unknown>, keys: readonly string[]): string | undefined { const item = firstValue(value, keys); return typeof item === "string" ? item : undefined; }
 function isRole(value: unknown): value is HermesHistoryRole { return value === "assistant" || value === "system" || value === "tool" || value === "user"; }

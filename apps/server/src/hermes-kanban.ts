@@ -1,3 +1,5 @@
+import { redactSecrets } from "./secret-scrubber.js";
+
 const KANBAN_PREFIX = "/api/plugins/kanban";
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -327,8 +329,8 @@ function parseCard(value: unknown): SafeKanbanCard {
   const raw = record(value, "card");
   return {
     id: validCardId(string(raw.id, "card id")),
-    title: boundedText(string(raw.title, "title"), "title", 1, 240),
-    body: nullableBoundedText(raw.body, "body", 32_000),
+    title: safeUpstreamText(string(raw.title, "title"), "title", 1, 240),
+    body: nullableSafeUpstreamText(raw.body, "body", 32_000),
     assignee: raw.assignee === null || raw.assignee === undefined
       ? null
       : validProfile(string(raw.assignee, "assignee")),
@@ -337,7 +339,7 @@ function parseCard(value: unknown): SafeKanbanCard {
     createdAt: nonNegativeInteger(raw.created_at, "created at"),
     startedAt: nullableNonNegativeInteger(raw.started_at, "started at"),
     completedAt: nullableNonNegativeInteger(raw.completed_at, "completed at"),
-    latestSummary: nullableBoundedText(raw.latest_summary, "latest summary", 16_000),
+    latestSummary: nullableSafeUpstreamText(raw.latest_summary, "latest summary", 16_000),
     commentCount: raw.comment_count === undefined
       ? 0
       : nonNegativeInteger(raw.comment_count, "comment count"),
@@ -349,8 +351,8 @@ function parseComment(value: unknown): SafeKanbanComment {
   return {
     id: nonNegativeInteger(raw.id, "comment id"),
     cardId: validCardId(string(raw.task_id, "comment card id")),
-    author: boundedText(string(raw.author, "comment author"), "comment author", 1, 128),
-    body: boundedText(string(raw.body, "comment body"), "comment body", 1, 16_000),
+    author: safeUpstreamText(string(raw.author, "comment author"), "comment author", 1, 128),
+    body: safeUpstreamText(string(raw.body, "comment body"), "comment body", 1, 16_000),
     createdAt: nonNegativeInteger(raw.created_at, "comment created at"),
   };
 }
@@ -443,6 +445,16 @@ function nullableBoundedText(value: unknown, label: string, max: number): string
     throw new HermesKanbanUpstreamError(`Hermes Kanban returned an invalid ${label}.`);
   }
   return value;
+}
+
+function safeUpstreamText(value: string, label: string, min: number, max: number): string {
+  const text = boundedText(value, label, min, max);
+  return redactSecrets(text).value;
+}
+
+function nullableSafeUpstreamText(value: unknown, label: string, max: number): string | null {
+  const text = nullableBoundedText(value, label, max);
+  return text === null ? null : redactSecrets(text).value;
 }
 
 function boundedInteger(value: unknown, label: string, min: number, max: number): number {

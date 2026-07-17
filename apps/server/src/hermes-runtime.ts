@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { redactSecrets } from "./secret-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
@@ -236,14 +237,16 @@ async function probeStatus(
       reason: "ready",
       runtime: {
         version: status.version,
-        releaseDate: status.release_date,
+        releaseDate: safePublicText(status.release_date, 200),
         configVersion: status.config_version,
         latestConfigVersion: status.latest_config_version,
         gatewayRunning: status.gateway_running,
-        gatewayState: status.gateway_state,
+        gatewayState: status.gateway_state === null ? null : safePublicText(status.gateway_state, 200),
         activeSessions: status.active_sessions,
         authRequired: status.auth_required ?? false,
-        authProviders: status.auth_providers === undefined ? [] : [...status.auth_providers],
+        authProviders: status.auth_providers === undefined
+          ? []
+          : status.auth_providers.slice(0, 100).map((provider) => safePublicText(provider, 100)),
       },
     };
   } catch (error) {
@@ -254,6 +257,10 @@ async function probeStatus(
   } finally {
     clearTimeout(timer);
   }
+}
+
+function safePublicText(value: string, maxChars: number): string {
+  return redactSecrets(value).value.slice(0, maxChars).replace(/[\u0000-\u001f\u007f]/g, "");
 }
 
 async function readBoundedBody(response: Response, maxBytes: number): Promise<string> {

@@ -33,6 +33,7 @@ import {
   moveTask,
   refreshKanbanBoard,
   registerKanbanRuntime,
+  retryTaskComments,
   taskCommentDetail,
   tasks,
   toggleTaskComments
@@ -458,6 +459,49 @@ test("comment confirmation requires a successful detail GET started after confir
     allowUnconfirmedCommentResend(CARD.id);
     assert.equal(unconfirmedTaskComments.value[CARD.id] === undefined, scenario.expected);
   });
+});
+
+test("a detail GET started before confirmation cannot authorize resend when it finishes later", async () => {
+  resetKanbanRuntimeState();
+  let deferDetails = false;
+  let deferBoard = false;
+  let boardRequest: ReturnType<typeof deferred<ReturnType<typeof board>>> | undefined;
+  const detailRequests: Array<ReturnType<typeof deferred<KanbanCardDetailResult>>> = [];
+  registerKanbanRuntime(fakeApi({
+    fetchBoard: async () => {
+      if (!deferBoard) return board([CARD]);
+      boardRequest = deferred<ReturnType<typeof board>>();
+      return boardRequest.promise;
+    },
+    fetchCard: async () => {
+      if (!deferDetails) return detail(CARD.id, []);
+      const request = deferred<KanbanCardDetailResult>();
+      detailRequests.push(request);
+      return request.promise;
+    },
+    addComment: async () => { throw new DOMException("response lost", "AbortError"); }
+  }));
+  await refreshKanbanBoard();
+  await toggleTaskComments(CARD.id);
+  assert.equal(await addTaskComment(CARD.id, "maybe committed"), "commit-unknown");
+
+  deferDetails = true;
+  const oldDetail = retryTaskComments();
+  assert.equal(detailRequests.length, 1);
+  deferBoard = true;
+  const confirmation = confirmUnconfirmedComment(CARD.id);
+  await waitUntil(() => boardRequest !== undefined);
+
+  detailRequests[0]!.resolve(detail(CARD.id, []));
+  await oldDetail;
+  boardRequest!.reject(new Error("board offline"));
+  await waitUntil(() => detailRequests.length === 2);
+  detailRequests[1]!.reject(new Error("new detail offline"));
+
+  assert.equal(await confirmation, false);
+  assert.equal(unconfirmedTaskComments.value[CARD.id]?.checked, false);
+  allowUnconfirmedCommentResend(CARD.id);
+  assert.notEqual(unconfirmedTaskComments.value[CARD.id], undefined);
 });
 
 test("commit-unknown card creation is blocked until an authoritative board check", async () => {

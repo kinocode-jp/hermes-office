@@ -32,7 +32,7 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
       { role: "system", content: "internal system prompt", timestamp: 1_700_000_000 },
       { role: "user", content: `Use HERMES_DASHBOARD_SESSION_TOKEN=${DASHBOARD_SECRET} in this turn`, timestamp: 1_700_000_001 },
       { role: "assistant", content: [{ type: "text", text: `Working with OPENAI_API_KEY = '${OPENAI_SECRET}'` }, { type: "image", data: "hidden" }] },
-      { role: "tool", content: "PRIVATE OUTPUT", tool_name: "terminal" },
+      { role: "tool", content: "PRIVATE OUTPUT", tool_name: `TOOL_TOKEN=${DASHBOARD_SECRET}` },
       { role: "invalid", content: "drop" },
     ];
     const requestedLimit = Number(new URL(observedUrl, "http://127.0.0.1").searchParams.get("limit") ?? historyRows.length);
@@ -67,7 +67,7 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
   assert.equal(history.messages[1]?.text, "Use HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED] in this turn");
   assert.equal(history.messages[2]?.text, "Working with OPENAI_API_KEY = '[REDACTED]'");
   assert.equal(history.messages[3]?.text, "[Tool output hidden]");
-  assert.equal(history.messages[3]?.toolName, "terminal");
+  assert.equal(history.messages[3]?.toolName, "TOOL_TOKEN=[REDACTED]");
   assert.equal(JSON.stringify(history).includes("must never escape"), false);
   assert.equal(JSON.stringify(history).includes("PRIVATE OUTPUT"), false);
   assert.equal(JSON.stringify(history).includes(DASHBOARD_SECRET), false);
@@ -117,16 +117,17 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
   });
   sockets.on("connection", (websocket) => {
     websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "secret.request", session_id: "live-1", payload: { request_id: "secret-1", prompt: "API key" } } }));
-    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "status.update", session_id: "live-1", payload: { kind: "process", text: `Preparing with ci_token = '${DASHBOARD_SECRET}'`, private_state: "hidden" } } }));
-    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "approval.request", session_id: "live-1", payload: { command: "curl https://x/?token=supersecretvalue", description: `AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"`, choices: ["once", "deny"], allow_permanent: false, raw_args: { password: "hidden" } } } }));
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "status.update", session_id: "live-1", payload: { kind: `KIND_TOKEN=${DASHBOARD_SECRET}`, status: `STATUS_TOKEN=${OPENAI_SECRET}`, text: `Preparing with ci_token = '${DASHBOARD_SECRET}'`, private_state: "hidden" } } }));
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "approval.request", session_id: "live-1", payload: { command: "curl https://x/?token=supersecretvalue", description: `AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"`, choices: ["once", `CHOICE_TOKEN=${DASHBOARD_SECRET}`, "deny"], allow_permanent: false, raw_args: { password: "hidden" } } } }));
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "clarify.request", session_id: "live-1", payload: { request_id: "clarify-1", question: "Continue?", choices: ["yes", `OPENAI_API_KEY=${OPENAI_SECRET}`] } } }));
     websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "message.delta", session_id: "live-1", payload: { text: `OPENAI_API_KEY=${OPENAI_SECRET}`, role: "assistant" } } }));
-    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "tool.progress", session_id: "live-1", payload: { tool_id: "tool-1", name: "terminal", summary: `database_password = '${PASSWORD_SECRET}'` } } }));
-    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "error", session_id: "live-1", payload: { message: `service_secret: ${SERVICE_SECRET}` } } }));
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "tool.progress", session_id: "live-1", payload: { tool_id: "tool-1", name: `TOOL_TOKEN=${DASHBOARD_SECRET}`, status: `STATUS_TOKEN=${OPENAI_SECRET}`, summary: `database_password = '${PASSWORD_SECRET}'` } } }));
+    websocket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type: "error", session_id: "live-1", payload: { status: `STATUS_TOKEN=${DASHBOARD_SECRET}`, message: `service_secret: ${SERVICE_SECRET}`, model: `MODEL_TOKEN=${OPENAI_SECRET}`, provider: `PROVIDER_TOKEN=${AWS_SECRET}`, version: `VERSION_TOKEN=${PASSWORD_SECRET}` } } }));
     websocket.on("message", (data) => {
       const frame = JSON.parse(data.toString()) as Record<string, unknown>;
       received.push(frame);
       const params = frame.params as Record<string, unknown>;
-      websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { session_id: "live-1", stored_session_id: "stored-1", message_count: 0, running: false, status: "idle", cwd: "/private/path", token: "hidden", echoed: params } }));
+      websocket.send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { session_id: "live-1", stored_session_id: "stored-1", message_count: 0, running: false, status: `RPC_TOKEN=${DASHBOARD_SECRET}`, cwd: "/private/path", token: "hidden", echoed: params } }));
     });
   });
   const origin = await listen(http);
@@ -152,16 +153,26 @@ test("chat connection sends only validated allowlisted RPC and normalizes result
   assert.deepEqual(received[0]?.params, { profile: "coder", title: "New chat", close_on_disconnect: true, source: "desktop" });
   assert.deepEqual(received[1]?.params, { profile: "coder", title: "Seeded chat", close_on_disconnect: true, source: "desktop", messages: [{ role: "system", content: "Office shared context" }] });
   assert.deepEqual(received[2]?.params, { session_id: "stored-1", profile: "coder", close_on_disconnect: true, source: "desktop" });
-  assert.deepEqual(result.value, { liveSessionId: "live-1", storedSessionId: "stored-1", messageCount: 0, running: false, status: "idle" });
+  assert.deepEqual(result.value, { liveSessionId: "live-1", storedSessionId: "stored-1", messageCount: 0, running: false, status: "RPC_TOKEN=[REDACTED]" });
   assert.equal(JSON.stringify(result).includes("private/path"), false);
-  assert.equal(events.length, 5);
-  assert.deepEqual(events[0], { type: "status.update", sessionId: "live-1", payload: { kind: "process", message: "Preparing with ci_token = '[REDACTED]'" } });
+  assert.equal(events.length, 6);
+  assert.deepEqual(events[0], { type: "status.update", sessionId: "live-1", payload: { kind: "KIND_TOKEN=[REDACTED]", status: "STATUS_TOKEN=[REDACTED]", message: "Preparing with ci_token = '[REDACTED]'" } });
   assert.equal(events[1]?.type, "approval.request");
   assert.equal(events[1]?.payload.command, "curl https://x/?token=[REDACTED]");
   assert.equal(events[1]?.payload.description, 'AWS_SECRET_ACCESS_KEY = "[REDACTED]"');
-  assert.equal(events[2]?.payload.text, "OPENAI_API_KEY=[REDACTED]");
-  assert.equal(events[3]?.payload.summary, "database_password = '[REDACTED]'");
-  assert.equal(events[4]?.payload.message, "service_secret: [REDACTED]");
+  assert.deepEqual(events[1]?.payload.choices, ["once", "CHOICE_TOKEN=[REDACTED]", "deny"]);
+  assert.deepEqual(events[2], { type: "clarify.request", sessionId: "live-1", payload: { requestId: "clarify-1", question: "Continue?", choices: ["yes", "OPENAI_API_KEY=[REDACTED]"] } });
+  assert.equal(events[3]?.payload.text, "OPENAI_API_KEY=[REDACTED]");
+  assert.equal(events[4]?.payload.name, "TOOL_TOKEN=[REDACTED]");
+  assert.equal(events[4]?.payload.status, "STATUS_TOKEN=[REDACTED]");
+  assert.equal(events[4]?.payload.summary, "database_password = '[REDACTED]'");
+  assert.deepEqual(events[5]?.payload, {
+    status: "STATUS_TOKEN=[REDACTED]",
+    message: "service_secret: [REDACTED]",
+    model: "MODEL_TOKEN=[REDACTED]",
+    provider: "PROVIDER_TOKEN=[REDACTED]",
+    version: "VERSION_TOKEN=[REDACTED]",
+  });
   assert.equal(JSON.stringify(events).includes("hidden"), false);
   for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, PASSWORD_SECRET, SERVICE_SECRET]) {
     assert.equal(JSON.stringify(events).includes(secret), false);

@@ -271,8 +271,8 @@ async function listSkillsWith(client: ProfileClient): Promise<SkillSettingsDto[]
     if (!isRecord(item) || typeof item.name !== "string" || !NAME_PATTERN.test(item.name)) return [];
     return [{
       name: item.name,
-      category: safeText(item.category, 120) ?? "uncategorized",
-      description: redactSecrets(safeText(item.description, 2_000) ?? "").value,
+      category: safePublicText(item.category, 120) ?? "uncategorized",
+      description: safePublicText(item.description, 2_000) ?? "",
       enabled: item.enabled === true,
       provenance: item.provenance === "agent" || item.provenance === "bundled" || item.provenance === "hub" ? item.provenance : "unknown",
       usage: Math.max(0, Math.trunc(finiteNumber(item.usage) ?? 0)),
@@ -283,8 +283,8 @@ async function listSkillsWith(client: ProfileClient): Promise<SkillSettingsDto[]
 async function skillContentWith(client: ProfileClient, skill: string, maxBytes: number): Promise<SkillContentDto> {
   const raw = await client.request(`/api/skills/content?name=${encodeURIComponent(skill)}`, "GET");
   if (!isRecord(raw) || typeof raw.content !== "string") throw invalidBackend();
-  const safe = redactSecrets(truncateUtf8(raw.content, maxBytes));
-  return { name: skill, content: safe.value, redacted: safe.redacted, revision: revisionOf(raw.content) };
+  const safe = redactSecrets(raw.content);
+  return { name: skill, content: truncateUtf8(safe.value, maxBytes), redacted: safe.redacted, revision: revisionOf(raw.content) };
 }
 
 async function memoryStatusWith(client: ProfileClient): Promise<MemoryStatusDto> {
@@ -295,7 +295,7 @@ async function memoryStatusWith(client: ProfileClient): Promise<MemoryStatusDto>
   const userBytes = safeBytes(files.user);
   const providers = Array.isArray(raw.providers) ? raw.providers.slice(0, 100).flatMap((item): MemoryProviderDto[] => {
     if (!isRecord(item) || typeof item.name !== "string" || !PROVIDER_PATTERN.test(item.name)) return [];
-    return [{ name: item.name, description: redactSecrets(safeText(item.description, 1_000) ?? "").value, configured: item.configured === true }];
+    return [{ name: item.name, description: safePublicText(item.description, 1_000) ?? "", configured: item.configured === true }];
   }) : [];
   return { activeProvider: safeProvider(raw.active), providers, builtin: { memoryBytes, userBytes, hasMemory: memoryBytes > 0, hasUser: userBytes > 0 } };
 }
@@ -308,20 +308,22 @@ async function providerConfigWith(client: ProfileClient, provider: string): Prom
     const kind = memoryFieldKind(item.kind);
     const options = Array.isArray(item.options) ? item.options.slice(0, 100).flatMap((option): MemoryProviderFieldDto["options"] => {
       if (!isRecord(option) || typeof option.value !== "string") return [];
-      return [{ value: option.value.slice(0, 200), label: safeText(option.label, 200) ?? option.value.slice(0, 200), description: redactSecrets(safeText(option.description, 1_000) ?? "").value }];
+      const value = publicOptionValue(option.value, 200);
+      if (value === undefined) return [];
+      return [{ value, label: safePublicText(option.label, 200) ?? value, description: safePublicText(option.description, 1_000) ?? "" }];
     }) : [];
     const value = kind === "secret" ? undefined : safeFieldValue(item.value, kind);
-    return [{ key: item.key, label: safeText(item.label, 200) ?? item.key, kind, description: redactSecrets(safeText(item.description, 1_000) ?? "").value, required: item.required === true, isSet: item.is_set === true, ...(value === undefined ? {} : { value }), options }];
+    return [{ key: item.key, label: safePublicText(item.label, 200) ?? item.key, kind, description: safePublicText(item.description, 1_000) ?? "", required: item.required === true, isSet: item.is_set === true, ...(value === undefined ? {} : { value }), options }];
   }) : [];
-  const label = safeText(raw.label, 200) ?? provider;
+  const label = safePublicText(raw.label, 200) ?? provider;
   return { name: provider, label, fields, revision: revisionOf(JSON.stringify({ name: provider, label, fields })) };
 }
 
 async function soulWith(client: ProfileClient): Promise<ProfileSoulDto> {
   const raw = await client.request(`/api/profiles/${encodeURIComponent(client.profile)}/soul`, "GET");
   if (!isRecord(raw) || typeof raw.content !== "string") throw invalidBackend();
-  const safe = redactSecrets(truncateUtf8(raw.content, 256 * 1024));
-  return { profile: client.profile, content: safe.value, exists: raw.exists === true, redacted: safe.redacted, revision: revisionOf(raw.content) };
+  const safe = redactSecrets(raw.content);
+  return { profile: client.profile, content: truncateUtf8(safe.value, 256 * 1024), exists: raw.exists === true, redacted: safe.redacted, revision: revisionOf(raw.content) };
 }
 
 export interface OfficeGlobalSettingsDto {
@@ -733,8 +735,9 @@ function requiredName(value: unknown, label: string): string { if (typeof value 
 function requiredProvider(value: unknown, allowBuiltin: boolean): string { if (allowBuiltin && value === "") return ""; if (typeof value !== "string" || !PROVIDER_PATTERN.test(value)) throw invalid("Memory provider is invalid."); return value; }
 function safeProvider(value: unknown): string { return typeof value === "string" && (value === "" || PROVIDER_PATTERN.test(value)) ? value : ""; }
 function memoryFieldKind(value: unknown): MemoryFieldKind { return value === "boolean" || value === "secret" || value === "select" ? value : "text"; }
-function safeFieldValue(value: unknown, kind: MemoryFieldKind): boolean | string | undefined { if (kind === "boolean") return typeof value === "boolean" ? value : undefined; return typeof value === "string" ? redactSecrets(value.slice(0, 8_192)).value : undefined; }
-function safeText(value: unknown, max: number): string | undefined { return typeof value === "string" ? value.slice(0, max).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "") : undefined; }
+function safeFieldValue(value: unknown, kind: MemoryFieldKind): boolean | string | undefined { if (kind === "boolean") return typeof value === "boolean" ? value : undefined; return safePublicText(value, 8_192); }
+function safePublicText(value: unknown, maxChars: number): string | undefined { return typeof value === "string" ? redactSecrets(value).value.slice(0, maxChars).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "") : undefined; }
+function publicOptionValue(value: string, maxChars: number): string | undefined { const safe = redactSecrets(value); return safe.redacted ? undefined : safe.value.slice(0, maxChars).replace(/[\u0000-\u001f\u007f]/g, ""); }
 function safeBytes(value: unknown): number { const number = finiteNumber(value); return number === undefined ? 0 : Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(number))); }
 function finiteNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
 function bounded(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }

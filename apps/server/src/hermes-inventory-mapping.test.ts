@@ -169,6 +169,33 @@ test("missing timestamps use a stable unknown sentinel and preserve cursor gener
   assert.deepEqual(cache.page("sessions", first.metadata.sessions.nextCursor!, 100).sessions.map((item) => item.id), ["missing-100"]);
 });
 
+test("session inventory redacts Hermes secrets before bounding browser display text", async () => {
+  const secret = "dashboard-example-value-123456";
+  const row = {
+    ...session("secret-safe", 1),
+    title: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}`,
+    preview: `credential: OPENAI_API_KEY=${secret}`,
+  };
+  const inventory = await collectHermesInventory(requester([profile()], [row]));
+  const serialized = JSON.stringify(inventory.sessions);
+  assert.equal(serialized.includes(secret), false);
+  assert.equal(serialized.includes("[REDACTED]"), true);
+});
+
+test("secret-shaped profile and session identities are dropped instead of exposed", async () => {
+  const secret = "dashboard-example-value-123456";
+  const inventory = await collectHermesInventory(requester(
+    [profile(), profile(`TOKEN=${secret}`)],
+    [session("safe-session", 1), { ...session("unsafe", 1), id: `TOKEN=${secret}` }],
+  ));
+  const serialized = JSON.stringify(inventory);
+  assert.equal(serialized.includes(secret), false);
+  assert.deepEqual(inventory.profiles.map((item) => item.id), ["profile-0"]);
+  assert.deepEqual(inventory.sessions.map((item) => item.id), ["safe-session"]);
+  assert.equal(inventory.profilesState.truncated, true);
+  assert.equal(inventory.sessionsState.truncated, true);
+});
+
 function requester(
   profiles: Record<string, unknown>[],
   sessions: Record<string, unknown>[],

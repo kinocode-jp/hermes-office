@@ -24,7 +24,7 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
     if (request.url === "/api/skills") {
       writeJson(response, [
         { name: "browser", category: "tools", description: "Browse safely", enabled: true, provenance: "bundled", usage: 3, path: "/Users/private/skills" },
-        { name: "local", category: "custom", description: `HERMES_DASHBOARD_SESSION_TOKEN=${DASHBOARD_SECRET}`, enabled: false, provenance: "agent", api_key: "hidden" },
+        { name: "local", category: `CATEGORY_TOKEN=${OPENAI_SECRET}`, description: `HERMES_DASHBOARD_SESSION_TOKEN=${DASHBOARD_SECRET}`, enabled: false, provenance: "agent", api_key: "hidden" },
       ]);
       return;
     }
@@ -60,6 +60,7 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
   assert.deepEqual(requests.map((item) => item.url).sort(), ["/api/memory", "/api/profiles/coder/soul", "/api/skills"]);
   assert.equal(requests.every((item) => item.token === TOKEN), true);
   assert.equal(settings.skills[0]?.name, "browser");
+  assert.equal(settings.skills[1]?.category, "CATEGORY_TOKEN=[REDACTED]");
   assert.equal(settings.skills[1]?.description, "HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED]");
   assert.deepEqual(settings.memory.builtin, { memoryBytes: 40, userBytes: 12, hasMemory: true, hasUser: true });
   assert.equal(settings.memory.providers[0]?.description, 'Built in; AWS_SECRET_ACCESS_KEY = "[REDACTED]"');
@@ -82,10 +83,21 @@ test("skill and memory mutations are validated and use official Hermes routes", 
     if (request.method === "GET" && request.url === "/api/memory/providers/honcho/config?surface=declared") {
       writeJson(response, {
         name: "honcho",
-        label: "Honcho",
+        label: `PROVIDER_TOKEN=${DASHBOARD_SECRET}`,
         fields: [
-          { key: "mode", label: "Mode", kind: "select", description: "Storage mode", value: "local", is_set: true, options: [{ value: "local", label: "Local", description: "Local mode" }] },
-          { key: "api_key", label: "API key", kind: "secret", description: "Credential", value: "must-not-leak", is_set: true, options: [] },
+          {
+            key: "mode",
+            label: `FIELD_TOKEN=${OPENAI_SECRET}`,
+            kind: "select",
+            description: `AWS_SECRET_ACCESS_KEY=${AWS_SECRET}`,
+            value: "local",
+            is_set: true,
+            options: [
+              { value: "local", label: `LABEL_TOKEN=${PASSWORD_SECRET}`, description: `OPTION_TOKEN=${OPENAI_SECRET}` },
+              { value: `VALUE_TOKEN=${DASHBOARD_SECRET}`, label: "Must be removed", description: "Unsafe value" },
+            ],
+          },
+          { key: "api_key", label: `SECRET_LABEL_TOKEN=${DASHBOARD_SECRET}`, kind: "secret", description: "Credential", value: "must-not-leak", is_set: true, options: [] },
         ],
       });
       return;
@@ -109,9 +121,16 @@ test("skill and memory mutations are validated and use official Hermes routes", 
   assert.equal(content.redacted, true);
   assert.match(content.revision, /^[A-Za-z0-9_-]{43}$/);
   const config = await adapter.getMemoryProviderConfig("coder", "honcho");
+  assert.equal(config.label, "PROVIDER_TOKEN=[REDACTED]");
   assert.equal(config.fields[0]?.value, "local");
+  assert.equal(config.fields[0]?.label, "FIELD_TOKEN=[REDACTED]");
+  assert.equal(config.fields[0]?.description, "AWS_SECRET_ACCESS_KEY=[REDACTED]");
+  assert.deepEqual(config.fields[0]?.options, [{ value: "local", label: "LABEL_TOKEN=[REDACTED]", description: "OPTION_TOKEN=[REDACTED]" }]);
+  assert.equal(config.fields[1]?.label, "SECRET_LABEL_TOKEN=[REDACTED]");
   assert.equal(config.fields[1]?.kind, "secret");
   assert.equal("value" in (config.fields[1] ?? {}), false);
+  const serializedConfig = JSON.stringify(config);
+  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, PASSWORD_SECRET]) assert.equal(serializedConfig.includes(secret), false);
 
   await adapter.setSkillEnabled("coder", "local", false);
   await adapter.updateSkillContent("coder", "local", "---\nname: local\n---\nSafe instructions");

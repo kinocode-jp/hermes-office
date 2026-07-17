@@ -9,6 +9,7 @@ import type {
   ProfileSummary,
 } from "@hermes-office/protocol";
 import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-office/protocol";
+import { redactSecrets } from "./secret-scrubber.js";
 
 const UPSTREAM_PAGE_SIZE = 100;
 const SNAPSHOT_PAGE_SIZE = 100;
@@ -20,6 +21,8 @@ const INVENTORY_TIMEOUT_MS = 7_000;
 const INVENTORY_GENERATION_TTL_MS = 5 * 60_000;
 const MAX_INVENTORY_GENERATIONS = 8;
 const MAX_EPOCH_SECONDS = 8_640_000_000_000;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export type HermesJsonResult = { value: unknown; bytes: number };
 export type HermesInventoryRequester = (path: string, timeoutMs: number) => Promise<HermesJsonResult>;
@@ -337,7 +340,7 @@ function mapProfiles(rows: Record<string, unknown>[], sessions: ChatSessionSumma
   let failures = 0;
   for (const row of rows) {
     try {
-      const name = readString(row, "name");
+      const name = safeIdentifier(readString(row, "name"), PROFILE_PATTERN);
       if (name === undefined) throw new Error("Hermes profile name is invalid.");
       const active = activeCounts.get(name) ?? 0;
       const rawSkillCount = row.skill_count;
@@ -355,19 +358,29 @@ function mapSessions(rows: Record<string, unknown>[]): MappingResult<ChatSession
   let failures = 0;
   for (const row of rows) {
     try {
-      const id = readString(row, "id");
-      const profile = readString(row, "profile");
+      const id = safeIdentifier(readString(row, "id"), SESSION_ID_PATTERN);
+      const profile = safeIdentifier(readString(row, "profile"), PROFILE_PATTERN);
       if (id === undefined || profile === undefined) throw new Error("Hermes session identity is invalid.");
-      const preview = readString(row, "preview");
+      const preview = safeInventoryText(readString(row, "preview"), 240);
       const startedAt = optionalEpochToIso(row, "started_at");
       const lastActive = optionalEpochToIso(row, "last_active");
       const endedAt = optionalEpochToIso(row, "ended_at");
       const createdAt = startedAt ?? UNKNOWN_INVENTORY_TIMESTAMP;
       const updatedAt = lastActive ?? endedAt ?? UNKNOWN_INVENTORY_TIMESTAMP;
-      items.push({ id, profileId: profile, title: readString(row, "title") || "Untitled session", activity: row.is_active === true ? "thinking" : "idle", createdAt, updatedAt, ...(preview === undefined ? {} : { lastMessagePreview: preview.slice(0, 240) }) });
+      const title = safeInventoryText(readString(row, "title"), 240) || "Untitled session";
+      items.push({ id, profileId: profile, title, activity: row.is_active === true ? "thinking" : "idle", createdAt, updatedAt, ...(preview === undefined ? {} : { lastMessagePreview: preview }) });
     } catch { failures += 1; }
   }
   return { items, failures };
+}
+
+function safeInventoryText(value: string | undefined, maxChars: number): string | undefined {
+  if (value === undefined) return undefined;
+  return redactSecrets(value).value.slice(0, maxChars).replace(/[\u0000-\u001f\u007f]/g, "");
+}
+
+function safeIdentifier(value: string | undefined, pattern: RegExp): string | undefined {
+  return value !== undefined && pattern.test(value) ? value : undefined;
 }
 
 function activity(gateway: boolean, active: number): AgentActivity { return active > 0 ? "thinking" : gateway ? "idle" : "offline"; }

@@ -48,7 +48,76 @@ test("retains URL query, Bearer, private-key, and ANSI protections", () => {
   assert.equal(result.value.includes("bearer-example-value"), false);
   assert.equal(result.value.includes("private-example-value"), false);
   assert.equal(result.value.includes("\u001b"), false);
-  assert.match(result.value, /access_token=\[REDACTED\]/);
+  assert.match(result.value, /access_token=\[REDACTED\]&mode=safe/);
+  assert.doesNotMatch(result.value, /\[REDACTED\]\]/);
   assert.match(result.value, /Bearer \[REDACTED\]/);
   assert.match(result.value, /\[REDACTED PRIVATE KEY\]/);
+});
+
+test("rescans nested assignments instead of letting an outer label hide a secret", () => {
+  const source = [
+    "note: HERMES_DASHBOARD_SESSION_TOKEN=dashboard-example-value",
+    "credential: OPENAI_API_KEY=openai-example-value",
+    "status=clientSecret=client-example-value",
+    'wrapper: "database_password=database-example-value"',
+    "https://example.test/?session_token=session-example-value&mode=safe",
+  ].join("\n");
+
+  const result = redactSecrets(source);
+
+  assert.equal(result.redacted, true);
+  assert.equal(result.value, [
+    "note: HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED]",
+    "credential: OPENAI_API_KEY=[REDACTED]",
+    "status=clientSecret=[REDACTED]",
+    'wrapper: "database_password=[REDACTED]"',
+    "https://example.test/?session_token=[REDACTED]&mode=safe",
+  ].join("\n"));
+  for (const line of source.split("\n")) assert.equal(containsLikelySecret(line), true);
+});
+
+test("does not treat token metadata or nonsecret prose identifiers as credentials", () => {
+  const source = [
+    "token_count = 12345678",
+    "token_limit = 87654321",
+    "accessTokenTtl = 86400000",
+    "nonsecret = abcdefgh",
+    "secretary = enabled-value",
+  ].join("\n");
+
+  assert.deepEqual(redactSecrets(source), { value: source, redacted: false });
+  assert.equal(containsLikelySecret(source), false);
+  for (const secret of [
+    "accessToken = access-example-value",
+    "clientSecret = client-example-value",
+    "database_password = database-example-value",
+    "AWS_SECRET_ACCESS_KEY = aws-example-value",
+  ]) assert.equal(containsLikelySecret(secret), true);
+});
+
+test("redaction is idempotent for query and assignment placeholders", () => {
+  const source = [
+    "https://example.test/?token=query-example-value&mode=safe",
+    "OPENAI_API_KEY=openai-example-value",
+    'clientSecret = "client-example-value"',
+    "session_token=[REDACTED]actual-secret-value",
+  ].join("\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+
+  assert.equal(once.value, [
+    "https://example.test/?token=[REDACTED]&mode=safe",
+    "OPENAI_API_KEY=[REDACTED]",
+    'clientSecret = "[REDACTED]"',
+    "session_token=[REDACTED]",
+  ].join("\n"));
+  assert.equal(twice.value, once.value);
+  assert.equal(twice.redacted, false);
+});
+
+test("long non-sensitive assignment chains remain unchanged with bounded header scanning", () => {
+  const source = `${"note:".repeat(32_768)}safe-value`;
+  assert.deepEqual(redactSecrets(source), { value: source, redacted: false });
+  assert.equal(containsLikelySecret(source), false);
 });
