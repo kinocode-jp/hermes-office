@@ -119,7 +119,10 @@ export function AppearanceSettings() {
 
             <section aria-labelledby="font-heading">
               <div class="appearance-section-title">
-                <h3 id="font-heading">{copy.textSize} <InfoTip text={copy.hint} align="start" /></h3>
+                <div class="heading-info-group">
+                  <h3 id="font-heading">{copy.textSize}</h3>
+                  <InfoTip text={copy.hint} align="start" />
+                </div>
                 <output>{Math.round(activeFontScale.value * 100)}%</output>
               </div>
               <div class="font-size-choices" role="group" aria-label={copy.textSize}>

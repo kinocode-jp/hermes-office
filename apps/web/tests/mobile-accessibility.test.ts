@@ -296,6 +296,49 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
   }
 });
 
+test("small phones preserve scaled primary navigation, safe areas, and touch targets", async () => {
+  const [styles, appearance] = await Promise.all([
+    readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/appearance.css", import.meta.url), "utf8"),
+  ]);
+
+  const mobileShell = declarationsForSelector(styles, ".app-shell.has-open-workspace");
+  assert.match(mobileShell, /84px \+ env\(safe-area-inset-bottom\)/);
+  assert.match(styles, /\.side-rail button \{[^}]*min-height: 68px[^}]*overflow-wrap: anywhere/);
+  assert.match(styles, /@media \(max-width: 359px\) \{\s*\.brand > span:last-child \{ display: none; \}/);
+  assert.match(styles, /\.brand > span:last-child \{[^}]*overflow: hidden/);
+  assert.match(styles, /\.workspace-drawer \{[^}]*safe-area-inset-top[^}]*safe-area-inset-bottom/);
+  assert.match(styles, /\.info-tip__trigger \{[^}]*min-height: var\(--target-mobile\) !important/);
+  assert.match(appearance, /\.compact-inspector-button,[\s\S]*\.user-button,[\s\S]*min-height: var\(--target-mobile\)/);
+
+  const mobileTargets = selectorsUsing(appearance, "min-height: var(--target-mobile)");
+  for (const selector of [".side-rail button", ".appearance-trigger", ".language-button", ".compact-inspector-button", ".user-button"]) {
+    assert.match(mobileTargets, new RegExp(escapeRegExp(selector)), `${selector} must keep a mobile touch target`);
+  }
+
+  const audit = await readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8");
+  assert.match(audit, /@media \(max-width: 400px\) \{[\s\S]*\.access-audit__gate \{ grid-template-columns: auto minmax\(0, 1fr\); \}/);
+  assert.match(audit, /\.access-audit__gate > button \{[^}]*width: 100%[^}]*min-height: var\(--target-mobile\)/);
+});
+
+test("information triggers remain siblings of headings used as accessible names", async () => {
+  const sources = await Promise.all([
+    "office-scene.tsx",
+    "avatar-picker.tsx",
+    "profile-panel.tsx",
+    "access-audit.tsx",
+    "appearance-settings.tsx",
+    "live-settings.tsx",
+  ].map((file) => readFile(new URL(`../src/components/${file}`, import.meta.url), "utf8")));
+
+  for (const source of sources) {
+    assert.doesNotMatch(source, /<(h[1-3])\b[^>]*>(?:(?!<\/\1>)[\s\S])*<InfoTip/);
+  }
+  assert.match(sources[0] ?? "", /<h1 id="office-title">\{t\("office\.title"\)\}<\/h1>\s*<InfoTip/);
+  assert.match(sources[1] ?? "", /<h3 id="avatar-picker-title">[\s\S]*?<\/h3>\s*<InfoTip/);
+  assert.match(sources[4] ?? "", /<h3 id="font-heading">\{copy\.textSize\}<\/h3>\s*<InfoTip/);
+});
+
 function session(id: string, title: string): ChatSession {
   return { id, profileId: "theo", title, status: "ready", messages: [], remoteKind: "demo" };
 }

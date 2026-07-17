@@ -86,7 +86,7 @@
 .access-audit__current strong { margin-top: 3px; color: var(--ls-paper); font-size: calc(0.9rem * var(--font-scale)); }
 .access-audit__current small { margin-top: 2px; color: var(--ls-muted); font-size: calc(0.7rem * var(--font-scale)); }
 
-.access-audit__gate button {
+.access-audit__gate > button {
   min-height: 34px;
   padding: 0 13px;
   border: 1px solid rgba(109, 224, 211, 0.32);
@@ -96,8 +96,8 @@
   cursor: pointer;
 }
 
-.access-audit__gate button:hover:not(:disabled) { background: rgba(109, 224, 211, 0.09); }
-.access-audit__gate button:disabled { cursor: progress; opacity: 0.5; }
+.access-audit__gate > button:hover:not(:disabled) { background: rgba(109, 224, 211, 0.09); }
+.access-audit__gate > button:disabled { cursor: progress; opacity: 0.5; }
 
 .access-audit__rail { max-height: 310px; overflow: auto; }
 .access-audit__rail-head,
@@ -166,4 +166,10 @@
   .access-audit__rail li > :nth-child(3) { color: var(--ls-muted); font-size: calc(0.72rem * var(--font-scale)); }
   .access-audit__outcome { justify-self: end; }
   .access-audit__message { flex-direction: column; gap: 5px; }
+}
+
+@media (max-width: 400px) {
+  .access-audit__gate { grid-template-columns: auto minmax(0, 1fr); }
+  .access-audit__current { grid-row: 2; }
+  .access-audit__gate > button { grid-column: 1 / -1; width: 100%; min-height: var(--target-mobile); }
 }

@@ -54,12 +54,12 @@ test("retains URL query, authorization-header, private-key, and ANSI protections
   assert.match(result.value, /\[REDACTED PRIVATE KEY\]/);
 });
 
-test("ANSI normalization alone is not classified as credential material", () => {
+test("ANSI normalization is allowed for output but rejected on persisted input", () => {
   const decoratedProse = "\u001b[31mwarning\u001b[0m";
   const decoratedSecret = "\u001b[33mAPI_KEY=credential-value\u001b[0m";
 
   assert.deepEqual(redactSecrets(decoratedProse), { value: "warning", redacted: true });
-  assert.equal(containsLikelySecret(decoratedProse), false);
+  assert.equal(containsLikelySecret(decoratedProse), true);
   assert.equal(containsLikelySecret(decoratedSecret), true);
 });
 
@@ -160,7 +160,7 @@ test("128 KiB default-ignorable and format-control splits remain bounded and fai
   }
 });
 
-test("well-formed terminal normalization alone stays non-secret and idempotent", () => {
+test("well-formed terminal output stays normalized and idempotent while input fails closed", () => {
   const source = [
     "safe\u001b[31mred\u001b[0m text",
     "safe\u009b32mgreen\u009b0m text",
@@ -171,9 +171,25 @@ test("well-formed terminal normalization alone stays non-secret and idempotent",
   ].join("\n");
   const normalized = ["safered text", "safegreen text", "safe prose", "safe link", "safe link", "safe text"].join("\n");
 
-  assert.equal(containsLikelySecret(source), false);
+  assert.equal(containsLikelySecret(source), true);
   assert.deepEqual(redactSecrets(source), { value: normalized, redacted: true });
   assert.deepEqual(redactSecrets(normalized), { value: normalized, redacted: false });
+  assert.equal(containsLikelySecret(normalized), false);
+});
+
+test("input validation rejects credentials and safe prose inside every allowed terminal sequence", () => {
+  const cases = [
+    ["OSC title secret", "\u001b]0;API_KEY=super-secret-value\u0007"],
+    ["OSC 8 URI secret", "\u001b]8;;https://example.test/?token=super-secret-value\u001b\\label"],
+    ["C1 OSC secret", "\u009d0;Authorization: Bearer super-secret-value-123456\u009c"],
+    ["SGR parameter credential", "API_KEY=\u001b[12345678m"],
+    ["safe SGR", "\u001b[32msafe prose\u001b[0m"],
+    ["safe OSC title", "\u001b]0;ordinary title\u0007safe prose"],
+    ["CAN inside OSC", "API\u001b]0;ignored\u0018_KEY=cancelled-secret\u0007"],
+    ["SUB inside C1 OSC", "client\u009d0;ignored\u001aSecret=cancelled-secret\u009c"],
+  ] as const;
+
+  for (const [label, source] of cases) assert.equal(containsLikelySecret(source), true, label);
 });
 
 test("terminal display-state controls fail closed instead of preserving decoy text", () => {
@@ -238,7 +254,7 @@ test("128 KiB terminal decoration and display-state floods stay bounded", () => 
   const unsafeCursor = `safe${"\u001b[D".repeat(32_768)}API_KEY=cursor-flood-secret`;
 
   assert.deepEqual(redactSecrets(safeSgr), { value: "safetext", redacted: true });
-  assert.equal(containsLikelySecret(safeSgr), false);
+  assert.equal(containsLikelySecret(safeSgr), true);
   for (const source of [unsafeBackspaces, unsafeCursor]) {
     const once = redactSecrets(source);
     assert.deepEqual(once, { value: "[REDACTED TERMINAL DATA]", redacted: true });
@@ -272,7 +288,7 @@ test("terminal string length boundary is explicit and fail-closed", () => {
   const beyondLimit = `safe\u001b]${"x".repeat(8_190)}\u0007text`;
 
   assert.deepEqual(redactSecrets(atLimit), { value: "safetext", redacted: true });
-  assert.equal(containsLikelySecret(atLimit), false);
+  assert.equal(containsLikelySecret(atLimit), true);
   assert.deepEqual(redactSecrets(beyondLimit), { value: "[REDACTED TERMINAL DATA]", redacted: true });
   assert.equal(containsLikelySecret(beyondLimit), true);
 });

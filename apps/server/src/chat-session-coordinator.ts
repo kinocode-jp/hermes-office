@@ -123,9 +123,16 @@ export class ChatSessionCoordinator {
     return this.#live.get(sessionId)?.owner;
   }
 
+  /** Authorizes commands, so it is intentionally absent during close settlement. */
   liveLeaseToken(owner: ChatSessionOwner, liveSessionId: string): symbol | undefined {
     const lease = this.#live.get(liveSessionId);
     return lease?.owner === owner && !this.#closingLive.has(liveSessionId) ? lease.token : undefined;
+  }
+
+  /** Identifies the current event route even while commands are fenced for close. */
+  routingLeaseToken(owner: ChatSessionOwner, liveSessionId: string): symbol | undefined {
+    const lease = this.#live.get(liveSessionId);
+    return lease?.owner === owner ? lease.token : undefined;
   }
 
   ownsLiveLease(owner: ChatSessionOwner, liveSessionId: string, token: symbol): boolean {

@@ -62,7 +62,10 @@ export function AccessAudit() {
         <div class={`access-audit__signal is-${accessMode.toLowerCase()}`} aria-hidden="true"><span /></div>
         <div class="access-audit__title">
           <p>{t("audit.eyebrow")}</p>
-          <h2 id="access-audit-title">{t("audit.title")} <InfoTip text={t("audit.footer")} align="start" side="bottom" /></h2>
+          <div class="heading-info-group">
+            <h2 id="access-audit-title">{t("audit.title")}</h2>
+            <InfoTip text={t("audit.footer")} align="start" side="bottom" />
+          </div>
         </div>
         <div class="access-audit__current">
           <span>SESSION · {accessMode}</span>

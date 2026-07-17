@@ -364,6 +364,8 @@ body { font-size: var(--text-body); line-height: 1.5; }
   .kanban-unconfirmed button,
   .appearance-trigger,
   .language-button,
+  .compact-inspector-button,
+  .user-button,
   .device-login-language { min-height: var(--target-mobile); }
   .mobile-workspace-bar button,
   .mobile-workspace-bar b,

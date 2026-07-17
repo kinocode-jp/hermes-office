@@ -261,6 +261,9 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       const targetId = chatTargetId(frame.method, frame.params);
       const targetOwner = targetId === undefined ? undefined : sessionCoordinator.ownerForLive(targetId);
       const targetLeaseToken = targetId === undefined ? undefined : sessionCoordinator.liveLeaseToken(sessionOwner, targetId);
+      const targetRoutingLeaseToken = targetId === undefined
+        ? undefined
+        : sessionCoordinator.routingLeaseToken(sessionOwner, targetId);
       if (OWNED_LIVE_METHODS.has(frame.method) && targetLeaseToken === undefined) {
         sendSessionInUse(send, frame.id);
         return;
@@ -283,8 +286,9 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         const approvalId = typeof frame.params?.approval_id === "string" ? frame.params.approval_id : "";
         const queue = targetId === undefined ? undefined : pendingApprovals.get(targetId);
         const pending = queue?.[0];
+        const identityMatches = targetRoutingLeaseToken !== undefined && pending?.leaseToken === targetRoutingLeaseToken;
         const ownsTarget = targetLeaseToken !== undefined && pending?.leaseToken === targetLeaseToken;
-        if (!ownsTarget && targetId !== undefined) pendingApprovals.delete(targetId);
+        if (!identityMatches && targetId !== undefined) pendingApprovals.delete(targetId);
         if (!ownsTarget || pending === undefined || pending.createdAt === undefined || pending.createdOrder === undefined || pending.expiresAt === undefined || pending.id !== approvalId || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt || !pending.choices.has(choice)) {
           if (targetId !== undefined && pending?.id === approvalId && pending.expiresAt !== undefined && pending.expiresAt <= receivedAt) {
             const promoted = expireApproval(pendingApprovals, targetId, pending);
@@ -301,9 +305,11 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       if (frame.method === "clarify.respond") {
         const requestId = typeof frame.params?.request_id === "string" ? frame.params.request_id : "";
         const pending = pendingClarifications.get(requestId);
-        const ownsTarget = pending !== undefined
+        const identityMatches = pending !== undefined
+          && sessionCoordinator.routingLeaseToken(sessionOwner, pending.sessionId) === pending.leaseToken;
+        const ownsTarget = identityMatches
           && sessionCoordinator.ownsLiveLease(sessionOwner, pending.sessionId, pending.leaseToken);
-        if (pending !== undefined && !ownsTarget) pendingClarifications.delete(requestId);
+        if (pending !== undefined && !identityMatches) pendingClarifications.delete(requestId);
         if (!ownsTarget || pending === undefined || pending.state !== "pending" || receivedOrder < pending.createdOrder || receivedAt < pending.createdAt || pending.expiresAt <= receivedAt) {
           if (pending?.expiresAt !== undefined && pending.expiresAt <= receivedAt) pendingClarifications.delete(requestId);
           sendRpcError(send, frame.id, -32004, "Pending clarification was not found.");
@@ -430,7 +436,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
   const handleUpstreamEvent = (event: HermesChatEvent): void => {
     if (closed || closeWhenIdleReason !== undefined) return;
     if (event.sessionId !== undefined) {
-      const leaseToken = sessionCoordinator.liveLeaseToken(sessionOwner, event.sessionId);
+      const leaseToken = sessionCoordinator.routingLeaseToken(sessionOwner, event.sessionId);
       if (leaseToken === undefined) return;
       const prior = liveEventBudgets.get(event.sessionId);
       const budget = prior?.leaseToken === leaseToken ? prior : { leaseToken, count: 0, bytes: 0 };
@@ -448,7 +454,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       liveEventBudgets.set(event.sessionId, budget);
     }
     if (event.type === "approval.request" && event.sessionId !== undefined) {
-      const leaseToken = sessionCoordinator.liveLeaseToken(sessionOwner, event.sessionId);
+      const leaseToken = sessionCoordinator.routingLeaseToken(sessionOwner, event.sessionId);
       if (leaseToken === undefined) return;
       const normalizedEvent = normalizeApprovalEvent(event, canApprovePermanently);
       const choices = Array.isArray(normalizedEvent.payload.choices)
@@ -471,7 +477,7 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       return;
     }
     if (event.type === "clarify.request" && event.sessionId !== undefined && typeof event.payload.requestId === "string") {
-      const leaseToken = sessionCoordinator.liveLeaseToken(sessionOwner, event.sessionId);
+      const leaseToken = sessionCoordinator.routingLeaseToken(sessionOwner, event.sessionId);
       if (leaseToken === undefined) return;
       const createdAt = now();
       const createdOrder = ++chronology;

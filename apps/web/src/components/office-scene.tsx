@@ -300,7 +300,10 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
   return (
     <section class="office-wrap" aria-labelledby="office-title" data-view={effectiveView}>
       <header class="office-heading">
-        <h1 id="office-title">{t("office.title")} <InfoTip text={t("office.hint")} align="start" side="bottom" /></h1>
+        <div class="heading-info-group">
+          <h1 id="office-title">{t("office.title")}</h1>
+          <InfoTip text={t("office.hint")} align="start" side="bottom" />
+        </div>
         <div class="office-toolbar">
           <div class="shift-readout" aria-label={t("office.summary")}>
             <span class="stat stat--working" title={t("office.workingCount")}><i /><b>{working}</b></span>

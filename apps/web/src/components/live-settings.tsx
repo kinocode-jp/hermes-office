@@ -380,7 +380,10 @@ function SectionHead({ code, title, note, info }: { code: string; title: string;
   return (
     <header class="settings-section-head">
       <span>{code}</span>
-      <h2>{title}{info && <> <InfoTip text={info} align="end" /></>}</h2>
+      <div class="heading-info-group">
+        <h2>{title}</h2>
+        {info && <InfoTip text={info} align="end" />}
+      </div>
       {note && <small>{note}</small>}
     </header>
   );

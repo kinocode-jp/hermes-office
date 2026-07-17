@@ -235,12 +235,32 @@ function cookieHeaderValueEnd(value: string, start: number, quote: string | unde
   return end;
 }
 
-/** Detect secret material on input surfaces that must reject rather than redact. */
+/**
+ * Reject secret material and terminal controls on persisted input surfaces.
+ *
+ * Unlike output redaction, input validation must never discard a control
+ * sequence and then approve the original string. Terminal decoration is not
+ * meaningful in Office settings, so fail closed on every C0/C1 control except
+ * tab, LF, and a well-formed CRLF pair before scanning credential material.
+ */
 export function containsLikelySecret(value: string): boolean {
-  const normalized = normalizeTerminalText(value);
-  if (normalized.malformed || redactCredentialMaterial(normalized.value) !== normalized.value) return true;
-  const shadow = unicodeObfuscationShadow(normalized.value);
+  if (hasRejectedInputControl(value) || redactCredentialMaterial(value) !== value) return true;
+  const shadow = unicodeObfuscationShadow(value);
   return shadow !== undefined && redactCredentialMaterial(shadow) !== shadow;
+}
+
+function hasRejectedInputControl(value: string): boolean {
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    const code = value.charCodeAt(cursor);
+    if (code === 0x0d) {
+      if (value.charCodeAt(cursor + 1) !== 0x0a) return true;
+      cursor += 1;
+      continue;
+    }
+    if (code === 0x09 || code === 0x0a) continue;
+    if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
+  }
+  return false;
 }
 
 function unicodeObfuscationShadow(value: string): string | undefined {

@@ -97,7 +97,10 @@ function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
     <div class="panel-section">
       <article class="profile-live-route">
         <span>{copy.code}</span>
-        <h3>{t(copy.title)} <InfoTip text={`${t(copy.description)} ${t("profile.liveNote")}`} align="end" side="bottom" /></h3>
+        <div class="heading-info-group">
+          <h3>{t(copy.title)}</h3>
+          <InfoTip text={`${t(copy.description)} ${t("profile.liveNote")}`} align="end" side="bottom" />
+        </div>
         <dl>
           <div><dt>{t("profile.target")}</dt><dd>{profile.name}</dd></div>
           <div><dt>{t("profile.id")}</dt><dd>{profile.id}</dd></div>

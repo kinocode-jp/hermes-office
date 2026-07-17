@@ -102,6 +102,66 @@ test("a joined close failure retries owner-locally, then resets peers behind his
   assert.equal(recovered.hasMethod("office.ready"), true);
 });
 
+test("a failed explicit close preserves ordered live events and interaction state on the open socket", async () => {
+  const hermes = new CloseSettlementFakeHermes({ failSessionClose: true });
+  const closeGate = deferred<void>();
+  hermes.delayFirstSessionClose(closeGate.promise);
+  const { coordinator, dependencies } = setup(hermes);
+  const owner = new FakeWebSocket();
+  handleOfficeChatConnection(owner as unknown as WebSocket, dependencies);
+  await settle(4);
+  owner.rpc(20, "session.resume", { session_id: "owner", profile: "coder" });
+  await settle(6);
+
+  owner.rpc(21, "session.close", { session_id: "live-owner" });
+  await settle(2);
+  hermes.emitEvent({ type: "message.delta", sessionId: "live-owner", payload: { text: "during close" } });
+  hermes.emitEvent({
+    type: "approval.request", sessionId: "live-owner",
+    payload: { choices: ["once", "deny"], allowPermanent: false },
+  });
+  hermes.emitEvent({
+    type: "clarify.request", sessionId: "live-owner",
+    payload: { requestId: "q-during-close", question: "Continue?" },
+  });
+  await settle(2);
+
+  const duringCloseEvents = owner.events("live-owner");
+  assert.deepEqual(duringCloseEvents.map((event) => event.type), [
+    "message.delta", "approval.request", "clarify.request",
+  ]);
+  assert.equal(duringCloseEvents[0]?.payload?.text, "during close");
+  assert.equal(owner.errorCode(21), undefined, "the close remains pending while events are routed");
+  const approvalId = String(duringCloseEvents[1]?.payload?.approvalId ?? "");
+  assert.notEqual(approvalId, "");
+
+  owner.rpc(22, "prompt.submit", { session_id: "live-owner", text: "must wait" });
+  owner.rpc(23, "approval.respond", {
+    session_id: "live-owner", approval_id: approvalId, choice: "once",
+  });
+  owner.rpc(24, "clarify.respond", { request_id: "q-during-close", answer: "wait" });
+  await settle(4);
+  assert.equal(owner.errorCode(22), -32006, "commands remain fenced during close settlement");
+  assert.equal(owner.errorCode(23), -32004);
+  assert.equal(owner.errorCode(24), -32004);
+  assert.deepEqual(hermes.interactionRequests, []);
+
+  closeGate.resolve();
+  await waitFor(() => owner.errorCode(21) === -32000);
+  assert.ok(coordinator.ownerForLive("live-owner"), "a failed close retains the original lease");
+  assert.equal(owner.closed, undefined, "a definitive owner-local close failure does not fence the socket");
+
+  owner.rpc(25, "approval.respond", {
+    session_id: "live-owner", approval_id: approvalId, choice: "once",
+  });
+  owner.rpc(26, "clarify.respond", { request_id: "q-during-close", answer: "continue" });
+  await settle(6);
+  assert.equal(owner.errorCode(25), undefined);
+  assert.equal(owner.errorCode(26), undefined);
+  assert.deepEqual(hermes.interactionRequests, ["approval.respond", "clarify.respond"]);
+  assert.deepEqual(hermes.sessionCloseRequests, ["live-owner", "live-owner"]);
+});
+
 function setup(hermes: CloseSettlementFakeHermes) {
   const coordinator = new ChatSessionCoordinator();
   const runtime = hermes.runtime();
@@ -119,6 +179,7 @@ function setup(hermes: CloseSettlementFakeHermes) {
 
 class CloseSettlementFakeHermes {
   readonly sessionCloseRequests: string[] = [];
+  readonly interactionRequests: string[] = [];
   connectionCloseCount = 0;
   readonly #closedValue: boolean;
   readonly #failSessionClose: boolean;
@@ -163,6 +224,7 @@ class CloseSettlementFakeHermes {
   emit(liveSessionId: string, text: string): void {
     this.#onEvent?.({ type: "message.delta", sessionId: liveSessionId, payload: { text } });
   }
+  emitEvent(event: HermesChatEvent): void { this.#onEvent?.(event); }
 
   async #request(request: HermesChatRequest): Promise<HermesChatResult> {
     if (this.#connectionClosed) throw new Error("generation closed");
@@ -181,6 +243,12 @@ class CloseSettlementFakeHermes {
       if (this.#failSessionClose) throw new HermesChatTransportError("timed_out", "fake close timeout");
       this.#live.delete(liveSessionId);
       return { method: request.method, value: { closed: this.#closedValue } };
+    }
+    if (request.method === "approval.respond" || request.method === "clarify.respond") {
+      this.interactionRequests.push(request.method);
+      return request.method === "approval.respond"
+        ? { method: request.method, value: { resolved: true } }
+        : { method: request.method, value: { status: "ok" } };
     }
     return { method: request.method, value: { status: "ok" } };
   }
@@ -203,12 +271,15 @@ class FakeWebSocket extends EventEmitter {
     this.emit("message", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params })), false);
   }
   hasMethod(method: string): boolean { return this.frames().some((frame) => frame.method === method); }
-  events(liveSessionId: string): Array<{ payload?: Record<string, unknown> }> {
+  errorCode(id: number): number | undefined {
+    return (this.frames().find((frame) => frame.id === id)?.error as { code?: number } | undefined)?.code;
+  }
+  events(liveSessionId: string): Array<{ type?: string; payload?: Record<string, unknown> }> {
     return this.frames().flatMap((frame) => {
       if (frame.method !== "event") return [];
-      const params = frame.params as { sessionId?: string; session_id?: string; payload?: Record<string, unknown> } | undefined;
+      const params = frame.params as { sessionId?: string; session_id?: string; type?: string; payload?: Record<string, unknown> } | undefined;
       if (params === undefined || (params.sessionId ?? params.session_id) !== liveSessionId) return [];
-      return [{ ...(params.payload === undefined ? {} : { payload: params.payload }) }];
+      return [{ ...(typeof params.type === "string" ? { type: params.type } : {}), ...(params.payload === undefined ? {} : { payload: params.payload }) }];
     });
   }
   frames(): Array<Record<string, unknown>> {

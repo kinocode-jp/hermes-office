@@ -68,8 +68,12 @@ test("settings HTTP rejects unbounded/unknown input and omits memory reset and s
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-http-settings-safe-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const adapter = makeAdapter([]);
+  let persistenceWrites = 0;
+  const globalSettings = new OfficeGlobalSettingsStore(join(directory, "global.json"), {
+    beforeWrite: async () => { persistenceWrites += 1; },
+  });
   const server = createServer(async (request, response) => {
-    const result = await routeSettingsHttp(request, new URL(request.url ?? "/", "http://office.local"), { settings: adapter, globalSettings: new OfficeGlobalSettingsStore(join(directory, "global.json")) }, 128);
+    const result = await routeSettingsHttp(request, new URL(request.url ?? "/", "http://office.local"), { settings: adapter, globalSettings }, 128);
     response.writeHead(result.status, { "Content-Type": "application/json", ...(result.headers ?? {}) });
     response.end(JSON.stringify(result.body));
   });
@@ -86,6 +90,27 @@ test("settings HTTP rejects unbounded/unknown input and omits memory reset and s
   assert.equal(invalidType.status, 415);
   const oversized = await fetch(`${origin}/api/v1/settings/global`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedRevision: 0, context: "x".repeat(500) }) });
   assert.equal(oversized.status, 413);
+
+  const hiddenCredentials = [
+    "\u001b]0;API_KEY=title-secret\u0007",
+    "\u001b]8;;https://example.test/?token=uri-secret\u001b\\label",
+    "\u009d0;Authorization: Bearer c1-secret-value\u009c",
+    "API_KEY=\u001b[12345678m",
+    "API\u001b]0;ignored\u0018_KEY=cancelled-secret\u0007",
+  ];
+  for (const context of hiddenCredentials) {
+    const rejected = await jsonFetch(`${origin}/api/v1/settings/global`, "PATCH", { expectedRevision: 0, context });
+    assert.equal(rejected.status, 400, context);
+    assert.equal(JSON.stringify(rejected.body).includes(context), false, context);
+  }
+  assert.equal(persistenceWrites, 0, "rejected control sequences never reach the persistence boundary");
+  const after = await fetch(`${origin}/api/v1/settings/global`);
+  const serialized = await after.text();
+  assert.equal(after.status, 200);
+  assert.equal((JSON.parse(serialized) as { revision: number }).revision, 0);
+  for (const secretValue of ["title-secret", "uri-secret", "c1-secret-value", "12345678", "cancelled-secret"]) {
+    assert.equal(serialized.includes(secretValue), false);
+  }
 });
 
 test("settings HTTP maps adapter conflict and failure to stable public errors", async (t) => {

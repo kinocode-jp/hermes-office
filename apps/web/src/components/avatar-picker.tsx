@@ -85,7 +85,10 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
         <header>
           <div>
             <small>{t("avatar.kicker")}</small>
-            <h3 id="avatar-picker-title">{t("avatar.title", { name: profileName })} <InfoTip text={`${t("avatar.description")} ${t("avatar.note")}`} align="end" /></h3>
+            <div class="heading-info-group">
+              <h3 id="avatar-picker-title">{t("avatar.title", { name: profileName })}</h3>
+              <InfoTip text={`${t("avatar.description")} ${t("avatar.note")}`} align="end" />
+            </div>
           </div>
           <button type="button" disabled={busy} onClick={onClose} aria-label={t("common.close")}>×</button>
         </header>
