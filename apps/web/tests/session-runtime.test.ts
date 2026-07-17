@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatSteerResult } from "../src/chat-api.ts";
 import type { ChatSession } from "../src/domain.ts";
-import { locale, localizeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
+import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
 import { ChatSteerMark, chatComposerState, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "../src/session-runtime.ts";
 import {
@@ -142,6 +142,42 @@ test("steering labels, placeholders, and failures are localized without overstat
     setLocale("en");
     assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["Steer", "Add guidance for the running Hermes session…", "Accepted by Hermes queue"]);
     assert.match(localizeRuntimeMessage("追加指示を送信できませんでした。接続を確認して再試行してください。"), /Unable to send steering guidance/);
+  } finally { setLocale(previous); }
+});
+
+test("Office-owned chat titles, tool fallbacks, and transport copy switch locale without translating Hermes text", () => {
+  const previous = locale.value;
+  const draft = { title: "", titlePresentation: "new-chat" as const };
+  const HermesTitle = { title: "ユーザーがHermesに付けた題名" };
+  const tool = reduceChatGatewayEvent(ready, {
+    type: "tool.start", liveSessionId: "live", payload: { toolId: "tool-1", name: "Shell" },
+  }).messages[0]!;
+  const genericTool = reduceChatGatewayEvent(ready, {
+    type: "tool.complete", liveSessionId: "live", payload: { toolId: "tool-2" },
+  }).messages[0]!;
+  const HermesDetail = reduceChatGatewayEvent(ready, {
+    type: "tool.start", liveSessionId: "live", payload: { toolId: "tool-3", name: "Shell", summary: "利用者由来の要約" },
+  }).messages[0]!;
+  try {
+    setLocale("ja");
+    assert.equal(chatSessionTitle(draft), "新しい会話");
+    assert.equal(chatMessageBody(tool), "Shellを実行中…");
+    assert.equal(chatMessageBody(genericTool), "ツール 完了");
+    setLocale("en");
+    assert.equal(chatSessionTitle(draft), "New chat");
+    assert.equal(chatSessionTitle(HermesTitle), HermesTitle.title);
+    assert.equal(chatMessageBody(tool), "Running Shell…");
+    assert.equal(chatMessageBody(genericTool), "Tool complete");
+    assert.equal(chatMessageBody(HermesDetail), "Shell: 利用者由来の要約");
+    for (const [source, expected] of [
+      ["端末の再認証が必要です。", "This device must be authenticated again."],
+      ["接続復旧後に履歴を再同期します", "History will be resynchronized after the connection recovers."],
+      ["session.resumeがタイムアウトしました。", "session.resume timed out."],
+      ["明示的なデモモードで表示中", "Showing explicit demo mode"],
+      ["Hermes runtimeの準備を待っています", "Waiting for the Hermes runtime"],
+      ["コメントを送信中", "Sending comment"],
+    ] as const) assert.equal(localizeRuntimeMessage(source), expected);
+    assert.equal(localizeRuntimeMessage("Hermesが生成した日本語の自由文"), "Hermesが生成した日本語の自由文");
   } finally { setLocale(previous); }
 });
 

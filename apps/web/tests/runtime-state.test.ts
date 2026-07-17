@@ -1,16 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { OfficeSnapshot } from "../src/domain.ts";
+import type { KanbanApi } from "../src/kanban-api.ts";
 import {
+  addTaskComment,
   applyOfficeSnapshot,
+  assignTask,
+  createTask,
   createSession,
+  kanbanAssignees,
+  kanbanState,
+  moveTask,
   officeConnection,
   openSession,
   openSessionIds,
   profileList,
   registerChatRuntime,
+  registerKanbanRuntime,
+  refreshKanbanBoard,
   sessions,
   setOfficeError,
+  taskCommentDetail,
+  toggleTaskComments,
   tasks
 } from "../src/store.ts";
 
@@ -72,7 +83,7 @@ function recordChatRuntime(): { ensured: string[]; released: string[] } {
   return calls;
 }
 
-test("demo fixtures load only when the server explicitly advertises demo mode", () => {
+test("demo fixtures load only when the server explicitly advertises demo mode", async () => {
   assert.deepEqual(profileList.value, []);
   assert.deepEqual(sessions.value, []);
 
@@ -81,6 +92,52 @@ test("demo fixtures load only when the server explicitly advertises demo mode", 
   assert.equal(officeConnection.value.state, "demo");
   assert.ok(profileList.value.length > 0);
   assert.ok(sessions.value.every((session) => session.remoteKind === "demo"));
+  await waitUntil(() => kanbanState.value.state === "ready");
+  assert.deepEqual(tasks.value.map((task) => task.id), ["t-104", "t-105", "t-106", "t-107", "t-108", "t-102"]);
+  assert.deepEqual(kanbanAssignees.value, ["researcher", "builder", "operator", "editor"]);
+});
+
+test("demo Kanban supports its primary interactions without Hermes", async () => {
+  applyOfficeSnapshot(snapshot({ demo: true, state: "unconfigured" }), serverUrl);
+  await waitUntil(() => kanbanState.value.state === "ready");
+
+  await toggleTaskComments("t-104");
+  assert.equal(taskCommentDetail.value.state, "ready");
+  assert.equal(taskCommentDetail.value.comments.length, 3);
+  assert.equal(await addTaskComment("t-104", "デモから追加したコメント"), true);
+  await waitUntil(() => taskCommentDetail.value.state === "ready" && taskCommentDetail.value.comments.length === 4);
+  assert.equal(tasks.value.find((task) => task.id === "t-104")?.comments, 4);
+
+  await moveTask("t-105", "blocked");
+  await assignTask("t-107", "editor");
+  assert.equal(tasks.value.find((task) => task.id === "t-105")?.status, "blocked");
+  assert.equal(tasks.value.find((task) => task.id === "t-107")?.assigneeId, "editor");
+
+  assert.equal(await createTask("デモで作成したカード"), true);
+  assert.ok(tasks.value.some((task) => task.title === "デモで作成したカード" && task.status === "triage"));
+  await toggleTaskComments("t-104");
+});
+
+test("live Kanban registration cannot replace an active demo and is restored afterward", async () => {
+  applyOfficeSnapshot(snapshot({ demo: true, state: "unconfigured" }), serverUrl);
+  await waitUntil(() => kanbanState.value.state === "ready");
+  const liveCard = { id: "live-card", title: "Live only", status: "todo" as const, priority: "normal" as const, comments: 0 };
+  const liveApi: KanbanApi = {
+    fetchBoard: async () => ({ tasks: [liveCard], assignees: ["live-profile"], latestEventId: 9 }),
+    fetchCard: async () => ({ card: liveCard, comments: [], availableCommentCount: 0, truncated: false }),
+    createCard: async () => liveCard,
+    updateCard: async () => liveCard,
+    addComment: async () => {}
+  };
+
+  registerKanbanRuntime(liveApi);
+  await refreshKanbanBoard();
+  assert.ok(tasks.value.some((task) => task.id === "t-104"));
+  assert.ok(!tasks.value.some((task) => task.id === liveCard.id));
+
+  applyOfficeSnapshot(snapshot(), serverUrl);
+  await refreshKanbanBoard();
+  assert.deepEqual(tasks.value.map((task) => task.id), [liveCard.id]);
 });
 
 test("real runtime errors, non-ready state, and empty inventory clear stale demo data", () => {
@@ -179,3 +236,11 @@ test("returning from live data to explicit demo releases live targets and replac
   assert.ok(openSessionIds.value.every((id) => id !== liveSessionId));
   assert.deepEqual(calls, { ensured: [liveSessionId], released: [liveSessionId] });
 });
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("Timed out waiting for runtime state.");
+}

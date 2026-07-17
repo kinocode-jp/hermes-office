@@ -149,9 +149,14 @@ export class HermesKanbanAdapter {
     const path = withQuery(`${KANBAN_PREFIX}/tasks/${encodeURIComponent(id)}`, { board });
     const raw = record(await this.#request({ method: "GET", path }), "card detail");
     const commentsRaw = array(raw.comments, "comments", MAX_COMMENTS);
+    const card = parseCard(raw.task);
+    const comments = commentsRaw.map(parseComment);
+    if (card.id !== id || comments.some((comment) => comment.cardId !== id)) {
+      throw new HermesKanbanUpstreamError("Hermes Kanban returned mismatched card detail.");
+    }
     return {
-      card: parseCard(raw.task),
-      comments: commentsRaw.map(parseComment),
+      card,
+      comments,
     };
   }
 

@@ -135,6 +135,20 @@ test("unsafe identifiers, profiles, and dispatcher-owned statuses fail before tr
   assert.equal(calls, 0);
 });
 
+test("card detail is identity-bound to the requested card", async () => {
+  const otherCard = { ...CARD, id: "t_cafebabe" };
+  const validComment = { id: 1, task_id: CARD.id, author: "mina", body: "note", created_at: 101 };
+
+  await assert.rejects(
+    mockAdapter(() => ({ task: otherCard, comments: [validComment] })).getCard(CARD.id),
+    /mismatched card detail/,
+  );
+  await assert.rejects(
+    mockAdapter(() => ({ task: CARD, comments: [{ ...validComment, task_id: otherCard.id }] })).getCard(CARD.id),
+    /mismatched card detail/,
+  );
+});
+
 test("HTTP requester is loopback-only, route-limited, and never returns upstream details", async () => {
   assert.throws(
     () => createHermesKanbanHttpRequester({ baseUrl: "https://example.com", sessionToken: "x".repeat(32) }),

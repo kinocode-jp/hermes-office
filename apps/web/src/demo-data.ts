@@ -1,4 +1,4 @@
-import type { ChatSession, Profile, WorkTask } from "./domain";
+import type { ChatSession, Profile, TaskComment, WorkTask } from "./domain";
 
 export const profiles: Profile[] = [
   {
@@ -93,4 +93,19 @@ export const initialTasks: WorkTask[] = [
   { id: "t-107", title: "Mobile chat navigation", status: "triage", priority: "normal", comments: 0 },
   { id: "t-108", title: "Skill provenance labels", status: "ready", assigneeId: "editor", priority: "normal", comments: 2 },
   { id: "t-102", title: "Office state reducer", status: "done", assigneeId: "builder", priority: "normal", comments: 2 }
+];
+
+export const initialTaskComments: TaskComment[] = [
+  { id: 1, cardId: "t-104", author: "Mina", body: "serve の起動・再接続・終了の境界を先に整理しました。", createdAt: 1_752_652_100 },
+  { id: 2, cardId: "t-104", author: "Theo", body: "WebSocket の再接続時に履歴を先に同期する設計で確認します。", createdAt: 1_752_655_200 },
+  { id: 3, cardId: "t-104", author: "Mina", body: "公式APIで保証される項目に絞って文書化中です。", createdAt: 1_752_659_400 },
+  { id: 4, cardId: "t-105", author: "Theo", body: "グローバル設定とProfile固有設定の優先順位をテストします。", createdAt: 1_752_661_000 },
+  { id: 5, cardId: "t-106", author: "Iris", body: "外部公開時は認証なしのアクセスを許可しません。", createdAt: 1_752_664_000 },
+  { id: 6, cardId: "t-106", author: "Mina", body: "Tailnet と公開プロキシを別の脅威モデルとして扱います。", createdAt: 1_752_665_800 },
+  { id: 7, cardId: "t-106", author: "Iris", body: "端末の失効と監査ログの確認手順を追加しました。", createdAt: 1_752_668_300 },
+  { id: 8, cardId: "t-106", author: "Ren", body: "利用者向けの注意書きを短く整理します。", createdAt: 1_752_670_100 },
+  { id: 9, cardId: "t-108", author: "Ren", body: "継承元が分かるラベル案を用意しました。", createdAt: 1_752_672_500 },
+  { id: 10, cardId: "t-108", author: "Mina", body: "Profile固有スキルとの見分けやすさを確認します。", createdAt: 1_752_674_200 },
+  { id: 11, cardId: "t-102", author: "Theo", body: "接続状態と表示状態を分離しました。", createdAt: 1_752_677_000 },
+  { id: 12, cardId: "t-102", author: "Iris", body: "エラー復旧後も選択中のProfileを保持できています。", createdAt: 1_752_680_000 }
 ];

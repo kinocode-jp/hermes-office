@@ -11,6 +11,7 @@ test("delayed create from a four-pane eviction is closed and cannot resurrect th
     profileId: `profile-${index + 1}`,
   }));
   for (const target of targets) harness.api.ensureSession(target);
+  await flush();
   const staleCreate = harness.socket.frame("session.create", "profile-1");
   assert.ok(staleCreate);
 
@@ -24,6 +25,7 @@ test("delayed create from a four-pane eviction is closed and cannot resurrect th
   harness.socket.respond(staleClose.id, undefined, { code: -32000, message: "close failed" });
 
   harness.api.ensureSession(targets[0]!);
+  await flush();
   const reopened = harness.socket.frames("session.create", "profile-1").at(-1)!;
   assert.notEqual(reopened.id, staleCreate.id);
   harness.socket.respond(reopened.id, { session_id: "live-current" });
@@ -34,15 +36,13 @@ test("delayed create from a four-pane eviction is closed and cannot resurrect th
   harness.api.stop();
 });
 
-test("delayed resume and history results are discarded after release", async () => {
+test("delayed history is discarded after release without starting resume", async () => {
   const history = deferred<unknown>();
   const harness = await createHarness(async <T>() => await history.promise as T);
   harness.api.ensureSession({ clientSessionId: "stored-client", profileId: "coder", storedSessionId: "stored-1" });
-  const resume = harness.socket.frame("session.resume", "stored-1");
-  assert.ok(resume);
+  assert.equal(harness.socket.frame("session.resume", "stored-1"), undefined);
   harness.api.releaseSession("stored-client");
 
-  harness.socket.respond(resume.id, { session_id: "live-resumed", stored_session_id: "stored-1" });
   history.resolve({
     sessionId: "stored-1",
     messages: [{ index: 0, role: "assistant", text: "must be discarded" }],
@@ -52,7 +52,7 @@ test("delayed resume and history results are discarded after release", async () 
   await flush();
   assert.equal(harness.ready.length, 0);
   assert.equal(harness.histories.length, 0);
-  assert.ok(harness.socket.frame("session.close", "live-resumed"));
+  assert.equal(harness.socket.frame("session.resume", "stored-1"), undefined);
   harness.api.stop();
 });
 
@@ -60,6 +60,7 @@ test("failed close keeps the tombstone and a same-id reopen gets a new generatio
   const harness = await createHarness();
   const target = { clientSessionId: "same-id", profileId: "builder" };
   harness.api.ensureSession(target);
+  await flush();
   const create = harness.socket.frame("session.create", "builder")!;
   harness.socket.respond(create.id, { session_id: "live-old" });
   await flush();
@@ -69,6 +70,7 @@ test("failed close keeps the tombstone and a same-id reopen gets a new generatio
   harness.socket.respond(close.id, undefined, { code: -32000, message: "temporary close failure" });
   harness.socket.event("live-old", "message.complete");
   harness.api.ensureSession(target);
+  await flush();
   const reopen = harness.socket.frames("session.create", "builder").at(-1)!;
   harness.socket.respond(reopen.id, { session_id: "live-new" });
   await flush();
@@ -137,9 +139,11 @@ test("steer sends one exact live session.steer request and rejects empty or unre
   await assert.rejects(harness.api.steer("missing", "guidance"), /未接続/);
   harness.api.ensureSession({ clientSessionId: "client-steer", profileId: "coder" });
   await assert.rejects(harness.api.steer("client-steer", "too early"), /未接続/);
+  await flush();
   const create = harness.socket.frame("session.create", "coder")!;
   harness.socket.respond(create.id, { session_id: "live-steer" });
   harness.api.ensureSession({ clientSessionId: "other-pane", profileId: "reviewer" });
+  await flush();
   const otherCreate = harness.socket.frame("session.create", "reviewer")!;
   harness.socket.respond(otherCreate.id, { session_id: "live-other" });
   await flush();
@@ -173,6 +177,7 @@ test("steer sends one exact live session.steer request and rejects empty or unre
 test("steer never crosses a target generation, release, or transport close", async () => {
   const harness = await createHarness();
   harness.api.ensureSession({ clientSessionId: "client-race", profileId: "old" });
+  await flush();
   const createOld = harness.socket.frame("session.create", "old")!;
   harness.socket.respond(createOld.id, { session_id: "live-old" });
   await flush();
@@ -182,6 +187,7 @@ test("steer never crosses a target generation, release, or transport close", asy
   harness.api.ensureSession({ clientSessionId: "client-race", profileId: "new" });
   harness.socket.respond(staleFrame.id, { status: "queued" });
   await assert.rejects(stale, /送信先が変更/);
+  await flush();
   const createNew = harness.socket.frame("session.create", "new")!;
   harness.socket.respond(createNew.id, { session_id: "live-new" });
   await flush();
@@ -251,6 +257,25 @@ test("a later history page failure delivers prior pages as partial history", asy
   await waitFor(() => harness.historyResults.length === 1);
   assert.deepEqual(harness.historyResults[0], { clientSessionId: "partial-client", messages: 4, result: { truncated: true, partial: true, reason: "upstream_error" } });
   assert.deepEqual(harness.historyBodies[0], ["m-2-0", "m-2-1", "m-1-0", "m-1-1"]);
+  assert.equal(harness.socket.frames("session.resume", "partial-stored").length, 1);
+  harness.api.stop();
+});
+
+test("a history error blocks resume until an explicit retry establishes the snapshot", async () => {
+  let available = false;
+  const harness = await createHarness(async <T>() => {
+    if (!available) throw new Error("history unavailable");
+    return { sessionId: "retry-stored", messages: [], pagination: { direction: "older", hasMore: false, returned: 0 } } as T;
+  });
+  const target = { clientSessionId: "retry-client", profileId: "coder", storedSessionId: "retry-stored" };
+  harness.api.ensureSession(target);
+  await waitFor(() => harness.historyErrors.length === 1);
+  assert.equal(harness.socket.frame("session.resume", "retry-stored"), undefined);
+
+  available = true;
+  harness.api.ensureSession(target);
+  await waitFor(() => harness.socket.frames("session.resume", "retry-stored").length === 1);
+  assert.equal(harness.socket.frames("session.resume", "retry-stored").length, 1);
   harness.api.stop();
 });
 
@@ -260,11 +285,13 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   const histories: string[] = [];
   const historyBodies: string[][] = [];
   const historyResults: Array<{ clientSessionId: string; messages: number; result: Pick<ChatHistoryResult, "truncated" | "partial" | "reason"> }> = [];
+  const historyErrors: Array<{ clientSessionId: string; message: string }> = [];
   const events: string[] = [];
   const errors: Array<{ clientSessionId: string; message: string }> = [];
   let sequence = 0;
   const callbacks: ChatApiCallbacks = {
-    onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {}, onHistoryError() {},
+    onSocketState() {}, onHistoryLoading() {}, onSessionConnecting() {}, onSessionDisconnected() {},
+    onHistoryError(clientSessionId, message) { historyErrors.push({ clientSessionId, message }); },
     onSessionError(clientSessionId, message) { errors.push({ clientSessionId, message }); },
     onHistory(clientSessionId, messages, _storedSessionId, result) { histories.push(clientSessionId); historyBodies.push(messages.map(({ body }) => body)); if (result) historyResults.push({ clientSessionId, messages: messages.length, result: { truncated: result.truncated, partial: result.partial, ...(result.reason ? { reason: result.reason } : {}) } }); },
     onSessionReady(clientSessionId, liveSessionId) { ready.push({ clientSessionId, liveSessionId }); },
@@ -279,7 +306,7 @@ async function createHarness(fetchJson?: <T>(path: string, options?: unknown, se
   await flush();
   socket.open();
   await flush();
-  return { api, socket, ready, histories, historyBodies, historyResults, events, errors };
+  return { api, socket, ready, histories, historyBodies, historyResults, historyErrors, events, errors };
 }
 
 type RpcFrame = { id: string; method: string; params: Record<string, string> };

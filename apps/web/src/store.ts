@@ -1,24 +1,21 @@
 import { computed, signal } from "@preact/signals";
 import { officeInventoryReliability } from "@hermes-office/protocol";
-import { initialSessions, profiles } from "./demo-data";
+import { initialSessions, initialTaskComments, initialTasks, profiles } from "./demo-data";
+import { createDemoKanbanApi } from "./demo-kanban-api";
 import type { ChatGatewayEvent, ChatHistoryResult, ChatSteerResult, ChatTarget } from "./chat-api";
-import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, KanbanConnectionState, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface, TaskWritableStatus, WorkTask } from "./domain";
+import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
-import type { KanbanApi } from "./kanban-api";
+import { loadKanbanDemoRuntime, registerKanbanProfileTaskUpdater, resetKanbanRuntimeState } from "./kanban-store";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
 import { interruptChatRun, steerChatRun } from "./chat-run-actions";
+export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
-export const tasks = signal<WorkTask[]>([]);
-export const kanbanAssignees = signal<string[]>([]);
-export const expandedTaskId = signal("");
-export const kanbanState = signal<{ state: KanbanConnectionState; message: string; latestEventId: number }>({
-  state: "idle",
-  message: "Hermes Kanbanへ接続しています",
-  latestEventId: 0
+registerKanbanProfileTaskUpdater((counts) => {
+  profileList.value = profileList.value.map((profile) => ({ ...profile, taskCount: counts.get(profile.id) ?? 0 }));
 });
 export const activeSurface = signal<Surface>("office");
 export const inspectorTab = signal<InspectorTab>("chat");
@@ -61,46 +58,8 @@ let steerChatSession: (clientSessionId: string, text: string) => Promise<ChatSte
 let interruptChatSession = (_clientSessionId: string) => {};
 let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
 let respondApproval = async (_clientSessionId: string, _approvalId: string, _choice: ApprovalChoice) => {};
-let kanbanApi: KanbanApi | undefined;
-let kanbanMutations = 0;
-let kanbanRefresh: Promise<void> | undefined;
-let kanbanRefreshQueued = false;
 let runtimeDataSource: "none" | "demo" | "live" = "none";
 let latestOfficeSnapshotIdentity: OfficeSnapshotRequestIdentity | undefined;
-
-export function registerKanbanRuntime(api: KanbanApi): void {
-  kanbanApi = api;
-  void refreshKanbanBoard();
-}
-
-export async function refreshKanbanBoard(): Promise<void> {
-  if (!kanbanApi) return;
-  if (kanbanRefresh) {
-    kanbanRefreshQueued = true;
-    await kanbanRefresh;
-    return;
-  }
-  kanbanRefresh = loadKanbanBoard();
-  await kanbanRefresh;
-  kanbanRefresh = undefined;
-  if (kanbanRefreshQueued) {
-    kanbanRefreshQueued = false;
-    await refreshKanbanBoard();
-  }
-}
-
-async function loadKanbanBoard(): Promise<void> {
-  kanbanState.value = { ...kanbanState.value, state: "loading", message: "Hermes Kanbanを読み込み中" };
-  try {
-    const board = await kanbanApi!.fetchBoard();
-    tasks.value = board.tasks;
-    kanbanAssignees.value = board.assignees;
-    kanbanState.value = { state: "ready", message: `${board.tasks.length}件のカード`, latestEventId: board.latestEventId };
-    updateProfileTaskCounts();
-  } catch (error) {
-    setKanbanError(error);
-  }
-}
 
 export function registerChatRuntime(actions: {
   ensureSession(target: ChatTarget): void;
@@ -353,7 +312,8 @@ export function createSession(profileId: string): void {
   const session: ChatSession = {
     id: crypto.randomUUID(),
     profileId,
-    title: "新しい会話",
+    title: "",
+    titlePresentation: "new-chat",
     status: "ready",
     messages: [],
     connectionState: isLive ? "connecting" : "ready",
@@ -368,6 +328,7 @@ export function createSession(profileId: string): void {
 function loadExplicitDemoState(): void {
   clearRuntimeState();
   profileList.value = profiles.map((profile) => ({ ...profile, skills: [...profile.skills], inheritedSkills: [...profile.inheritedSkills] }));
+  loadKanbanDemoRuntime(createDemoKanbanApi(initialTasks, initialTaskComments, profileList.value.map((profile) => profile.id)));
   sessions.value = initialSessions.map((session) => ({
     ...session,
     messages: session.messages.map((message) => ({ ...message })),
@@ -386,16 +347,13 @@ function clearRuntimeState(): void {
   for (const target of getOpenChatTargets()) releaseChatTarget(target.clientSessionId);
   profileList.value = [];
   sessions.value = [];
-  tasks.value = [];
-  kanbanAssignees.value = [];
+  resetKanbanRuntimeState();
   selectedProfileId.value = "";
   openSessionIds.value = [];
   activeSessionId.value = "";
-  expandedTaskId.value = "";
   mobileWorkspaceOpen.value = false;
   mobileInspectorOpen.value = false;
   chatSocketState.value = { state: "disconnected", message: "Chat接続を待っています" };
-  kanbanState.value = { state: "idle", message: "Hermes runtimeの準備を待っています", latestEventId: 0 };
   runtimeDataSource = "none";
 }
 
@@ -471,7 +429,9 @@ export function setChatHistoryLoading(sessionId: string, resetTranscript = false
     ...session,
     historyState: "loading",
     ...(resetTranscript ? {
-      messages: [],
+      // Hermes history cannot reconstruct these queue acknowledgements. Keep the
+      // bounded, local operation evidence while replacing the durable transcript.
+      messages: session.messages.filter((message) => message.kind === "steer"),
       streamingMessageId: undefined,
       historyPartial: false,
       historyNotice: undefined,
@@ -596,16 +556,19 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
   }
   if (event.type.startsWith("tool.")) {
     const toolId = stringValue(payload.toolId) ?? stringValue(payload.tool_id) ?? `tool-${event.liveSessionId}`;
-    const name = stringValue(payload.name) ?? "Tool";
+    const name = stringValue(payload.name);
     const detail = stringValue(payload.summary) ?? stringValue(payload.status);
-    const body = detail ? `${name}: ${detail}` : `${name}${event.type === "tool.complete" ? " 完了" : "を実行中…"}`;
+    const phase = event.type === "tool.complete" ? "complete" as const : "running" as const;
+    const status = phase === "complete" ? "complete" as const : "streaming" as const;
+    const body = detail ? `${name ?? "Tool"}: ${detail}` : "";
+    const presentation = detail ? undefined : { kind: "tool-fallback" as const, ...(name ? { name } : {}), phase };
     const exists = session.messages.some((message) => message.id === toolId);
     return {
       ...session,
       status: event.type === "tool.complete" ? session.status : "streaming",
       messages: exists
-        ? session.messages.map((message) => message.id === toolId ? { ...message, body, status: event.type === "tool.complete" ? "complete" : "streaming" } : message)
-        : [...session.messages, { id: toolId, from: "tool", body, at: nowTime(), status: event.type === "tool.complete" ? "complete" : "streaming" }]
+        ? session.messages.map((message) => message.id === toolId ? { ...message, body, presentation, status } : message)
+        : [...session.messages, { id: toolId, from: "tool", body, presentation, at: nowTime(), status }]
     };
   }
   if (event.type === "error") {
@@ -664,123 +627,4 @@ function updateChatSession(sessionId: string, update: (session: ChatSession) => 
 function releaseChatTarget(sessionId: string): void {
   updateChatSession(sessionId, reconcileChatSessionDisconnected);
   releaseChatSession(sessionId);
-}
-
-export async function assignTask(taskId: string, profileId: string | null): Promise<void> {
-  if (!kanbanApi) return;
-  const previous = tasks.value.find((task) => task.id === taskId);
-  if (!previous || previous.pending || previous.assigneeId === (profileId ?? undefined)) return;
-  setTaskPending(taskId, { ...previous, ...(profileId ? { assigneeId: profileId } : { assigneeId: undefined }) });
-  beginKanbanMutation("担当を更新中");
-  try {
-    applyKanbanCard(await kanbanApi.updateCard(taskId, { assignee: profileId }));
-    finishKanbanMutation();
-  } catch (error) {
-    restoreKanbanCard(previous, error);
-  }
-}
-
-export async function moveTask(taskId: string, status: TaskWritableStatus): Promise<void> {
-  if (!kanbanApi) return;
-  const previous = tasks.value.find((task) => task.id === taskId);
-  if (!previous || previous.pending || previous.status === status) return;
-  setTaskPending(taskId, { ...previous, status });
-  beginKanbanMutation("カードを移動中");
-  try {
-    applyKanbanCard(await kanbanApi.updateCard(taskId, { status }));
-    finishKanbanMutation();
-  } catch (error) {
-    restoreKanbanCard(previous, error);
-  }
-}
-
-export async function createTask(title: string): Promise<boolean> {
-  const trimmed = title.trim();
-  if (!trimmed || !kanbanApi) return false;
-  const temporaryId = `pending-${crypto.randomUUID()}`;
-  tasks.value = [...tasks.value, { id: temporaryId, title: trimmed, status: "triage", priority: "normal", comments: 0, pending: true }];
-  beginKanbanMutation("カードを作成中");
-  try {
-    const created = await kanbanApi.createCard(trimmed);
-    tasks.value = tasks.value.some((task) => task.id === temporaryId)
-      ? tasks.value.map((task) => task.id === temporaryId ? created : task)
-      : [...tasks.value.filter((task) => task.id !== created.id), created];
-    finishKanbanMutation();
-    updateProfileTaskCounts();
-    return true;
-  } catch (error) {
-    tasks.value = tasks.value.filter((task) => task.id !== temporaryId);
-    failKanbanMutation(error);
-    return false;
-  }
-}
-
-export async function addTaskComment(taskId: string, body: string): Promise<boolean> {
-  const trimmed = body.trim();
-  if (!trimmed || !kanbanApi) return false;
-  const previous = tasks.value.find((task) => task.id === taskId);
-  if (!previous || previous.pending) return false;
-  setTaskPending(taskId, { ...previous, comments: previous.comments + 1 });
-  beginKanbanMutation("コメントを送信中");
-  try {
-    await kanbanApi.addComment(taskId, trimmed);
-    setTaskPending(taskId, { ...previous, comments: previous.comments + 1 }, false);
-    finishKanbanMutation();
-    return true;
-  } catch (error) {
-    restoreKanbanCard(previous, error);
-    return false;
-  }
-}
-
-function setTaskPending(taskId: string, task: WorkTask, pending = true): void {
-  tasks.value = tasks.value.map((item) => item.id === taskId ? { ...task, pending } : item);
-}
-
-function applyKanbanCard(card: WorkTask): void {
-  const next = { ...card, pending: false };
-  tasks.value = tasks.value.some((task) => task.id === card.id)
-    ? tasks.value.map((task) => task.id === card.id ? next : task)
-    : [...tasks.value, next];
-  updateProfileTaskCounts();
-}
-
-function restoreKanbanCard(card: WorkTask, error: unknown): void {
-  tasks.value = tasks.value.map((task) => task.id === card.id ? { ...card, pending: false } : task);
-  failKanbanMutation(error);
-}
-
-function beginKanbanMutation(message: string): void {
-  kanbanMutations += 1;
-  kanbanState.value = { ...kanbanState.value, state: "saving", message };
-}
-
-function finishKanbanMutation(): void {
-  kanbanMutations = Math.max(0, kanbanMutations - 1);
-  kanbanState.value = {
-    ...kanbanState.value,
-    state: kanbanMutations > 0 ? "saving" : "ready",
-    message: kanbanMutations > 0 ? "変更を保存中" : `${tasks.value.length}件のカード`
-  };
-}
-
-function failKanbanMutation(error: unknown): void {
-  kanbanMutations = Math.max(0, kanbanMutations - 1);
-  setKanbanError(error);
-}
-
-function setKanbanError(error: unknown): void {
-  kanbanState.value = {
-    ...kanbanState.value,
-    state: "error",
-    message: error instanceof Error ? error.message : "Hermes Kanbanを更新できませんでした"
-  };
-}
-
-function updateProfileTaskCounts(): void {
-  const counts = new Map<string, number>();
-  for (const task of tasks.value) if (task.assigneeId && task.status !== "done" && task.status !== "archived") {
-    counts.set(task.assigneeId, (counts.get(task.assigneeId) ?? 0) + 1);
-  }
-  profileList.value = profileList.value.map((profile) => ({ ...profile, taskCount: counts.get(profile.id) ?? 0 }));
 }

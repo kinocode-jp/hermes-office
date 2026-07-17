@@ -113,6 +113,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   const historyLoads = new Map<string, symbol>();
   const loadedHistories = new Map<string, ActiveTarget>();
   const historiesAwaitingReset = new Set<string>();
+  const targetStartOperations = new Map<string, symbol>();
   let nextGeneration = 0;
   let socket: WebSocket | undefined;
   let socketOpening = false;
@@ -170,6 +171,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     socketFailedBeforeOpen = false;
     opening.clear();
     historyLoads.clear();
+    targetStartOperations.clear();
     liveToClient.clear();
     if (historyResyncRequired) {
       loadedHistories.clear();
@@ -309,10 +311,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       reconnectAttempt = 0;
       attemptedRecoveryRevision = undefined;
       callbacks.onSocketState("ready");
-      for (const target of targets.values()) {
-        void loadHistory(target);
-        void openRemoteSession(target);
-      }
+      for (const target of targets.values()) startTarget(target);
     });
     nextSocket.addEventListener("message", (event) => handleMessage(event.data, nextSocket));
     nextSocket.addEventListener("close", (event) => {
@@ -393,7 +392,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     const target = active.target;
     const operation = Symbol("history");
     if (!isCurrentTarget(active) || loadedHistories.get(target.clientSessionId) === active || historyLoads.has(target.clientSessionId)) return;
-    const resetTranscript = historiesAwaitingReset.delete(target.clientSessionId);
+    const resetTranscript = historiesAwaitingReset.has(target.clientSessionId);
     if (!target.storedSessionId) {
       if (!isCurrentTarget(active)) return;
       if (resetTranscript) callbacks.onHistoryLoading(target.clientSessionId, true);
@@ -444,6 +443,21 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     isCurrentTarget(active) && historyLoads.get(active.target.clientSessionId) === operation
   );
 
+  const startTarget = (active: ActiveTarget): void => {
+    const clientSessionId = active.target.clientSessionId;
+    if (targetStartOperations.has(clientSessionId)) return;
+    const recovery = Symbol("history-before-live");
+    targetStartOperations.set(clientSessionId, recovery);
+    void loadHistory(active).then(() => {
+      if (!isCurrentTarget(active) || targetStartOperations.get(clientSessionId) !== recovery) return;
+      if (loadedHistories.get(clientSessionId) !== active) return;
+      historiesAwaitingReset.delete(clientSessionId);
+      void openRemoteSession(active);
+    }).finally(() => {
+      if (targetStartOperations.get(clientSessionId) === recovery) targetStartOperations.delete(clientSessionId);
+    });
+  };
+
   const bestEffortClose = (liveSessionId: string): void => {
     if (socket?.readyState === WebSocket.OPEN) void rpc("session.close", { session_id: liveSessionId }).catch(() => undefined);
   };
@@ -456,6 +470,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     historyLoads.delete(clientSessionId);
     loadedHistories.delete(clientSessionId);
     historiesAwaitingReset.delete(clientSessionId);
+    targetStartOperations.delete(clientSessionId);
     for (const [liveSessionId, mapped] of liveToClient) {
       if (mapped.clientSessionId !== clientSessionId || mapped.generation !== active.generation) continue;
       liveToClient.delete(liveSessionId);
@@ -504,16 +519,14 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const existing = targets.get(target.clientSessionId);
       if (existing !== undefined && targetsMatch(existing.target, target)) {
         restartTransport(false);
-        void loadHistory(existing);
-        void openRemoteSession(existing);
+        startTarget(existing);
         return;
       }
       if (existing !== undefined) deactivateTarget(existing);
       const active: ActiveTarget = { generation: ++nextGeneration, target: { ...target } };
       targets.set(target.clientSessionId, active);
       restartTransport(false);
-      void loadHistory(active);
-      void openRemoteSession(active);
+      startTarget(active);
     },
     releaseSession(clientSessionId) {
       const active = targets.get(clientSessionId);

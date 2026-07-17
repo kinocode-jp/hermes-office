@@ -189,7 +189,38 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   api.stop();
 });
 
-test("1013 reload-history resets the old transcript before preserving only the new live tail", async () => {
+test("initial stored connect coalesces callers and waits for production-shaped history before one resume", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const initialHistory = deferred<unknown>();
+  let rpcSequence = 0;
+  const api = connectChatApi(noopCallbacks(), {
+    serverUrl: "http://127.0.0.1:4317",
+    createWebSocket: async () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    fetchJson: async <T>() => await initialHistory.promise as T,
+    randomId: () => `initial-rpc-${++rpcSequence}`,
+  });
+  const target = { clientSessionId: "client-1", profileId: "coder", storedSessionId: "stored-1" };
+  api.ensureSession(target);
+  api.ensureSession(target);
+  api.ensureSession(target);
+  await waitFor(() => sockets.length === 1);
+  const socket = sockets[0]!;
+  socket.open();
+  await flush();
+  api.ensureSession(target);
+  assert.equal(socket.frames("session.resume").length, 0);
+
+  initialHistory.resolve(savedHistory());
+  await waitFor(() => socket.frames("session.resume").length === 1);
+  assert.equal(socket.frames("session.resume").length, 1);
+  api.stop();
+});
+
+test("1013 history barrier replaces durable rows, preserves one local steer, and keeps later same-text live messages", async () => {
   const sockets: FakeWebSocket[] = [];
   const resyncHistory = deferred<unknown>();
   const resetSignals: boolean[] = [];
@@ -234,39 +265,71 @@ test("1013 reload-history resets the old transcript before preserving only the n
   await waitFor(() => oldSocket.frame("session.resume") !== undefined && sessions.value[0]?.historyState === "loaded");
   oldSocket.respond(oldSocket.frame("session.resume")!.id, { liveSessionId: "live-old", storedSessionId: "stored-1", running: false });
   await flush();
-  oldSocket.event("live-old", "message.complete", { messageId: "old-live-copy", text: "saved answer" });
-  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["saved-user", "saved-agent", "old-live-copy"]);
+  oldSocket.event("live-old", "message.complete", { messageId: "old-live-copy", text: "persisted during reset" });
+  sessions.value = sessions.value.map((session) => session.id === baseSession.id ? {
+    ...session,
+    messages: [...session.messages, { id: "steer-accepted", from: "user", kind: "steer", body: "use terse output", at: "12:00" }],
+  } : session);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["history-stored-1-0", "history-stored-1-1", "old-live-copy", "steer-accepted"]);
 
   oldSocket.close(1013, "Hermes chat restarted; reload history");
   await waitFor(() => sockets.length === 2);
   const newSocket = sockets[1]!;
   await flush();
   newSocket.open();
-  await waitFor(() => historyRequest === 2 && newSocket.frame("session.resume") !== undefined);
+  await waitFor(() => historyRequest === 2);
   assert.deepEqual(resetSignals, [false, true]);
   assert.equal(sessions.value[0]?.historyState, "loading");
-  assert.deepEqual(sessions.value[0]?.messages, []);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["steer-accepted"]);
+  assert.equal(newSocket.frame("session.resume"), undefined);
+
+  resyncHistory.resolve(savedHistory({ includePersistedDuringReset: true }));
+  await waitFor(() => newSocket.frame("session.resume") !== undefined);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["history-stored-1-0", "history-stored-1-1", "history-stored-1-2", "steer-accepted"]);
+  assert.equal(sessions.value[0]?.messages.filter(({ id }) => id === "steer-accepted").length, 1);
 
   newSocket.respond(newSocket.frame("session.resume")!.id, { liveSessionId: "live-new", storedSessionId: "stored-1", running: true });
   await flush();
   newSocket.event("live-new", "message.start", { messageId: "fresh-tail" });
-  newSocket.event("live-new", "message.delta", { messageId: "fresh-tail", text: "new tail" });
-  resyncHistory.resolve(savedHistory());
-  await waitFor(() => sessions.value[0]?.historyState === "loaded");
+  newSocket.event("live-new", "message.delta", { messageId: "fresh-tail", text: "saved answer" });
 
-  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["saved-user", "saved-agent", "fresh-tail"]);
-  assert.deepEqual(sessions.value[0]?.messages.map(({ body }) => body), ["saved prompt", "saved answer", "new tail"]);
+  assert.equal(sessions.value[0]?.messages.filter(({ body }) => body === "saved answer").length, 2);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["history-stored-1-0", "history-stored-1-1", "history-stored-1-2", "steer-accepted", "fresh-tail"]);
   api.stop();
 });
 
-function savedHistory(): unknown {
+test("authoritative reset drops a live row absent from production history but retains local queue evidence once", () => {
+  sessions.value = [{
+    ...baseSession,
+    messages: [
+      { id: "old-live", from: "agent", body: "never persisted", at: "11:59", status: "complete" },
+      { id: "steer-accepted", from: "user", kind: "steer", body: "keep it short", at: "12:00" },
+    ],
+  }];
+  setChatHistoryLoading(baseSession.id, true);
+  applyChatHistory(baseSession.id, [
+    { id: "history-stored-1-0", from: "user", body: "saved prompt", at: "11:58", status: "complete" },
+  ]);
+  assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["history-stored-1-0", "steer-accepted"]);
+  assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, 1);
+});
+
+function savedHistory(options: { includePersistedDuringReset?: boolean } = {}): unknown {
   return {
     sessionId: "stored-1",
     messages: [
-      { id: "saved-user", role: "user", text: "saved prompt" },
-      { id: "saved-agent", role: "assistant", text: "saved answer" },
+      { index: 0, role: "user", text: "saved prompt" },
+      { index: 1, role: "assistant", text: "saved answer" },
+      ...(options.includePersistedDuringReset ? [{ index: 2, role: "assistant", text: "persisted during reset" }] : []),
     ],
-    pagination: { direction: "older", hasMore: false, returned: 2 },
+    pagination: { direction: "older", hasMore: false, returned: options.includePersistedDuringReset ? 3 : 2 },
+  };
+}
+
+function noopCallbacks(): ChatApiCallbacks {
+  return {
+    onSocketState() {}, onHistoryLoading() {}, onHistory() {}, onHistoryError() {},
+    onSessionConnecting() {}, onSessionReady() {}, onSessionDisconnected() {}, onSessionError() {}, onEvent() {},
   };
 }
 

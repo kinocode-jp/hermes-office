@@ -16,7 +16,7 @@ import { CharacterPortrait } from "./character-portrait";
 import { AvatarPicker } from "./avatar-picker";
 import { InfoTip } from "./info-tip";
 import { useState } from "preact/hooks";
-import { t, type TranslationKey } from "../i18n";
+import { chatSessionTitle, t, type TranslationKey } from "../i18n";
 import { loadMoreSessions, sessionInventoryState } from "../inventory";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
@@ -67,7 +67,7 @@ function ChatList() {
       <div class="session-list">
         {selectedProfileSessions.value.map((session) => (
           <button key={session.id} onClick={() => { openSession(session.id); mobileInspectorOpen.value = false; mobileWorkspaceOpen.value = true; }}>
-            <span>{session.title}</span>
+            <span>{chatSessionTitle(session)}</span>
             <small>{session.status === "streaming" ? t("profile.running") : t("profile.open")}</small>
           </button>
         ))}

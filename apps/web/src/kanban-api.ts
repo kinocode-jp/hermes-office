@@ -1,4 +1,4 @@
-import type { TaskStatus, TaskWritableStatus, WorkTask } from "./domain";
+import type { TaskComment, TaskStatus, TaskWritableStatus, WorkTask } from "./domain";
 import { officeFetchJson } from "./office-api";
 
 export type KanbanBoardResult = {
@@ -7,8 +7,16 @@ export type KanbanBoardResult = {
   latestEventId: number;
 };
 
+export type KanbanCardDetailResult = {
+  card: WorkTask;
+  comments: TaskComment[];
+  availableCommentCount: number;
+  truncated: boolean;
+};
+
 export type KanbanApi = {
   fetchBoard(): Promise<KanbanBoardResult>;
+  fetchCard(cardId: string): Promise<KanbanCardDetailResult>;
   createCard(title: string): Promise<WorkTask>;
   updateCard(cardId: string, patch: { status?: TaskWritableStatus; assignee?: string | null }): Promise<WorkTask>;
   addComment(cardId: string, body: string): Promise<void>;
@@ -17,12 +25,21 @@ export type KanbanApi = {
 const READ_STATUSES = new Set<TaskStatus>([
   "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"
 ]);
+const MAX_RESPONSE_COMMENTS = 2_000;
+const MAX_DATE_SECONDS = 8_640_000_000_000;
+export const MAX_VISIBLE_COMMENTS = 200;
 
 export function createKanbanApi(): KanbanApi {
   return {
     async fetchBoard() {
       const value = await officeFetchJson<unknown>("/api/v1/kanban", { timeoutMs: 8_000 });
       return normalizeBoard(value);
+    },
+    async fetchCard(cardId) {
+      const value = await officeFetchJson<unknown>(`/api/v1/kanban/cards/${encodeURIComponent(cardId)}`, {
+        timeoutMs: 8_000
+      });
+      return normalizeCardDetail(value, cardId);
     },
     async createCard(title) {
       const value = await officeFetchJson<unknown>("/api/v1/kanban/cards", {
@@ -48,6 +65,45 @@ export function createKanbanApi(): KanbanApi {
       });
     }
   };
+}
+
+export function normalizeCardDetail(value: unknown, requestedCardId: string): KanbanCardDetailResult {
+  const detail = record(value, "Kanban card detail");
+  const cardValue = record(detail.card, "Kanban detail card");
+  assertDetailCard(cardValue);
+  const card = normalizeCard(cardValue);
+  if (card.id !== requestedCardId || !Array.isArray(detail.comments) || detail.comments.length > MAX_RESPONSE_COMMENTS) {
+    throw new Error("Kanban card detail is invalid.");
+  }
+  const comments = detail.comments.map((comment) => normalizeComment(comment, requestedCardId));
+  const ids = new Set(comments.map((comment) => comment.id));
+  if (ids.size !== comments.length) throw new Error("Kanban comments are invalid.");
+  comments.sort((left, right) => left.createdAt - right.createdAt || left.id - right.id);
+  const visible = comments.slice(-MAX_VISIBLE_COMMENTS);
+  return {
+    card,
+    comments: visible,
+    availableCommentCount: comments.length,
+    truncated: visible.length < comments.length
+  };
+}
+
+function assertDetailCard(card: Record<string, unknown>): void {
+  const nullableText = (value: unknown, max: number) => value === null || boundedString(value, 0, max);
+  const nullableTime = (value: unknown) => value === null || safeDateSeconds(value);
+  if (!boundedString(card.id, 1, 128)
+    || !boundedString(card.title, 1, 240)
+    || !nullableText(card.body, 32_000)
+    || !(card.assignee === null || boundedString(card.assignee, 1, 128))
+    || typeof card.status !== "string" || !READ_STATUSES.has(card.status as TaskStatus)
+    || !Number.isSafeInteger(card.priority) || (card.priority as number) < -100 || (card.priority as number) > 100
+    || !safeDateSeconds(card.createdAt)
+    || !nullableTime(card.startedAt)
+    || !nullableTime(card.completedAt)
+    || !nullableText(card.latestSummary, 16_000)
+    || !nonNegativeSafeInteger(card.commentCount)) {
+    throw new Error("Kanban detail card is invalid.");
+  }
 }
 
 function normalizeBoard(value: unknown): KanbanBoardResult {
@@ -97,6 +153,24 @@ function normalizeCard(value: unknown, fallbackStatus?: TaskStatus): WorkTask {
   };
 }
 
+function normalizeComment(value: unknown, cardId: string): TaskComment {
+  const comment = record(value, "Kanban comment");
+  if (!Number.isSafeInteger(comment.id) || (comment.id as number) < 0
+    || comment.cardId !== cardId
+    || !boundedString(comment.author, 1, 128)
+    || !boundedString(comment.body, 1, 16_000)
+    || !safeDateSeconds(comment.createdAt)) {
+    throw new Error("Kanban comment is invalid.");
+  }
+  return {
+    id: comment.id as number,
+    cardId,
+    author: comment.author,
+    body: comment.body,
+    createdAt: comment.createdAt as number
+  };
+}
+
 function taskStatus(value: unknown): TaskStatus {
   if (typeof value !== "string" || !READ_STATUSES.has(value as TaskStatus)) {
     throw new Error("Kanban card status is invalid.");
@@ -111,4 +185,16 @@ function record(value: unknown, label: string): Record<string, unknown> {
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function boundedString(value: unknown, min: number, max: number): value is string {
+  return typeof value === "string" && value.length >= min && value.length <= max && !value.includes("\0");
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function safeDateSeconds(value: unknown): value is number {
+  return nonNegativeSafeInteger(value) && value <= MAX_DATE_SECONDS;
 }

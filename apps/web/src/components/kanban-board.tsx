@@ -1,5 +1,5 @@
 import type { TaskStatus, TaskWritableStatus, WorkTask } from "../domain";
-import { localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
+import { locale, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import {
   addTaskComment,
   assignTask,
@@ -10,7 +10,10 @@ import {
   moveTask,
   profileList,
   refreshKanbanBoard,
-  tasks
+  retryTaskComments,
+  taskCommentDetail,
+  tasks,
+  toggleTaskComments
 } from "../store";
 
 const columns: Array<{ id: TaskStatus; label: TranslationKey; caption: TranslationKey; writable?: TaskWritableStatus }> = [
@@ -23,6 +26,13 @@ const columns: Array<{ id: TaskStatus; label: TranslationKey; caption: Translati
   { id: "review", label: "kanban.column.review", caption: "kanban.caption.review" },
   { id: "done", label: "kanban.column.done", caption: "kanban.caption.done", writable: "done" }
 ];
+const writableColumns = columns.filter((column): column is typeof column & { writable: TaskWritableStatus } => Boolean(column.writable));
+const writableStatuses = new Set<TaskStatus>(writableColumns.map((column) => column.writable));
+
+export function requestTaskMove(taskId: string, value: string): Promise<void> {
+  const status = writableColumns.find((column) => column.writable === value)?.writable;
+  return status ? moveTask(taskId, status) : Promise.resolve();
+}
 
 function TaskCard({ task }: { task: WorkTask }) {
   const assignee = profileList.value.find((profile) => profile.id === task.assigneeId);
@@ -30,6 +40,7 @@ function TaskCard({ task }: { task: WorkTask }) {
     ? profileList.value
     : profileList.value.filter((profile) => kanbanAssignees.value.includes(profile.id));
   const expanded = expandedTaskId.value === task.id;
+  const detail = taskCommentDetail.value.cardId === task.id ? taskCommentDetail.value : undefined;
 
   const submitComment = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -63,21 +74,55 @@ function TaskCard({ task }: { task: WorkTask }) {
         </select>
       </label>
 
+      <label class="task-status-select">
+        <span>{t("kanban.status")}</span>
+        <select
+          value={writableStatuses.has(task.status) ? task.status : ""}
+          disabled={task.pending}
+          onChange={(event) => void requestTaskMove(task.id, event.currentTarget.value)}
+        >
+          {!writableStatuses.has(task.status) && <option value="" disabled>{t("kanban.managedStatus")}</option>}
+          {writableColumns.map((column) => <option key={column.id} value={column.writable}>{t(column.label)}</option>)}
+        </select>
+        <small>{t("kanban.managedStatusHint")}</small>
+      </label>
+
       <footer>
         <span class="task-assignee">
           {assignee ? <i style={{ background: assignee.color }} /> : <i class="unassigned" />}
           {assignee?.name ?? t("kanban.unassigned")}
         </span>
-        <button type="button" onClick={() => { expandedTaskId.value = expanded ? "" : task.id; }}>
+        <button type="button" aria-expanded={expanded} onClick={() => void toggleTaskComments(task.id)}>
           {t("kanban.notes", { count: task.comments })}
         </button>
       </footer>
 
       {expanded && (
-        <form class="task-comment-form" onSubmit={submitComment}>
-          <input name="comment" aria-label={t("kanban.commentAria", { title: task.title })} placeholder={t("kanban.commentPlaceholder")} maxLength={16000} required />
-          <button type="submit" disabled={task.pending}>{t("chat.send")}</button>
-        </form>
+        <section class="task-comments" aria-label={t("kanban.commentsAria", { title: task.title })}>
+          {detail?.state === "loading" && <p class="task-comments-state" role="status">{t("kanban.commentsLoading")}</p>}
+          {detail?.state === "error" && (
+            <div class="task-comments-error" role="alert">
+              <span>{t("kanban.commentsError")}</span>
+              <button type="button" onClick={() => void retryTaskComments()}>{t("kanban.commentsRetry")}</button>
+            </div>
+          )}
+          {detail && detail.comments.length > 0 && (
+            <ol class="task-comment-list">
+              {detail.comments.map((comment) => (
+                <li key={comment.id}>
+                  <header><strong>{comment.author}</strong><time dateTime={commentDate(comment.createdAt).toISOString()}>{formatCommentTime(comment.createdAt)}</time></header>
+                  <p>{comment.body}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+          {detail?.state === "ready" && detail.comments.length === 0 && <p class="task-comments-empty">{t("kanban.commentsEmpty")}</p>}
+          {detail?.truncated && <p class="task-comments-limit">{t("kanban.commentsLimited", { shown: detail.comments.length, count: detail.availableCommentCount })}</p>}
+          <form class="task-comment-form" onSubmit={submitComment}>
+            <input name="comment" aria-label={t("kanban.commentAria", { title: task.title })} placeholder={t("kanban.commentPlaceholder")} maxLength={16000} required />
+            <button type="submit" disabled={task.pending}>{t("chat.send")}</button>
+          </form>
+        </section>
       )}
     </article>
   );
@@ -119,7 +164,7 @@ export function KanbanBoard() {
               onDragOver={(event) => { if (column.writable) event.preventDefault(); }}
               onDrop={(event) => {
                 const taskId = event.dataTransfer?.getData("application/x-hermes-task");
-                if (taskId && column.writable) void moveTask(taskId, column.writable);
+                if (taskId && column.writable) void requestTaskMove(taskId, column.writable);
               }}
             >
               <header>
@@ -139,4 +184,15 @@ export function KanbanBoard() {
       </div>
     </section>
   );
+}
+
+function commentDate(createdAt: number): Date {
+  return new Date(createdAt * 1_000);
+}
+
+function formatCommentTime(createdAt: number): string {
+  return new Intl.DateTimeFormat(locale.value === "ja" ? "ja-JP" : "en-US", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(commentDate(createdAt));
 }

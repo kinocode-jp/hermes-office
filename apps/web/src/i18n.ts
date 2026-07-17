@@ -1,4 +1,5 @@
 import { signal } from "@preact/signals";
+import type { ChatMessage, ChatSession } from "./domain";
 
 export type Locale = "ja" | "en";
 
@@ -116,12 +117,15 @@ const ja = {
   "chat.loadingHistory": "履歴を読み込み中",
   "chat.hermesSession": "Hermes セッション",
   "chat.newThread": "新しい会話",
+  "chat.newTitle": "新しい会話",
   "chat.loadingSaved": "保存された会話を読み込んでいます。",
   "chat.historyPartial": "安全上限までの履歴を表示しています。さらに古い履歴はHermesに保存されています。",
   "chat.connectingLive": "ライブセッションへ安全に接続しています。",
   "chat.firstInstruction": "{name}に最初の指示を送ります。",
   "chat.you": "あなた",
   "chat.tool": "ツール",
+  "chat.toolRunning": "{name}を実行中…",
+  "chat.toolComplete": "{name} 完了",
   "chat.answerAbove": "上の確認に回答してください",
   "chat.connectingPlaceholder": "ライブセッションに接続中…",
   "chat.runningPlaceholder": "実行中。追加指示を送るか、停止できます",
@@ -165,7 +169,16 @@ const ja = {
   "kanban.saving": "保存中",
   "kanban.assignee": "担当",
   "kanban.unassigned": "未割当",
+  "kanban.status": "状態",
+  "kanban.managedStatus": "Hermesが管理中",
+  "kanban.managedStatusHint": "実行中とレビューはHermesが自動で設定します。",
   "kanban.notes": "メモ {count}件",
+  "kanban.commentsAria": "{title}のメモ",
+  "kanban.commentsLoading": "メモを読み込み中…",
+  "kanban.commentsError": "メモを読み込めませんでした。",
+  "kanban.commentsRetry": "再試行",
+  "kanban.commentsEmpty": "メモはまだありません。",
+  "kanban.commentsLimited": "最新{shown}件を表示（取得{count}件、安全上限200件）",
   "kanban.commentAria": "{title}へのコメント",
   "kanban.commentPlaceholder": "コメントを追加…",
   "kanban.eyebrow": "Hermes共有ライブボード",
@@ -282,10 +295,11 @@ const en: Record<TranslationKey, string> = {
   "avatar.kicker": "PROFILE AVATAR", "avatar.title": "{name}'s avatar", "avatar.description": "Choose an original creature or use your own image.", "avatar.creature": "Creature {number}", "avatar.upload": "Upload image", "avatar.reset": "Reset to default", "avatar.note": "PNG / JPEG / WebP / GIF, up to 1 MB. Saved on this device.", "avatar.invalid": "Choose a supported image up to 1 MB.", "avatar.saveFailed": "The image could not be saved. Check device storage or private browsing settings.", "common.close": "Close", "common.info": "Details", "command.open": "Search profiles", "command.kicker": "QUICK JUMP", "command.title": "Open a Profile", "command.placeholder": "Search by Profile name", "command.results": "Profile search results", "command.empty": "No matching Profiles.",
   "status.working": "Working", "status.waiting": "Waiting", "status.idle": "Idle", "status.blocked": "Blocked",
   "workspace.emptyKicker": "NO OPEN THREADS", "workspace.empty": "Select an office character to open a conversation here.", "workspace.profiles": "Profiles", "workspace.chats": "Chats · {count}", "workspace.profileSettings": "Profile settings", "workspace.switchChats": "Switch open conversations", "workspace.openChats": "Open conversations",
-  "chat.status.error": "Connection error", "chat.status.connecting": "Connecting", "chat.status.reconnecting": "Reconnecting", "chat.status.loading": "Loading history", "chat.status.approval": "Approval needed", "chat.status.clarify": "Answer needed", "chat.status.running": "Running", "chat.status.waiting": "Waiting for input", "chat.status.ready": "Ready", "chat.close": "Close {title}", "chat.reload": "Reload", "chat.reconnect": "Reconnect", "chat.recovering": "Restoring the chat connection. Your history remains available.", "chat.loadingHistory": "LOADING HISTORY", "chat.hermesSession": "HERMES SESSION", "chat.newThread": "NEW THREAD", "chat.loadingSaved": "Loading the saved conversation.", "chat.historyPartial": "History is shown up to the safety limit. Older messages remain stored in Hermes.", "chat.connectingLive": "Securely connecting the live session.", "chat.firstInstruction": "Send the first instruction to {name}.", "chat.you": "You", "chat.tool": "Tool", "chat.answerAbove": "Answer the request above", "chat.connectingPlaceholder": "Connecting live session…", "chat.runningPlaceholder": "Running. Send guidance or stop the run.", "chat.steerPlaceholder": "Add guidance for the running Hermes session…", "chat.steer": "Steer", "chat.steerMessage": "Accepted by Hermes queue", "chat.instruct": "Instruct {name}…", "chat.stop": "Stop", "chat.send": "Send", "chat.approvalAria": "Hermes operation approval", "chat.approvalRequired": "APPROVAL REQUIRED", "chat.approvalFallback": "Hermes is asking for permission to perform an operation", "chat.approvalOffline": "You can choose after reconnecting. This approval is preserved.", "chat.clarifyAria": "Question from Hermes", "chat.clarification": "CLARIFICATION", "chat.clarifyOffline": "You can answer after reconnecting. This question is preserved.", "chat.freeAnswer": "Type an answer", "chat.answerAria": "Answer the clarification", "chat.answer": "Answer", "chat.submitting": "Submitting…",
+  "chat.status.error": "Connection error", "chat.status.connecting": "Connecting", "chat.status.reconnecting": "Reconnecting", "chat.status.loading": "Loading history", "chat.status.approval": "Approval needed", "chat.status.clarify": "Answer needed", "chat.status.running": "Running", "chat.status.waiting": "Waiting for input", "chat.status.ready": "Ready", "chat.close": "Close {title}", "chat.reload": "Reload", "chat.reconnect": "Reconnect", "chat.recovering": "Restoring the chat connection. Your history remains available.", "chat.loadingHistory": "LOADING HISTORY", "chat.hermesSession": "HERMES SESSION", "chat.newThread": "NEW THREAD", "chat.newTitle": "New chat", "chat.loadingSaved": "Loading the saved conversation.", "chat.historyPartial": "History is shown up to the safety limit. Older messages remain stored in Hermes.", "chat.connectingLive": "Securely connecting the live session.", "chat.firstInstruction": "Send the first instruction to {name}.", "chat.you": "You", "chat.tool": "Tool", "chat.toolRunning": "Running {name}…", "chat.toolComplete": "{name} complete", "chat.answerAbove": "Answer the request above", "chat.connectingPlaceholder": "Connecting live session…", "chat.runningPlaceholder": "Running. Send guidance or stop the run.", "chat.steerPlaceholder": "Add guidance for the running Hermes session…", "chat.steer": "Steer", "chat.steerMessage": "Accepted by Hermes queue", "chat.instruct": "Instruct {name}…", "chat.stop": "Stop", "chat.send": "Send", "chat.approvalAria": "Hermes operation approval", "chat.approvalRequired": "APPROVAL REQUIRED", "chat.approvalFallback": "Hermes is asking for permission to perform an operation", "chat.approvalOffline": "You can choose after reconnecting. This approval is preserved.", "chat.clarifyAria": "Question from Hermes", "chat.clarification": "CLARIFICATION", "chat.clarifyOffline": "You can answer after reconnecting. This question is preserved.", "chat.freeAnswer": "Type an answer", "chat.answerAria": "Answer the clarification", "chat.answer": "Answer", "chat.submitting": "Submitting…",
   "approval.once": "Allow once", "approval.session": "Allow for this session", "approval.always": "Always allow", "approval.deny": "Deny",
   "kanban.column.triage": "Triage", "kanban.column.todo": "Todo", "kanban.column.scheduled": "Scheduled", "kanban.column.ready": "Ready", "kanban.column.running": "Running", "kanban.column.blocked": "Blocked", "kanban.column.review": "Review", "kanban.column.done": "Done",
   "kanban.caption.triage": "Unsorted", "kanban.caption.todo": "Planned", "kanban.caption.scheduled": "Scheduled", "kanban.caption.ready": "Ready to start", "kanban.caption.running": "Running in Hermes", "kanban.caption.blocked": "Needs attention", "kanban.caption.review": "In review", "kanban.caption.done": "Complete", "kanban.saving": "SAVING", "kanban.assignee": "Assignee", "kanban.unassigned": "Unassigned", "kanban.notes": "{count} notes", "kanban.commentAria": "Comment on {title}", "kanban.commentPlaceholder": "Add a comment…", "kanban.eyebrow": "Live shared Hermes board", "kanban.title": "Work board", "kanban.reload": "Reload", "kanban.newTask": "New task", "kanban.newTaskPlaceholder": "New task…", "kanban.add": "+ Add", "kanban.automatic": "automatic", "kanban.empty": "No cards",
+  "kanban.status": "Status", "kanban.managedStatus": "Managed by Hermes", "kanban.managedStatusHint": "Running and Review are set automatically by Hermes.", "kanban.commentsAria": "Notes for {title}", "kanban.commentsLoading": "Loading notes…", "kanban.commentsError": "Unable to load notes.", "kanban.commentsRetry": "Retry", "kanban.commentsEmpty": "No notes yet.", "kanban.commentsLimited": "Showing the latest {shown} of {count} fetched notes (200-note safety limit)",
   "settings.noProfile": "No profile selected", "settings.eyebrow": "BUILDING SYSTEMS / LIVE", "settings.title": "Agent settings", "settings.target": "Target profile", "settings.categories": "Settings categories", "settings.global": "Global", "settings.skills": "Skills", "settings.identity": "Identity / SOUL", "settings.memory": "Memory", "settings.conflict": "REVISION CONFLICT", "settings.offline": "SETTINGS OFFLINE", "settings.reload": "Reload", "settings.syncPending": "SKILL SYNC PENDING", "settings.syncPendingDetail": "Global skills have not reached every profile. Save the same content to retry.", "settings.syncFailures": "Global skills waiting to sync", "settings.globalBus": "GLOBAL BUS", "settings.inherit": "Profiles inherit from here", "settings.inheritance": "Inheritance switches", "settings.sharedSkills": "Shared skills", "settings.sharedSkillsDetail": "Inherit the global skill selection in every profile", "settings.sharedContext": "Shared context", "settings.sharedContextDetail": "Apply common context to newly started sessions", "settings.globalSkills": "Global skills", "settings.onePerLine": "one per line", "settings.noSecrets": "Secrets cannot be saved here", "settings.contextPlaceholder": "Write guidance shared by every profile.", "settings.contextBudget": "UTF-8 over JSON: {count} / {max} bytes", "settings.skillBudget": "Selected skills: {count} / {max}", "settings.invalidBudget": "INPUT LIMIT EXCEEDED", "settings.readOnly": "READ ONLY", "settings.localOwnerRequired": "This connection can view settings only. Open Hermes Office as the local owner to make changes.", "settings.permissionUnavailable": "This local connection was not granted the operation required to change this setting.", "settings.enabledAvailable": "enabled / {count} available", "settings.skillSearch": "Filter skills", "settings.noDescription": "No description", "settings.noSkills": "No matching skills.", "settings.showMore": "Show more ({count} remaining)", "settings.redacted": "Some potentially sensitive content is hidden. Do not overwrite it; check it in Hermes.", "settings.soulNote": "Saved content applies to new sessions. It does not rewrite active conversations.", "settings.builtinMemory": "BUILT-IN MEMORY", "settings.memoryReadOnly": "Memory content cannot be edited or reset on this screen.", "settings.memoryProvider": "Memory provider", "settings.provider": "Provider", "settings.builtin": "Built-in", "settings.setupRequired": "setup required", "settings.providerSettings": "{name} settings", "settings.unsaved": "UNSAVED CHANGES", "settings.retryRequired": "SYNC RETRY REQUIRED", "settings.upToDate": "UP TO DATE", "settings.saving": "Saving…", "settings.retrySync": "Retry sync", "settings.save": "Save changes", "settings.loadingAria": "Loading settings", "settings.loading": "Loading Hermes settings…", "settings.selectProfile": "Select a profile", "settings.selectProfileDetail": "Profile-specific Skills, SOUL, and Memory settings appear here.", "settings.loadFailed": "Unable to load settings.",
   "audit.operation.local": "Local authentication", "audit.operation.device": "Remote device authentication", "audit.operation.logout": "Remote device logout", "audit.operation.read": "Audit log access", "audit.outcome.allowed": "Allowed", "audit.outcome.denied": "Denied", "audit.outcome.rateLimited": "Rate limited", "audit.loadFailed": "Unable to load the audit log. Check the connection and reload.", "audit.eyebrow": "ACCESS DESK / OWNER ONLY", "audit.title": "Remote access & audit", "audit.checking": "Checking", "audit.checkingOwner": "Checking the owner session", "audit.localSafe": "Securely connected from this device", "audit.remoteSafe": "Connected from an authenticated remote device", "audit.loading": "Loading", "audit.reload": "Reload", "audit.time": "TIME", "audit.device": "DEVICE", "audit.operation": "OPERATION", "audit.result": "RESULT", "audit.offline": "ACCESS LOG OFFLINE", "audit.noActivity": "NO ACTIVITY", "audit.noActivityDetail": "There is no access history to display yet.", "audit.logAria": "Access audit log", "audit.thisMac": "This Mac", "audit.remoteDevice": "Remote device", "audit.footer": "Only device, origin, operation, result, and time are shown. Authentication data is never stored here.",
   "cable.queued": "queued", "cable.active": "active", "cable.blocked": "blocked", "cable.label": "{task}, assigned to {profile}, {state}", "cable.group": "Connections between work and assigned profiles", "cable.summary": "{label}, {count} shown{overflow}", "cable.overflow": ", {count} more omitted",
@@ -322,22 +336,53 @@ export function t(key: TranslationKey, values?: Record<string, string | number>)
   return result;
 }
 
+export function chatSessionTitle(session: Pick<ChatSession, "title" | "titlePresentation">): string {
+  return session.titlePresentation === "new-chat" ? t("chat.newTitle") : session.title;
+}
+
+export function chatMessageBody(message: Pick<ChatMessage, "body" | "presentation">): string {
+  if (message.presentation?.kind !== "tool-fallback") return message.body;
+  const name = message.presentation.name ?? t("chat.tool");
+  return t(message.presentation.phase === "complete" ? "chat.toolComplete" : "chat.toolRunning", { name });
+}
+
 const englishRuntimeMessages: Record<string, string> = {
+  "明示的なデモモードで表示中": "Showing explicit demo mode",
   "Hermes Kanbanへ接続しています": "Connecting to Hermes Kanban",
   "Hermes Kanbanを読み込み中": "Loading Hermes Kanban",
+  "Hermes runtimeの準備を待っています": "Waiting for the Hermes runtime",
+  "担当を更新中": "Updating assignee",
+  "カードを移動中": "Moving card",
+  "カードを作成中": "Creating card",
+  "コメントを送信中": "Sending comment",
   "変更を保存中": "Saving changes",
   "Hermes Kanbanを更新できませんでした": "Unable to update Hermes Kanban",
   "Chat接続を待っています": "Waiting for the chat connection",
   "再接続を待っています": "Waiting to reconnect",
+  "接続復旧後に履歴を再同期します": "History will be resynchronized after the connection recovers.",
   "Chat WebSocketへ接続できませんでした。": "Unable to connect to the chat WebSocket.",
+  "Chat WebSocketへ接続できませんでした。手動で再接続してください。": "Unable to connect to the chat WebSocket. Reconnect manually.",
+  "Chat WebSocketへ再接続できませんでした。手動で再接続してください。": "Unable to reconnect to the chat WebSocket. Reconnect manually.",
+  "Chat Serverへ再接続できませんでした。手動で再接続してください。": "Unable to reconnect to the chat server. Reconnect manually.",
+  "端末の再認証が必要です。": "This device must be authenticated again.",
   "Chat接続は準備中です。": "The chat connection is still starting.",
   "Chat接続が切断されました。": "The chat connection was interrupted.",
   "Chat接続を再試行します。": "Retrying the chat connection.",
+  "Chat RPCに失敗しました。": "The chat request failed.",
+  "Live Sessionが未接続です。": "The live session is not connected.",
+  "追加指示を入力してください。": "Enter steering guidance.",
+  "追加指示の送信先が変更されました。現在のセッションで再試行してください。": "The steering target changed. Try again in the current session.",
   "追加指示を送信できませんでした。接続を確認して再試行してください。": "Unable to send steering guidance. Check the connection and try again.",
   "Hermesが追加指示を拒否しました。内容を確認して再試行してください。": "Hermes rejected the steering guidance. Review it and try again.",
   "Hermesが追加指示の受付結果を返しませんでした。内容を保持しています。": "Hermes returned an invalid steering acknowledgement. The draft was preserved.",
   "Chat APIがタイムアウトしました。": "The chat API timed out.",
   "Chat APIに接続できませんでした。": "Unable to connect to the chat API.",
+  "HermesがLive Session IDを返しませんでした。": "Hermes did not return a live session ID.",
+  "保存済み履歴の継続情報が安全上限と一致しません。": "Saved-history pagination did not match the safety limit.",
+  "Office Serverの履歴ページ情報に互換性がありません。": "The Office Server returned incompatible history pagination.",
+  "回答を送信できませんでした。接続を確認して再試行してください。": "Unable to send the answer. Check the connection and try again.",
+  "承認結果を送信できませんでした。接続を確認して再試行してください。": "Unable to send the approval decision. Check the connection and try again.",
+  "Hermesの実行中にエラーが発生しました。": "An error occurred while Hermes was running.",
   "Office Serverを確認しています": "Checking Office Server",
   "Office Serverを確認中": "Checking Office Server",
   "Office Serverへ再接続しています": "Reconnecting to Office Server",
@@ -371,6 +416,8 @@ export function localizeRuntimeMessage(message: string): string {
   if (cardCount) return `${cardCount[1]} cards`;
   const rateLimit = /^試行回数の上限に達しました。(\d+)秒後にもう一度お試しください。$/.exec(message);
   if (rateLimit) return `Too many attempts. Try again in ${rateLimit[1]} seconds.`;
+  const rpcTimeout = /^([a-z.]+)がタイムアウトしました。$/i.exec(message);
+  if (rpcTimeout) return `${rpcTimeout[1]} timed out.`;
   if (message === "試行回数の上限に達しました。しばらく待ってからもう一度お試しください。") return "Too many attempts. Wait a moment and try again.";
   return message;
 }

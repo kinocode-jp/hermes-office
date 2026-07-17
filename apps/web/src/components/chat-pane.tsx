@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
-import { locale, localizeRuntimeMessage, t } from "../i18n";
+import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, t } from "../i18n";
 import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage, steerSession } from "../store";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive } from "../session-runtime";
 
@@ -12,6 +12,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const isConnected = !isLiveChat || session.connectionState === "ready";
   const { canCompose, canSteer, runActive, showStop } = chatComposerState(session);
   const canSend = canSubmitChatPrompt(session);
+  const displayTitle = chatSessionTitle(session);
   const composerPlaceholder = session.pendingInteraction ? t("chat.answerAbove")
     : !isConnected ? t("chat.connectingPlaceholder")
       : runActive ? t("chat.steerPlaceholder") : t("chat.instruct", { name: profile.name });
@@ -48,10 +49,10 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
         <span class="profile-dot" style={{ background: profile.color }} />
         <div>
           <b>{profile.name}</b>
-          <span>{session.title}</span>
+          <span>{displayTitle}</span>
         </div>
         <span class={`chat-state state-${session.connectionState ?? session.status}`}>{statusText}</span>
-        <button class="icon-button" onClick={() => closeSession(session.id)} aria-label={t("chat.close", { title: session.title })}>×</button>
+        <button class="icon-button" onClick={() => closeSession(session.id)} aria-label={t("chat.close", { title: displayTitle })}>×</button>
       </header>
 
       <div class="message-list" aria-live="polite" ref={messageListRef}>
@@ -78,7 +79,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             <span class="visually-hidden">{message.kind === "steer" ? t("chat.steerMessage") : message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
             {message.kind === "steer" && <ChatSteerMark />}
             {message.from === "tool" && <span class="message-tool-mark" aria-hidden="true">⚙</span>}
-            <p>{message.body || (message.status === "streaming" ? "…" : "")}</p>
+            <p>{chatMessageBody(message) || (message.status === "streaming" ? "…" : "")}</p>
             <time>{message.at}</time>
           </div>
         ))}
