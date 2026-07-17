@@ -215,6 +215,13 @@ export class ChatSessionCoordinator {
     for (const token of [...(this.#owners.get(owner) ?? [])]) this.#releaseLease(this.#leases.get(token));
   }
 
+  releaseUnboundOwnerLeases(owner: ChatSessionOwner): void {
+    for (const token of [...(this.#owners.get(owner) ?? [])]) {
+      const lease = this.#leases.get(token);
+      if (lease !== undefined && lease.liveIds.size === 0) this.#releaseLease(lease);
+    }
+  }
+
   releaseAll(): void {
     for (const lease of [...this.#leases.values()]) this.#releaseLease(lease);
     this.#closingLive.clear();

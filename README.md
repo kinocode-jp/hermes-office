@@ -19,7 +19,8 @@ trusted operator. Do not expose it directly to the public internet. See
 - Discovery of installed Hermes Profiles and stored sessions.
 - An animated pixel-office Profile roster. Six base characters include
   front/side/back walking frames; profiles seven and later reuse the roster
-  with deterministic hue variants.
+  with deterministic hue variants. First-seen roster slots are saved in the
+  browser so existing Profile characters and colors survive inventory reorder.
 - Per-Profile custom portrait uploads stored in the browser.
 - Up to four simultaneous chat panes with resume, streaming, steering,
   interruption, reconnect, and normalized tool events.

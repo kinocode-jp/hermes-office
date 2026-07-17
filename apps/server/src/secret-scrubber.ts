@@ -6,6 +6,8 @@ export interface SecretRedaction {
 const ESCAPE = 0x1b;
 const STRING_TERMINATOR = 0x9c;
 const MAX_TERMINAL_SEQUENCE_LENGTH = 8_192;
+const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/gu;
+const REDACTED_UNICODE_DATA = "[REDACTED UNICODE DATA]";
 const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/gi;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const AUTHORIZATION_HEADER_PATTERN = /^([ \t]*(?:Authorization|Proxy-Authorization)[ \t]*:[ \t]*)([^\r\n]*)/gim;
@@ -30,6 +32,15 @@ export function redactSecrets(value: string): SecretRedaction {
     // display boundaries. Drop the complete field rather than risk exposing
     // credential text that a terminal could hide or reinterpret.
     return { value: "[REDACTED TERMINAL DATA]", redacted: value !== "[REDACTED TERMINAL DATA]" };
+  }
+  const shadow = unicodeIgnorableShadow(normalized.value);
+  if (shadow !== undefined && redactCredentialMaterial(shadow) !== shadow) {
+    // Unicode default-ignorable characters include zero-width joiners, bidi
+    // controls, variation selectors, and tag characters. They are legitimate
+    // in normal prose, so preserve them unless removing them reveals credential
+    // material. In that case index mapping is intentionally avoided: dropping
+    // the complete field is safer than returning an obfuscated secret.
+    return { value: REDACTED_UNICODE_DATA, redacted: value !== REDACTED_UNICODE_DATA };
   }
   const output = redactCredentialMaterial(normalized.value);
   return { value: output, redacted: output !== value };
@@ -211,7 +222,16 @@ function cookieHeaderValueEnd(value: string, start: number, quote: string | unde
 /** Detect secret material on input surfaces that must reject rather than redact. */
 export function containsLikelySecret(value: string): boolean {
   const normalized = normalizeTerminalText(value);
-  return normalized.malformed || redactCredentialMaterial(normalized.value) !== normalized.value;
+  if (normalized.malformed || redactCredentialMaterial(normalized.value) !== normalized.value) return true;
+  const shadow = unicodeIgnorableShadow(normalized.value);
+  return shadow !== undefined && redactCredentialMaterial(shadow) !== shadow;
+}
+
+function unicodeIgnorableShadow(value: string): string | undefined {
+  // One non-backtracking Unicode property replacement keeps this scan linear
+  // in the UTF-16 input length and allocates no shadow for ordinary text.
+  const shadow = value.replace(DEFAULT_IGNORABLE_PATTERN, "");
+  return shadow === value ? undefined : shadow;
 }
 
 export function isLikelySecretIdentifier(identifier: string): boolean {

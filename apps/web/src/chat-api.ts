@@ -151,6 +151,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   let transportHalted = false;
   let latestSynchronizedAuthRevision = -1;
   let unsubscribeSessionSynchronizations = () => {};
+  let closeHandoffTail: Promise<void> = Promise.resolve();
 
   const rejectPending = (message: string) => {
     for (const request of pending.values()) {
@@ -382,6 +383,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
   };
 
   const openRemoteSession = async (active: ActiveTarget) => {
+    await waitForCloseHandoffs();
     const target = active.target;
     const operation = Symbol("open");
     const requestSocket = socket;
@@ -405,7 +407,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
         : typeof result?.liveSessionId === "string" ? result.liveSessionId : undefined;
       if (!liveSessionId) throw new Error("HermesがLive Session IDを返しませんでした。");
       if (!isCurrentTarget(active) || socket !== requestSocket) {
-        bestEffortClose(liveSessionId);
+        scheduleBestEffortClose(liveSessionId);
         return;
       }
       const storedSessionId = typeof result?.stored_session_id === "string"
@@ -538,8 +540,30 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     if (socket?.readyState === WebSocket.OPEN) socket.close(4001, closeReason);
   };
 
-  const bestEffortClose = (liveSessionId: string): void => {
-    if (socket?.readyState === WebSocket.OPEN) void rpc("session.close", { session_id: liveSessionId }).catch(() => undefined);
+  const waitForCloseHandoffs = async (): Promise<void> => {
+    while (true) {
+      const observed = closeHandoffTail;
+      await observed;
+      if (observed === closeHandoffTail) return;
+    }
+  };
+
+  const scheduleBestEffortClose = (liveSessionId: string): void => {
+    const closeSocket = socket;
+    closeHandoffTail = closeHandoffTail.then(async () => {
+      if (socket !== closeSocket || closeSocket?.readyState !== WebSocket.OPEN) return;
+      try {
+        const result = asRecord(await rpc("session.close", { session_id: liveSessionId }));
+        if (typeof result?.closed !== "boolean") throw new Error("Hermes returned an invalid close acknowledgement.");
+      } catch {
+        // A failed close may still own the fourth server lease. Never race a
+        // replacement create on this socket; disconnect cleanup is the
+        // authoritative fence before the next office.ready.
+        if (socket === closeSocket && closeSocket.readyState === WebSocket.OPEN) {
+          closeSocket.close(4002, "Session close unconfirmed; reload history");
+        }
+      }
+    });
   };
 
   const deactivateTarget = (active: ActiveTarget): void => {
@@ -554,7 +578,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     for (const [liveSessionId, mapped] of liveToClient) {
       if (mapped.clientSessionId !== clientSessionId || mapped.generation !== active.generation) continue;
       liveToClient.delete(liveSessionId);
-      bestEffortClose(liveSessionId);
+      scheduleBestEffortClose(liveSessionId);
     }
   };
 

@@ -34,6 +34,40 @@ test("a durable pending resume cannot be closed before its live identity binds",
   assert.equal(hermes.isLive("live-pending"), true);
 });
 
+test("disconnect fences a pending resume before replacement readiness and history", async () => {
+  const { hermes, coordinator, dependencies } = setup();
+  const hub = dependencies.chatHub as ChatUpstreamHub;
+  const closeGate = deferred<void>();
+  hermes.delayNextConnectionClose(closeGate.promise);
+  const oldClient = new FakeWebSocket();
+  handleOfficeChatConnection(oldClient as unknown as WebSocket, dependencies);
+  await settle();
+  oldClient.rpc(201, "session.resume", { session_id: "pending-only", profile: "coder" });
+  await settle();
+  oldClient.close(1006, "network lost during resume");
+
+  let historyStarted = false;
+  const history = hub.readStableHistory(async () => { historyStarted = true; return "fresh"; });
+  const replacement = new FakeWebSocket();
+  handleOfficeChatConnection(replacement as unknown as WebSocket, dependencies);
+  await settle(4);
+  assert.equal(historyStarted, false);
+  assert.equal(replacement.frames().some(({ method }) => method === "office.ready"), false);
+
+  hermes.resolvePendingOnly();
+  await settle();
+  closeGate.resolve();
+  assert.equal(await history, "fresh");
+  await settle(6);
+  assert.equal(replacement.frames().some(({ method }) => method === "office.ready"), true);
+  assert.equal(coordinator.ownerForLive("live-pending"), undefined, "the late result cannot bind after generation reset");
+  assert.equal(hermes.isLive("live-pending"), false, "connection teardown reaps the late native session");
+
+  replacement.rpc(202, "session.resume", { session_id: "parent", profile: "coder" });
+  await settle(4);
+  assert.equal(replacement.errorCode(202), undefined);
+});
+
 test("a guessed live close cannot race ahead of its pending resume on the same socket", async () => {
   const { hermes, coordinator, dependencies } = setup();
   const client = new FakeWebSocket();
@@ -543,6 +577,7 @@ class RaceFakeHermes {
   #pendingOnly: ((result: HermesChatResult) => void) | undefined;
   #pendingParent: ((result: HermesChatResult) => void) | undefined;
   #holdParent = false;
+  #nextConnectionClose: Promise<void> | undefined;
   #holdInteractionResponses = false;
   readonly #heldInteractionRejects: Array<(error: Error) => void> = [];
 
@@ -557,6 +592,9 @@ class RaceFakeHermes {
             request: async (request: HermesChatRequest) => await this.#request(request),
             close: async () => {
               this.connectionCloseCount += 1;
+              const gate = this.#nextConnectionClose;
+              this.#nextConnectionClose = undefined;
+              await gate;
               this.#closed = true;
               this.#live.clear();
             },
@@ -575,6 +613,7 @@ class RaceFakeHermes {
   }
   publish(event: HermesChatEvent): void { this.#event?.(event); }
   holdNextParentResume(): void { this.#holdParent = true; }
+  delayNextConnectionClose(gate: Promise<void>): void { this.#nextConnectionClose = gate; }
   holdInteractions(): void { this.#holdInteractionResponses = true; }
   rejectHeldInteractions(): void {
     this.#holdInteractionResponses = false;
@@ -693,4 +732,10 @@ class FakeWebSocket extends EventEmitter {
 
 async function settle(turns = 2): Promise<void> {
   for (let index = 0; index < turns; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }

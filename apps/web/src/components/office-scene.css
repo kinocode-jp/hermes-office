@@ -5,6 +5,7 @@
 .office-heading h1 { margin: 0; font: 900 clamp(20px, 2vw, 26px)/1.05 "Arial Black", sans-serif; letter-spacing: -0.05em; }
 
 .office-toolbar { display: flex; align-items: center; gap: 10px; }
+.office-density-note { max-width: 280px; color: var(--muted); font-size: var(--text-utility, 13px); line-height: 1.25; text-align: right; }
 .shift-readout { display: flex; align-items: center; gap: 10px; margin-right: 4px; }
 .shift-readout .stat { display: inline-flex; align-items: center; gap: 5px; cursor: default; }
 .shift-readout .stat i { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
@@ -18,6 +19,7 @@
 .office-seg button { min-width: 34px; min-height: 30px; padding: 0 8px; border: 0; border-right: 1px solid var(--line); color: var(--muted); background: transparent; font: 700 12px/1 ui-monospace, monospace; cursor: pointer; }
 .office-seg button:last-child { border-right: 0; }
 .office-seg button:hover { color: var(--paper); }
+.office-seg button:disabled { cursor: not-allowed; opacity: .45; }
 .office-seg button.is-active { color: var(--night); background: var(--paper); }
 
 /* ── Scene ──────────────────────────────────────────────────────── */

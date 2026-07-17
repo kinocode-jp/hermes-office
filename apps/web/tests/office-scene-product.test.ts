@@ -57,6 +57,20 @@ test("scene scaling and mobile fallback preserve accessible click targets", asyn
   assert.match(styles, /\.ow-char \{[^}]*min-width: 84px[^}]*min-height: 84px/);
   assert.match(styles, /\.office-row \{[^}]*min-height: max\(62px, var\(--target-mobile\)\)/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-list \{ display: grid; \}/);
+  assert.match(source, /const effectiveView: OfficeView = denseRoster \? "list" : officeView\.value/);
+  assert.match(source, /effectiveView === "scene" && <OfficeStage/);
+  assert.match(source, /disabled=\{denseRoster\}/, "dense rosters must not expose an unreadable Scene option");
+  assert.match(source, /office-density-note[^]*office\.denseList/);
+});
+
+test("office selection state is exposed to assistive technology", async () => {
+  const source = await readFile(new URL("../src/components/office-scene.tsx", import.meta.url), "utf8");
+  assert.match(source, /aria-current=\{selectedProfileId\.value === profile\.id \? "true" : undefined\}/);
+  assert.match(source, /aria-pressed=\{effectiveView === "scene"\}/);
+  assert.match(source, /aria-pressed=\{effectiveView === "list"\}/);
+  assert.match(source, /aria-pressed=\{officeLayout\.value === "studio"\}/);
+  assert.match(source, /aria-pressed=\{officeLayout\.value === "lounge"\}/);
+  assert.match(source, /aria-pressed=\{officeSize\.value === size\}/);
 });
 
 function numericConstant(source: string, name: string): number {

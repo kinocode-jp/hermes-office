@@ -51,6 +51,7 @@ export class ChatUpstreamHub {
   readonly #droppedUnbound = new Set<string>();
   readonly #ownerCleanup = new Map<ChatSessionOwner, Promise<boolean>>();
   readonly #cleanupOperations = new Set<Promise<boolean>>();
+  readonly #activeSessionStarts = new Map<ChatSessionOwner, number>();
   #unboundEventCount = 0;
   #unboundBytes = 0;
   #connection: HermesChatConnection | undefined;
@@ -110,10 +111,18 @@ export class ChatUpstreamHub {
           && (authorize?.() ?? true),
       );
     }
-    return await this.#requestUnchecked(
-      request, internal,
-      () => this.#subscribers.has(owner) && (authorize?.() ?? true),
-    );
+    const requestAuthorization = () => this.#subscribers.has(owner) && (authorize?.() ?? true);
+    if (request.method !== "session.create" && request.method !== "session.resume") {
+      return await this.#requestUnchecked(request, internal, requestAuthorization);
+    }
+    this.#activeSessionStarts.set(owner, (this.#activeSessionStarts.get(owner) ?? 0) + 1);
+    try {
+      return await this.#requestUnchecked(request, internal, requestAuthorization);
+    } finally {
+      const remaining = (this.#activeSessionStarts.get(owner) ?? 1) - 1;
+      if (remaining === 0) this.#activeSessionStarts.delete(owner);
+      else this.#activeSessionStarts.set(owner, remaining);
+    }
   }
 
   async requestOwnedSession(
@@ -215,6 +224,16 @@ export class ChatUpstreamHub {
     let operation: Promise<boolean>;
     operation = (async () => {
       if (previous !== undefined) await previous.catch(() => false);
+      if (this.#activeSessionStarts.has(owner)) {
+        // The live identity is still unknowable, so no targeted close can be
+        // authoritative. Terminalize the shared generation before a new owner
+        // may read history or resume; late results then fail the generation fence.
+        await this.#resetGeneration(this.#generation);
+      } else {
+        // Claims still waiting on pre-request work (for example global seed
+        // assembly) cannot reach Hermes after detach, and may be released now.
+        this.#coordinator.releaseUnboundOwnerLeases(owner);
+      }
       for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
         await this.#closeLease(owner, lease, 2);
       }

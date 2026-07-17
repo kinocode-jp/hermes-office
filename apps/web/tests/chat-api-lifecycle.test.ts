@@ -23,16 +23,54 @@ test("delayed create from a four-pane eviction is closed and cannot resurrect th
   const staleClose = harness.socket.frame("session.close", "live-stale");
   assert.ok(staleClose);
   harness.socket.respond(staleClose.id, undefined, { code: -32000, message: "close failed" });
+  await flush();
+  assert.deepEqual(harness.socket.closes.at(-1), { code: 4002, reason: "Session close unconfirmed; reload history" });
+  assert.equal(harness.ready.some((item) => item.clientSessionId === "client-1"), false);
+  harness.api.stop();
+});
 
-  harness.api.ensureSession(targets[0]!);
+test("a fifth pane waits for the evicted live session close acknowledgement", async () => {
+  const harness = await createHarness();
+  for (let index = 1; index <= 4; index += 1) {
+    harness.api.ensureSession({ clientSessionId: `client-${index}`, profileId: `profile-${index}` });
+    await flush();
+    const create = harness.socket.frame("session.create", `profile-${index}`)!;
+    harness.socket.respond(create.id, { session_id: `live-${index}` });
+    await flush();
+  }
+
+  harness.api.releaseSession("client-1");
+  harness.api.ensureSession({ clientSessionId: "client-5", profileId: "profile-5" });
   await flush();
-  const reopened = harness.socket.frames("session.create", "profile-1").at(-1)!;
-  assert.notEqual(reopened.id, staleCreate.id);
-  harness.socket.respond(reopened.id, { session_id: "live-current" });
+  const close = harness.socket.frame("session.close", "live-1");
+  assert.ok(close);
+  assert.equal(harness.socket.frame("session.create", "profile-5"), undefined, "create must not race the four-lease close");
+
+  harness.socket.respond(close.id, { closed: true });
   await flush();
-  assert.deepEqual(harness.ready.filter((item) => item.clientSessionId === "client-1"), [
-    { clientSessionId: "client-1", liveSessionId: "live-current" },
-  ]);
+  assert.ok(harness.socket.frame("session.create", "profile-5"), "the replacement starts after its lease slot is released");
+  harness.api.stop();
+});
+
+test("a failed eviction close resets transport instead of racing the fifth pane", async () => {
+  const harness = await createHarness();
+  for (let index = 1; index <= 4; index += 1) {
+    harness.api.ensureSession({ clientSessionId: `failure-client-${index}`, profileId: `failure-profile-${index}` });
+    await flush();
+    const create = harness.socket.frame("session.create", `failure-profile-${index}`)!;
+    harness.socket.respond(create.id, { session_id: `failure-live-${index}` });
+    await flush();
+  }
+
+  harness.api.releaseSession("failure-client-1");
+  harness.api.ensureSession({ clientSessionId: "failure-client-5", profileId: "failure-profile-5" });
+  await flush();
+  const close = harness.socket.frame("session.close", "failure-live-1")!;
+  harness.socket.respond(close.id, undefined, { code: -32000, message: "close failed" });
+  await flush();
+
+  assert.equal(harness.socket.frame("session.create", "failure-profile-5"), undefined);
+  assert.deepEqual(harness.socket.closes.at(-1), { code: 4002, reason: "Session close unconfirmed; reload history" });
   harness.api.stop();
 });
 
@@ -56,7 +94,7 @@ test("delayed history is discarded after release without starting resume", async
   harness.api.stop();
 });
 
-test("failed close keeps the tombstone and a same-id reopen gets a new generation", async () => {
+test("failed close keeps the tombstone and terminalizes the current transport", async () => {
   const harness = await createHarness();
   const target = { clientSessionId: "same-id", profileId: "builder" };
   harness.api.ensureSession(target);
@@ -66,16 +104,17 @@ test("failed close keeps the tombstone and a same-id reopen gets a new generatio
   await flush();
 
   harness.api.releaseSession("same-id");
+  await flush();
   const close = harness.socket.frame("session.close", "live-old")!;
   harness.socket.respond(close.id, undefined, { code: -32000, message: "temporary close failure" });
+  await flush();
   harness.socket.event("live-old", "message.complete");
   harness.api.ensureSession(target);
   await flush();
-  const reopen = harness.socket.frames("session.create", "builder").at(-1)!;
-  harness.socket.respond(reopen.id, { session_id: "live-new" });
-  await flush();
 
-  assert.deepEqual(harness.ready.map((item) => item.liveSessionId), ["live-old", "live-new"]);
+  assert.deepEqual(harness.ready.map((item) => item.liveSessionId), ["live-old"]);
+  assert.equal(harness.socket.frames("session.create", "builder").length, 1);
+  assert.deepEqual(harness.socket.closes.at(-1), { code: 4002, reason: "Session close unconfirmed; reload history" });
   assert.equal(harness.events.length, 0);
   harness.api.stop();
 });
@@ -323,6 +362,9 @@ test("steer never crosses a target generation, release, or transport close", asy
   harness.api.ensureSession({ clientSessionId: "client-race", profileId: "new" });
   harness.socket.respond(staleFrame.id, { status: "queued" });
   await assert.rejects(stale, /送信先が変更/);
+  await flush();
+  const oldClose = harness.socket.frame("session.close", "live-old")!;
+  harness.socket.respond(oldClose.id, { closed: true });
   await flush();
   const createNew = harness.socket.frame("session.create", "new")!;
   harness.socket.respond(createNew.id, { session_id: "live-new" });

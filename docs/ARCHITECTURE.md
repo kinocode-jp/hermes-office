@@ -22,8 +22,11 @@ Browser / PWA ─┼── HTTP + WebSocket ── Office Server ── loopback
 `apps/web` contains the shared Preact/Vite UI and PWA shell. It renders an
 office/profile roster, chat workspaces, Kanban, settings, and responsive mobile
 navigation. The character atlas contains six base characters and directional
-frames; profile order selects the base character and later profile groups use a
-deterministic hue shift. A profile can override its portrait with browser-local
+frames. The browser assigns each Profile a persistent first-seen roster slot:
+slots 1–6 use the original atlas colors and slot 7 onward reuses those characters
+with a deterministic hue shift. Inventory reorder does not change an existing
+assignment; malformed stored slot data is compacted before new slots are issued.
+A profile can override its portrait with browser-local
 image data.
 
 The interface talks to Office Server, not directly to Hermes. Hermes backend

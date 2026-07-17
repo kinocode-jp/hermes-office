@@ -1,6 +1,7 @@
 import { signal, type Signal } from "@preact/signals";
 
 const STORAGE_KEY = "hermes-office.profile-avatars.v1";
+const ORDINAL_STORAGE_KEY = "hermes-office.profile-avatar-ordinals.v1";
 const CUSTOM_IMAGE_LIMIT = 1_500_000;
 const DATABASE_NAME = "hermes-office-assets";
 const DATABASE_STORE = "profile-avatars";
@@ -10,12 +11,43 @@ export type ProfileAvatar =
   | { kind: "creature"; index: number }
   | { kind: "custom"; dataUrl: string };
 export type AvatarMap = Record<string, ProfileAvatar>;
+export type AvatarOrdinalMap = Record<string, number>;
 export interface StoredCustomAvatar { profileId: string; dataUrl: string }
 
 export interface AvatarAssetStore {
   load(legacy: Readonly<AvatarMap>): Promise<unknown[]>;
   put(profileId: string, dataUrl: string): Promise<void>;
   delete(profileId: string): Promise<void>;
+}
+
+/** Preserves the roster slot assigned when a Profile is first observed. */
+export class AvatarOrdinalPreferences {
+  #ordinals: AvatarOrdinalMap;
+  readonly #persist: (ordinals: AvatarOrdinalMap) => void;
+
+  constructor(initial: AvatarOrdinalMap = {}, persist: (ordinals: AvatarOrdinalMap) => void = () => undefined) {
+    this.#ordinals = normalizeAvatarOrdinals(initial);
+    this.#persist = persist;
+  }
+
+  register(profileIds: readonly string[]): void {
+    let nextOrdinal = Object.values(this.#ordinals).reduce((maximum, ordinal) => Math.max(maximum, ordinal), -1) + 1;
+    let changed = false;
+    for (const profileId of profileIds) {
+      const key = normalizedProfileId(profileId);
+      if (!key || this.#ordinals[key] !== undefined) continue;
+      this.#ordinals[key] = nextOrdinal++;
+      changed = true;
+    }
+    if (changed) this.#persist({ ...this.#ordinals });
+  }
+
+  ordinal(profileId: string): number {
+    const key = normalizedProfileId(profileId);
+    if (!key) return DEFAULT_CHARACTER_COUNT - 1;
+    this.register([key]);
+    return this.#ordinals[key]!;
+  }
 }
 
 export class AvatarPreferences {
@@ -123,24 +155,34 @@ export class AvatarPreferences {
 }
 
 export function defaultAvatarOrdinal(profileId: string): number {
-  const hash = profileAvatarHash(profileId);
-  return hash === undefined ? DEFAULT_CHARACTER_COUNT - 1 : hash >>> 0;
+  return defaultAvatarAssignments.ordinal(profileId);
 }
 
 export function defaultAvatarIndex(profileId: string): number {
-  const hash = profileAvatarHash(profileId);
-  return hash === undefined ? DEFAULT_CHARACTER_COUNT - 1 : Math.abs(hash) % DEFAULT_CHARACTER_COUNT;
+  return defaultAvatarOrdinal(profileId) % DEFAULT_CHARACTER_COUNT;
 }
 
-function profileAvatarHash(profileId: string): number | undefined {
-  const normalized = profileId.trim().toLocaleLowerCase("en-US");
-  if (!normalized) return undefined;
-  let hash = 2166136261;
-  for (const character of normalized) {
-    hash ^= character.codePointAt(0) ?? 0;
-    hash = Math.imul(hash, 16777619);
+export function registerDefaultAvatarProfiles(profileIds: readonly string[]): void {
+  defaultAvatarAssignments.register(profileIds);
+}
+
+function normalizedProfileId(profileId: string): string {
+  return profileId.trim().toLocaleLowerCase("en-US");
+}
+
+/** Compacts malformed, duplicate, or sparse persisted slots into one safe first-seen sequence. */
+export function normalizeAvatarOrdinals(value: unknown): AvatarOrdinalMap {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const candidates: Array<{ key: string; ordinal: number; order: number }> = [];
+  const seen = new Set<string>();
+  for (const [order, [profileId, ordinal]] of Object.entries(value).entries()) {
+    const key = normalizedProfileId(profileId);
+    if (!key || seen.has(key) || typeof ordinal !== "number" || !Number.isSafeInteger(ordinal) || ordinal < 0) continue;
+    seen.add(key);
+    candidates.push({ key, ordinal, order });
   }
-  return hash;
+  candidates.sort((left, right) => left.ordinal - right.ordinal || left.order - right.order);
+  return Object.fromEntries(candidates.map((candidate, ordinal) => [candidate.key, ordinal]));
 }
 
 export function avatarForProfile(profileId: string): ProfileAvatar {
@@ -202,6 +244,24 @@ function persist(avatars: AvatarMap): void {
   }
 }
 
+function readStoredOrdinals(): AvatarOrdinalMap {
+  try {
+    const raw = globalThis.localStorage?.getItem(ORDINAL_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    const ordinals = normalizeAvatarOrdinals(parsed);
+    if (JSON.stringify(parsed) !== JSON.stringify(ordinals)) persistOrdinals(ordinals);
+    return ordinals;
+  } catch {
+    return {};
+  }
+}
+
+function persistOrdinals(ordinals: AvatarOrdinalMap): void {
+  try { globalThis.localStorage?.setItem(ORDINAL_STORAGE_KEY, JSON.stringify(ordinals)); }
+  catch { /* First-seen assignments remain stable for this page session. */ }
+}
+
 class IndexedDbAvatarStore implements AvatarAssetStore {
   async load(legacy: Readonly<AvatarMap>): Promise<unknown[]> {
     return await withAvatarStore("readwrite", async (store) => {
@@ -236,6 +296,7 @@ function isStoredCustomAvatar(value: unknown): value is StoredCustomAvatar {
 }
 
 const initialAvatars = readStoredAvatars();
+const defaultAvatarAssignments = new AvatarOrdinalPreferences(readStoredOrdinals(), persistOrdinals);
 const avatarPreferences = new AvatarPreferences(initialAvatars, new IndexedDbAvatarStore(), persist);
 export const profileAvatars = avatarPreferences.avatars;
 void avatarPreferences.hydrate();

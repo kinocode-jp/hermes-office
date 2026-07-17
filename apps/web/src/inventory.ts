@@ -4,6 +4,7 @@ import { officeMessage, type RuntimeMessage } from "./i18n";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
 import { mergeServerSessionStatus } from "./session-runtime";
+import { registerDefaultAvatarProfiles } from "./avatar-preferences";
 import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
@@ -149,6 +150,7 @@ function commitInventoryPage(page: InventoryPage, identity: InventoryIdentity): 
 }
 
 function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void {
+  registerDefaultAvatarProfiles(rows.map((profile) => profile.id));
   const next = [...profileList.value];
   const existing = new Map(next.map((profile, index) => [profile.id, index]));
   const pageSeen = new Set<string>();

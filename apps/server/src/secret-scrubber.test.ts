@@ -96,6 +96,49 @@ test("ECMA-48 strings cannot split secret labels or values", () => {
   assert.deepEqual(twice, { value: once.value, redacted: false });
 });
 
+test("Unicode default-ignorables cannot split secret labels, headers, tokens, or delimiters", () => {
+  const cases = [
+    "API\u200b_KEY=zero-width-secret",
+    "client\u200dSecret=joiner-secret",
+    "Coo\u2060kie: session=word-joiner-secret",
+    "Authori\ufeffzation: Custom bom-secret",
+    "ghp_ABCDEFGHIJKLMNO\u200bPQRSTUVWXYZabcdefghij",
+    "sk-proj-ABCDEFGHIJ\ufe0fKLMNOPQRSTUVWXYZ123456",
+    "API\u202e_KEY=bidi-secret",
+    "-----BEGIN PRI\u2066VATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----",
+  ];
+
+  for (const source of cases) {
+    const once = redactSecrets(source);
+    assert.deepEqual(once, { value: "[REDACTED UNICODE DATA]", redacted: true });
+    assert.equal(containsLikelySecret(source), true);
+    assert.deepEqual(redactSecrets(once.value), { value: once.value, redacted: false });
+  }
+});
+
+test("harmless Unicode joiners, variation selectors, and bidi isolates remain unchanged", () => {
+  const source = [
+    "Family emoji: 👨‍👩‍👧‍👦",
+    "Emoji presentation: ❤️",
+    "Persian joiner: می‌خواهم",
+    "Isolated direction: \u2066safe prose\u2069",
+  ].join("\n");
+
+  assert.deepEqual(redactSecrets(source), { value: source, redacted: false });
+  assert.equal(containsLikelySecret(source), false);
+});
+
+test("a 128 KiB invisible split remains bounded and fails closed", () => {
+  const prefix = "API";
+  const suffix = "_KEY=large-invisible-secret";
+  const ignorables = "\u200b".repeat(Math.ceil((128 * 1024 - Buffer.byteLength(prefix + suffix)) / 3));
+  const source = `${prefix}${ignorables}${suffix}`;
+  assert.ok(Buffer.byteLength(source) >= 128 * 1024);
+
+  assert.deepEqual(redactSecrets(source), { value: "[REDACTED UNICODE DATA]", redacted: true });
+  assert.equal(containsLikelySecret(source), true);
+});
+
 test("well-formed terminal normalization alone stays non-secret and idempotent", () => {
   const source = [
     "safe\u001b]0;window title\u0007 prose",

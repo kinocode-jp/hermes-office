@@ -238,6 +238,7 @@ function OfficeStage({ profiles, world }: { profiles: Profile[]; world: OfficeWo
                 style={{ width: `${CHAR_W}px`, height: `${CHAR_H}px`, "--agent-color": profile.color }}
                 data-status={profile.status}
                 title={activity ?? stateLabel}
+                aria-current={selectedProfileId.value === profile.id ? "true" : undefined}
                 onClick={() => selectProfile(profile.id)}
                 {...profileDropHandlers(profile.id)}
                 aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
@@ -264,6 +265,7 @@ function OfficeList({ profiles }: { profiles: Profile[] }) {
             key={profile.id}
             class={`office-row ${selectedProfileId.value === profile.id ? "is-selected" : ""}`}
             style={{ "--agent-color": profile.color }}
+            aria-current={selectedProfileId.value === profile.id ? "true" : undefined}
             onClick={() => selectProfile(profile.id)}
             {...profileDropHandlers(profile.id)}
             aria-label={t("office.profileLabel", { name: profile.name, state: stateLabel, activity: activity ?? stateLabel, count: profile.sessions })}
@@ -292,9 +294,11 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
     [officeLayout.value, officeSize.value, profiles.length]
   );
   const inventory = profileInventoryState.value;
+  const denseRoster = profiles.length >= DENSE_OFFICE_PROFILE_COUNT;
+  const effectiveView: OfficeView = denseRoster ? "list" : officeView.value;
 
   return (
-    <section class="office-wrap" aria-labelledby="office-title" data-view={officeView.value}>
+    <section class="office-wrap" aria-labelledby="office-title" data-view={effectiveView}>
       <header class="office-heading">
         <h1 id="office-title">{t("office.title")} <InfoTip text={t("office.hint")} align="start" side="bottom" /></h1>
         <div class="office-toolbar">
@@ -303,19 +307,20 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
             <span class="stat stat--waiting" title={t("office.attentionCount")}><i /><b>{attention}</b></span>
             <span class="stat stat--total" title={t("office.profilesCount")}><i /><b>{profiles.length}</b></span>
           </div>
+          {denseRoster && <span class="office-density-note" role="status">{t("office.denseList")}</span>}
           <div class="office-seg office-seg--view" role="group" aria-label={t("office.viewLabel")}>
-            <button type="button" class={officeView.value === "scene" ? "is-active" : ""} title={t("office.viewScene")} aria-label={t("office.viewScene")} onClick={() => setView("scene")}>▦</button>
-            <button type="button" class={officeView.value === "list" ? "is-active" : ""} title={t("office.viewList")} aria-label={t("office.viewList")} onClick={() => setView("list")}>☰</button>
+            <button type="button" class={effectiveView === "scene" ? "is-active" : ""} title={denseRoster ? t("office.denseList") : t("office.viewScene")} aria-label={t("office.viewScene")} aria-pressed={effectiveView === "scene"} disabled={denseRoster} onClick={() => setView("scene")}>▦</button>
+            <button type="button" class={effectiveView === "list" ? "is-active" : ""} title={t("office.viewList")} aria-label={t("office.viewList")} aria-pressed={effectiveView === "list"} onClick={() => setView("list")}>☰</button>
           </div>
-          {officeView.value === "scene" && (
+          {effectiveView === "scene" && (
             <>
               <div class="office-seg office-seg--scene" role="group" aria-label={t("office.layoutLabel")}>
-                <button type="button" class={officeLayout.value === "studio" ? "is-active" : ""} title={t("office.layout.studio")} onClick={() => setLayout("studio")}>A</button>
-                <button type="button" class={officeLayout.value === "lounge" ? "is-active" : ""} title={t("office.layout.lounge")} onClick={() => setLayout("lounge")}>B</button>
+                <button type="button" class={officeLayout.value === "studio" ? "is-active" : ""} title={t("office.layout.studio")} aria-pressed={officeLayout.value === "studio"} onClick={() => setLayout("studio")}>A</button>
+                <button type="button" class={officeLayout.value === "lounge" ? "is-active" : ""} title={t("office.layout.lounge")} aria-pressed={officeLayout.value === "lounge"} onClick={() => setLayout("lounge")}>B</button>
               </div>
               <div class="office-seg office-seg--scene" role="group" aria-label={t("office.sizeLabel")}>
                 {(["s", "m", "l"] as const).map((size) => (
-                  <button key={size} type="button" class={officeSize.value === size ? "is-active" : ""} title={`${t("office.sizeLabel")} ${size.toUpperCase()}`} onClick={() => setSize(size)}>{size.toUpperCase()}</button>
+                  <button key={size} type="button" class={officeSize.value === size ? "is-active" : ""} title={`${t("office.sizeLabel")} ${size.toUpperCase()}`} aria-pressed={officeSize.value === size} onClick={() => setSize(size)}>{size.toUpperCase()}</button>
                 ))}
               </div>
             </>
@@ -323,7 +328,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
         </div>
       </header>
 
-      {officeView.value === "scene" && <OfficeStage profiles={profiles} world={world} />}
+      {effectiveView === "scene" && <OfficeStage profiles={profiles} world={world} />}
       <OfficeList profiles={profiles} />
       {inventory.hasMore && <button class="secondary-button inventory-more" disabled={inventory.loading} onClick={() => void loadMoreProfiles()}>{inventory.loading ? t("inventory.loading") : t("inventory.showMore")}</button>}
       {inventory.truncated && !inventory.hasMore && <small class="inventory-note">{t("inventory.truncated")}</small>}
