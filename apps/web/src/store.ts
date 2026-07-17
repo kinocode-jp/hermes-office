@@ -2,7 +2,7 @@ import { computed, signal } from "@preact/signals";
 import { officeInventoryReliability } from "@hermes-office/protocol";
 import { initialSessions, initialTaskComments, initialTasks, profiles } from "./demo-data";
 import { createDemoKanbanApi } from "./demo-kanban-api";
-import type { ChatGatewayEvent, ChatHistoryResult, ChatSteerResult, ChatTarget } from "./chat-api";
+import type { ChatGatewayEvent, ChatHistoryResult, ChatPromptResult, ChatSteerResult, ChatTarget } from "./chat-api";
 import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatPendingInteraction, ChatSession, InspectorTab, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import { loadKanbanDemoRuntime, registerKanbanProfileTaskUpdater, resetKanbanRuntimeState } from "./kanban-store";
@@ -10,7 +10,7 @@ import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTimestamp, stringArray, stringValue } from "./chat-store-utils";
-import { boundedSteerEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
+import { boundedChatOperationEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
 import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
 export const profileList = signal<Profile[]>([]);
@@ -60,7 +60,7 @@ export const selectedProfileSessions = computed(() =>
 let retryOfficeConnection = () => {};
 let ensureChatSession = (_target: ChatTarget) => {};
 let releaseChatSession = (_clientSessionId: string) => {};
-let submitChatPrompt = (_clientSessionId: string, _text: string) => {};
+let submitChatPrompt: (clientSessionId: string, text: string, operationId: string) => Promise<ChatPromptResult> | void = async () => ({ status: "rejected", message: "Chat runtime is not registered." });
 let steerChatSession: (clientSessionId: string, text: string) => Promise<ChatSteerResult> = async () => { throw new Error("Chat runtime is not registered."); };
 let interruptChatSession = (_clientSessionId: string) => {};
 let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
@@ -71,7 +71,7 @@ let latestOfficeSnapshotIdentity: OfficeSnapshotRequestIdentity | undefined;
 export function registerChatRuntime(actions: {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
-  submitPrompt(clientSessionId: string, text: string): void;
+  submitPrompt(clientSessionId: string, text: string, operationId: string): Promise<ChatPromptResult> | void;
   steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
@@ -372,6 +372,7 @@ export function sendMessage(sessionId: string, body: string): void {
   if (!trimmed) return;
   const session = sessions.value.find((item) => item.id === sessionId);
   if (!session || !canSubmitChatPrompt(session)) return;
+  const operationId = crypto.randomUUID();
   sessions.value = sessions.value.map((session) =>
     session.id === sessionId
       ? {
@@ -380,12 +381,31 @@ export function sendMessage(sessionId: string, body: string): void {
           errorMessage: undefined,
           messages: [
             ...session.messages,
-            { id: crypto.randomUUID(), from: "user", body: trimmed, at: nowTimestamp() }
+            {
+              id: `prompt-${operationId}`,
+              from: "user",
+              body: trimmed,
+              at: nowTimestamp(),
+              ...(session.remoteKind === "demo" ? {} : { promptOperation: { id: operationId, state: "pending" as const } }),
+            }
           ]
         }
       : session
   );
-  if (session.remoteKind !== "demo") submitChatPrompt(sessionId, trimmed);
+  if (session.remoteKind !== "demo") {
+    const submission = submitChatPrompt(sessionId, trimmed, operationId);
+    if (submission === undefined) updatePromptOperation(sessionId, operationId, { status: "accepted" });
+    else {
+      void submission.then((result) => {
+        updatePromptOperation(sessionId, operationId, result);
+      }, (reason) => {
+        updatePromptOperation(sessionId, operationId, {
+          status: "unconfirmed",
+          message: reason instanceof Error ? reason.message : "Prompt submission could not be confirmed.",
+        });
+      });
+    }
+  }
 }
 
 export async function steerSession(sessionId: string, body: string): Promise<boolean> {
@@ -441,7 +461,7 @@ export function setChatHistoryLoading(sessionId: string, resetTranscript = false
     ...(resetTranscript ? {
       // Hermes history cannot reconstruct these queue acknowledgements. Keep the
       // bounded, local operation evidence while replacing the durable transcript.
-      messages: boundedSteerEvidence(session.messages),
+      messages: boundedChatOperationEvidence(session.messages),
       streamingMessageId: undefined,
       historyPartial: false,
       historyNotice: undefined,
@@ -452,15 +472,64 @@ export function setChatHistoryLoading(sessionId: string, resetTranscript = false
 export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void {
   updateChatSession(sessionId, (session) => {
     const historyIds = new Set(history.map((message) => message.id));
+    const localMessages = reconcilePromptOperationsWithHistory(session.messages, history)
+      .filter((message) => !historyIds.has(message.id));
     return {
       ...session,
       ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
       historyState: "loaded",
       historyPartial: result?.partial === true, historyNotice: result?.error ? officeRuntimeMessage(result.error) : undefined,
       errorMessage: session.connectionState === "error" ? session.errorMessage : undefined,
-      messages: [...history, ...session.messages.filter((message) => !historyIds.has(message.id))]
+      messages: [...history, ...localMessages]
     };
   });
+}
+
+function updatePromptOperation(sessionId: string, operationId: string, result: ChatPromptResult): void {
+  updateChatSession(sessionId, (session) => {
+    let found = false;
+    const messages = session.messages.map((message) => {
+      if (message.promptOperation?.id !== operationId || message.promptOperation.state !== "pending") return message;
+      found = true;
+      return {
+        ...message,
+        promptOperation: {
+          id: operationId,
+          state: result.status,
+          ...(result.status === "accepted" ? {} : { message: result.message }),
+        },
+        ...(result.status === "rejected" ? { status: "failed" as const } : {}),
+      };
+    });
+    if (!found) return session;
+    return {
+      ...session,
+      messages,
+      ...(result.status === "rejected" || result.status === "unconfirmed" ? { status: "ready" as const } : {}),
+    };
+  });
+}
+
+export function reconcilePromptOperationsWithHistory(local: readonly ChatMessage[], history: readonly ChatMessage[]): ChatMessage[] {
+  const remainingHistoryUsers = history.filter((message) => message.from === "user").map((message) => ({ message, matched: false }));
+  return local.filter((message) => {
+    const operation = message.promptOperation;
+    // Only the RPC acknowledgement can establish acceptance. Ambiguous and
+    // rejected operations remain visible evidence even when identical text is
+    // present in history; matching text alone must never promote them.
+    if (!operation || operation.state !== "accepted") return true;
+    const match = remainingHistoryUsers.find((candidate) => !candidate.matched && likelySamePrompt(message, candidate.message));
+    if (!match) return true;
+    match.matched = true;
+    return false;
+  });
+}
+
+function likelySamePrompt(local: ChatMessage, remote: ChatMessage): boolean {
+  if (local.body !== remote.body) return false;
+  const localTime = Date.parse(local.at);
+  const remoteTime = Date.parse(remote.at);
+  return Number.isNaN(localTime) || Number.isNaN(remoteTime) || Math.abs(localTime - remoteTime) <= 5 * 60_000;
 }
 
 export function setChatHistoryError(sessionId: string, message: string): void {

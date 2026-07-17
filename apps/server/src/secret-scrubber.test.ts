@@ -133,6 +133,78 @@ test("redacts high-confidence standalone provider credentials", () => {
   for (const credential of credentials) assert.equal(containsLikelySecret(credential), true);
 });
 
+test("redacts complete cookie, credential URI, Google API key, and JWT containers", () => {
+  const googleKey = ["AIza", "SyA12345678901234567890123456789012"].join("");
+  const jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "signature0123456789"].join(".");
+  const source = [
+    "Cookie: hermes_office_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; theme=light",
+    "Set-Cookie: sessionid=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB; HttpOnly; Secure",
+    "postgresql://alice:database-password@example.test/app",
+    "redis://default:cache-password@example.test:6379/0",
+    "rediss://:password-without-username@example.test:6380/0",
+    googleKey,
+    jwt,
+    "hermes_office_session=office-session-value",
+    "hermes.office.device: office device value",
+  ].join("\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+
+  assert.equal(once.value, [
+    "Cookie: [REDACTED]",
+    "Set-Cookie: [REDACTED]",
+    "postgresql://[REDACTED]:[REDACTED]@example.test/app",
+    "redis://[REDACTED]:[REDACTED]@example.test:6379/0",
+    "rediss://[REDACTED]:[REDACTED]@example.test:6380/0",
+    "[REDACTED]",
+    "[REDACTED]",
+    "hermes_office_session=[REDACTED]",
+    "hermes.office.device: [REDACTED]",
+  ].join("\n"));
+  for (const secret of [googleKey, jwt, "database-password", "cache-password", "password-without-username", "office-session-value", "office device value"]) {
+    assert.equal(once.value.includes(secret), false);
+  }
+  assert.deepEqual(twice, { value: once.value, redacted: false });
+});
+
+test("redacts complete line and YAML block scalars without consuming adjacent safe fields", () => {
+  const source = [
+    "password: correct horse battery staple",
+    "safe_field: visible words",
+    "nested:",
+    "  api_key: >-",
+    "    folded secret line",
+    "    second secret line",
+    "  safe: still visible",
+    "signing_key: | # credential material",
+    "  literal secret line",
+    "safe_after: visible",
+    "shell_secret=first-token remaining safe prose",
+  ].join("\r\n");
+
+  const once = redactSecrets(source);
+  const twice = redactSecrets(once.value);
+
+  assert.equal(once.value, [
+    "password: [REDACTED]",
+    "safe_field: visible words",
+    "nested:",
+    "  api_key: [REDACTED]",
+    "  safe: still visible",
+    "signing_key: [REDACTED]",
+    "safe_after: visible",
+    "shell_secret=[REDACTED] remaining safe prose",
+  ].join("\r\n"));
+  for (const secret of ["correct horse battery staple", "folded secret line", "second secret line", "literal secret line", "first-token"]) {
+    assert.equal(once.value.includes(secret), false);
+  }
+  for (const safe of ["safe_field: visible words", "safe: still visible", "safe_after: visible", "remaining safe prose"]) {
+    assert.equal(once.value.includes(safe), true);
+  }
+  assert.deepEqual(twice, { value: once.value, redacted: false });
+});
+
 test("rescans nested assignments instead of letting an outer label hide a secret", () => {
   const source = [
     "note: HERMES_DASHBOARD_SESSION_TOKEN=dashboard-example-value",
@@ -163,6 +235,9 @@ test("does not treat token metadata or nonsecret prose identifiers as credential
     "nonsecret = abcdefgh",
     "secretary = enabled-value",
     "examples = sk-short, ghp_fixture, AKIAEXAMPLE",
+    "X-Cookie: theme=light",
+    "postgresql://alice@example.test/app",
+    "examples = AIza-short eyJheader.payload",
   ].join("\n");
 
   assert.deepEqual(redactSecrets(source), { value: source, redacted: false });

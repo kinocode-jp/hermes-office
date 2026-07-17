@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Operation } from "@hermes-office/protocol";
 import type { OfficeSnapshot } from "../src/domain.ts";
 import { canMutateSettingsTab, settingsMutationAccess } from "../src/settings-access.ts";
+import { preserveConcurrentDraft } from "../src/settings-draft.ts";
 
 function snapshot(allowedOperations: Operation[], tier: "operator" | "manager" | "owner", exposure: "loopback" | "tailnet"): OfficeSnapshot {
   return {
@@ -67,4 +68,11 @@ test("settings mutations remain disabled until a validated snapshot exists", () 
     memory: false,
     localOwner: false,
   });
+});
+
+test("late save responses normalize only the submitted draft and preserve newer input", () => {
+  assert.equal(preserveConcurrentDraft("submitted", "submitted", "normalized"), "normalized");
+  assert.equal(preserveConcurrentDraft("newer input", "submitted", "normalized"), "newer input");
+  assert.equal(preserveConcurrentDraft(false, false, true), true);
+  assert.equal(preserveConcurrentDraft(true, false, true), true);
 });

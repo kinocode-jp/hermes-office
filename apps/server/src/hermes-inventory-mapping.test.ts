@@ -173,16 +173,20 @@ test("session inventory redacts Hermes secrets before bounding browser display t
   const secret = "dashboard-example-value-123456";
   const standalone = "sk_" + "live_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const authorization = "opaque-inventory-credential";
+  const databaseSecret = "database-password-example-value";
+  const googleKey = ["AIza", "SyA12345678901234567890123456789012"].join("");
   const row = {
     ...session("secret-safe", 1),
     title: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}; ${standalone}`,
-    preview: `credential: OPENAI_API_KEY=${secret}\nProxy-Authorization: Token ${authorization}`,
+    preview: `credential: OPENAI_API_KEY=${secret}; ${googleKey}\nProxy-Authorization: Token ${authorization}\nredis://default:${databaseSecret}@example.test:6379/0`,
   };
   const inventory = await collectHermesInventory(requester([profile()], [row]));
   const serialized = JSON.stringify(inventory.sessions);
   assert.equal(serialized.includes(secret), false);
   assert.equal(serialized.includes(standalone), false);
   assert.equal(serialized.includes(authorization), false);
+  assert.equal(serialized.includes(databaseSecret), false);
+  assert.equal(serialized.includes(googleKey), false);
   assert.equal(serialized.includes("[REDACTED]"), true);
 });
 

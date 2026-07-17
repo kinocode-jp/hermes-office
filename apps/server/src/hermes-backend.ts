@@ -58,6 +58,9 @@ export interface HermesRuntimeSource {
 }
 
 type ManagedChild = ChildProcessByStdio<null, Readable, Readable>;
+type ConnectionGeneration = { generation: number; baseUrl: URL; token: string };
+type SnapshotCollection = { inventory: CollectedHermesInventory; boards: KanbanBoardSummary[] };
+type SnapshotRefresh = { generation: number; promise: Promise<SnapshotCollection> };
 
 export class HermesBackend implements HermesRuntimeSource {
   readonly #options: HermesBackendOptions;
@@ -69,12 +72,16 @@ export class HermesBackend implements HermesRuntimeSource {
   readonly #profilePool: HermesProfileBackendPool;
   readonly #globalSettings: OfficeGlobalSettingsStore;
   readonly #inventory = new HermesInventoryCache();
-  #snapshotRefresh: Promise<{ inventory: CollectedHermesInventory; boards: KanbanBoardSummary[] }> | undefined;
+  #snapshotRefresh: SnapshotRefresh | undefined;
   #globalInheritance?: GlobalInheritanceCoordinator;
   #settingsAdapter?: HermesSettingsAdapter;
   #childGeneration = 0;
+  #connectionGeneration = 0;
+  #startFlight: Promise<RuntimeStatus> | undefined;
+  #closeFlight: Promise<void> | undefined;
   #recoveryFlight: Promise<void> | undefined;
   #shutdownRequested = false;
+  readonly #shutdownController = new AbortController();
   readonly #statusListeners = new Set<(status: RuntimeStatus) => void>();
 
   constructor(options: HermesBackendOptions = {}) {
@@ -152,11 +159,21 @@ export class HermesBackend implements HermesRuntimeSource {
     return this.#globalInheritance;
   }
 
-  async start(): Promise<RuntimeStatus> {
-    if (this.#state.state === "starting" || this.#state.state === "ready") return this.status();
-    if (this.#shutdownRequested) return this.status();
+  start(): Promise<RuntimeStatus> {
+    if (this.#state.state === "ready" || this.#shutdownRequested) return Promise.resolve(this.status());
+    if (this.#startFlight !== undefined) return this.#startFlight;
+    const flight = this.#startInitial();
+    this.#startFlight = flight;
+    void flight.finally(() => {
+      if (this.#startFlight === flight) this.#startFlight = undefined;
+    }).catch(() => undefined);
+    return flight;
+  }
+
+  async #startInitial(): Promise<RuntimeStatus> {
     if (this.#recoveryFlight !== undefined) {
       await this.#recoveryFlight;
+      if (this.#shutdownRequested) return this.status();
       return this.status();
     }
     this.#setState({ ...this.#state, state: "starting", compatibilityMessage: "Hermes backendを確認しています。" });
@@ -168,16 +185,21 @@ export class HermesBackend implements HermesRuntimeSource {
         if (this.#options.baseUrl !== undefined) {
           this.#baseUrl = safeLoopbackOrigin(this.#options.baseUrl);
           this.#token = requiredToken(this.#options.sessionToken);
+          this.#connectionGeneration += 1;
         } else {
           const executable = this.#options.executable?.trim() || "hermes";
           const cli = await probeHermesCli(executable, 5_000);
+          if (this.#shutdownRequested) return this.status();
           if (cli.state !== "available" || cli.version === undefined) {
             throw new IncompatibleHermesError("Hermes CLI is unavailable or unsupported.");
           }
           await this.#spawnManaged();
+          if (this.#shutdownRequested) { await this.#stopChild(); return this.status(); }
         }
         const version = await this.#compatibleVersion();
-        this.#observeManagedChild();
+        if (this.#shutdownRequested) { await this.#stopChild(); return this.status(); }
+        if (!this.#observeManagedChild()) throw new Error("Hermes process exited during startup.");
+        if (this.#shutdownRequested) { await this.#stopChild(); return this.status(); }
         this.#setState({
           ...this.#state,
           state: "ready",
@@ -188,9 +210,11 @@ export class HermesBackend implements HermesRuntimeSource {
       } catch (error) {
         lastError = error;
         await this.#stopChild();
+        if (this.#shutdownRequested) return this.status();
         if (error instanceof IncompatibleHermesError) break;
       }
     }
+    if (this.#shutdownRequested) return this.status();
     this.#setState({
       ...this.#state,
       state: lastError instanceof IncompatibleHermesError ? "incompatible" : "unreachable",
@@ -205,8 +229,15 @@ export class HermesBackend implements HermesRuntimeSource {
     if (this.#state.state !== "ready") return emptySnapshot(this.status(), ++this.#sequence);
 
     try {
-      const { inventory, boards } = await this.#collectSnapshotData();
+      const connection = this.#captureConnection();
+      const { inventory, boards } = await this.#collectSnapshotData(connection);
+      if (!this.#isCurrentConnection(connection)) {
+        return unavailableSnapshot(this.status(), ++this.#sequence);
+      }
       const firstPage = this.#inventory.replace(inventory);
+      if (!this.#isCurrentConnection(connection)) {
+        return unavailableSnapshot(this.status(), ++this.#sequence);
+      }
       this.#setState({ ...this.#state, state: "ready", compatibilityMessage: "Hermes runtimeに接続済み" });
       return makeSnapshot(this.status(), ++this.#sequence, firstPage.profiles, firstPage.sessions, firstPage.metadata, boards);
     } catch {
@@ -223,24 +254,25 @@ export class HermesBackend implements HermesRuntimeSource {
     return this.#inventory.page(kind, cursor, limit);
   }
 
-  async #collectSnapshotData(): Promise<{ inventory: CollectedHermesInventory; boards: KanbanBoardSummary[] }> {
+  async #collectSnapshotData(connection: ConnectionGeneration): Promise<SnapshotCollection> {
     const current = this.#snapshotRefresh;
-    if (current !== undefined) return await current;
+    if (current?.generation === connection.generation) return await current.promise;
     const refresh = Promise.all([
-      collectHermesInventory(async (path, timeoutMs) => await this.#requestJsonResult(path, true, timeoutMs)),
-      this.#collectBoardSummaries(),
+      collectHermesInventory(async (path, timeoutMs) => await this.#requestJsonResult(path, true, timeoutMs, connection)),
+      this.#collectBoardSummaries(connection),
     ]).then(([inventory, boards]) => ({ inventory, boards }));
-    this.#snapshotRefresh = refresh;
+    const entry = { generation: connection.generation, promise: refresh };
+    this.#snapshotRefresh = entry;
     try {
       return await refresh;
     } finally {
-      if (this.#snapshotRefresh === refresh) this.#snapshotRefresh = undefined;
+      if (this.#snapshotRefresh === entry) this.#snapshotRefresh = undefined;
     }
   }
 
-  async #collectBoardSummaries(): Promise<KanbanBoardSummary[]> {
+  async #collectBoardSummaries(connection: ConnectionGeneration): Promise<KanbanBoardSummary[]> {
     try {
-      return mapBoards(await this.#requestJson("/api/plugins/kanban/board"));
+      return mapBoards((await this.#requestJsonResult("/api/plugins/kanban/board", true, undefined, connection)).value);
     } catch {
       // Kanban is an optional, independently-failing feature. An unavailable
       // or incompatible board must not discard otherwise healthy inventory.
@@ -248,16 +280,29 @@ export class HermesBackend implements HermesRuntimeSource {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.#state.state === "stopped") return;
+  close(): Promise<void> {
+    if (this.#closeFlight !== undefined) return this.#closeFlight;
+    if (this.#state.state === "stopped") return Promise.resolve();
     this.#shutdownRequested = true;
+    this.#shutdownController.abort();
     this.#setState({ ...this.#state, state: "stopping" });
-    await this.#recoveryFlight;
+    const flight = this.#closeLifecycle(this.#startFlight, this.#recoveryFlight);
+    this.#closeFlight = flight;
+    return flight;
+  }
+
+  async #closeLifecycle(startFlight: Promise<RuntimeStatus> | undefined, recoveryFlight: Promise<void> | undefined): Promise<void> {
+    const stopFlight = this.#stopChild();
+    const lifecycleFlights: Promise<unknown>[] = [stopFlight];
+    if (startFlight !== undefined) lifecycleFlights.push(startFlight);
+    if (recoveryFlight !== undefined) lifecycleFlights.push(recoveryFlight);
+    await Promise.allSettled(lifecycleFlights);
     await Promise.all([this.#stopChild(), this.#profilePool.close()]);
     this.#setState({ ...this.#state, state: "stopped" });
   }
 
   async #spawnManaged(): Promise<void> {
+    if (this.#shutdownRequested) throw new Error("Hermes backend is shutting down.");
     const executable = this.#options.executable?.trim() || "hermes";
     if (executable.includes("\0")) throw new Error("Invalid Hermes executable.");
     const token = randomBytes(32).toString("base64url");
@@ -272,17 +317,23 @@ export class HermesBackend implements HermesRuntimeSource {
     this.#child = child;
     this.#token = token;
     const port = await waitForReadyPort(child, bounded(this.#options.startTimeoutMs, START_TIMEOUT_MS, 1_000, 60_000));
+    if (this.#shutdownRequested || this.#child !== child) throw new Error("Hermes startup was cancelled.");
     this.#baseUrl = new URL(`http://127.0.0.1:${port}`);
+    this.#connectionGeneration += 1;
   }
 
-  #observeManagedChild(): void {
-    if (this.#options.baseUrl !== undefined) return;
+  #observeManagedChild(): boolean {
+    if (this.#options.baseUrl !== undefined) return true;
     const child = this.#child;
     const generation = this.#childGeneration;
-    if (child === undefined) return;
+    if (child === undefined) return false;
     const onExit = (): void => this.#handleManagedExit(child, generation);
     child.once("exit", onExit);
-    if (child.exitCode !== null) queueMicrotask(onExit);
+    if (child.exitCode !== null) {
+      child.off("exit", onExit);
+      return false;
+    }
+    return true;
   }
 
   async #compatibleVersion(): Promise<string> {
@@ -296,9 +347,7 @@ export class HermesBackend implements HermesRuntimeSource {
   #handleManagedExit(child: ManagedChild, generation: number): void {
     if (this.#shutdownRequested || this.#child !== child || this.#childGeneration !== generation) return;
     this.#child = undefined;
-    this.#baseUrl = undefined;
-    this.#token = undefined;
-    this.#snapshotRefresh = undefined;
+    this.#invalidateConnection();
     this.#setState({ ...this.#state, state: "unreachable", compatibilityMessage: "Hermes runtimeが終了したため再起動しています。" });
     this.#startRecovery();
   }
@@ -317,16 +366,17 @@ export class HermesBackend implements HermesRuntimeSource {
     const backoffMs = bounded(this.#options.managedRestartBackoffMs, MANAGED_RESTART_BACKOFF_MS, 10, 5_000);
     let lastError: unknown;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      await delay(backoffMs * (attempt + 1));
+      await delay(backoffMs * (attempt + 1), this.#shutdownController.signal);
       if (this.#shutdownRequested) return;
       this.#setState({ ...this.#state, state: "starting", compatibilityMessage: `Hermes runtimeを再起動しています (${attempt + 1}/${attempts})。` });
       try {
         await this.#spawnManaged();
+        if (this.#shutdownRequested) { await this.#stopChild(); return; }
         const version = await this.#compatibleVersion();
         if (this.#shutdownRequested) { await this.#stopChild(); return; }
-        this.#observeManagedChild();
+        if (!this.#observeManagedChild()) throw new Error("Recovered Hermes process exited during startup.");
         this.#setState({ ...this.#state, state: "ready", hermesVersion: version, compatibilityMessage: "Hermes runtimeに再接続しました。" });
-        await delay(backoffMs);
+        await delay(backoffMs, this.#shutdownController.signal);
         if (this.#shutdownRequested) { await this.#stopChild(); return; }
         if (this.#state.state !== "ready" || this.#child === undefined) {
           lastError = new Error("Recovered Hermes process exited before the stability window.");
@@ -336,6 +386,7 @@ export class HermesBackend implements HermesRuntimeSource {
       } catch (error) {
         lastError = error;
         await this.#stopChild();
+        if (this.#shutdownRequested) return;
         if (error instanceof IncompatibleHermesError) {
           this.#setState({ ...this.#state, state: "incompatible", compatibilityMessage: "再起動したHermesのAPI契約が互換ではありません。" });
           return;
@@ -367,12 +418,29 @@ export class HermesBackend implements HermesRuntimeSource {
     return { baseUrl: new URL(this.#baseUrl), token: this.#token };
   }
 
+  #captureConnection(): ConnectionGeneration {
+    const { baseUrl, token } = this.#connectionConfig();
+    return { generation: this.#connectionGeneration, baseUrl, token };
+  }
+
+  #isCurrentConnection(connection: ConnectionGeneration): boolean {
+    return this.#state.state === "ready"
+      && this.#connectionGeneration === connection.generation
+      && this.#baseUrl?.origin === connection.baseUrl.origin
+      && this.#token === connection.token;
+  }
+
   async #requestJson(path: string, authenticated = true): Promise<unknown> {
     return (await this.#requestJsonResult(path, authenticated)).value;
   }
 
-  async #requestJsonResult(path: string, authenticated = true, timeoutLimitMs?: number): Promise<HermesJsonResult> {
-    const baseUrl = this.#baseUrl;
+  async #requestJsonResult(
+    path: string,
+    authenticated = true,
+    timeoutLimitMs?: number,
+    connection?: ConnectionGeneration,
+  ): Promise<HermesJsonResult> {
+    const baseUrl = connection?.baseUrl ?? this.#baseUrl;
     if (baseUrl === undefined) throw new Error("Hermes backend is not configured.");
     const target = new URL(path, baseUrl);
     if (target.origin !== baseUrl.origin || !target.pathname.startsWith("/api/")) {
@@ -382,12 +450,13 @@ export class HermesBackend implements HermesRuntimeSource {
     const configuredTimeout = bounded(this.#options.requestTimeoutMs, REQUEST_TIMEOUT_MS, 250, 15_000);
     const timeoutMs = timeoutLimitMs === undefined ? configuredTimeout : Math.max(1, Math.min(configuredTimeout, Math.trunc(timeoutLimitMs)));
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const token = connection?.token ?? this.#token;
     timeout.unref();
     try {
       const response = await fetch(target, {
         headers: {
           Accept: "application/json",
-          ...(authenticated && this.#token !== undefined ? { "X-Hermes-Session-Token": this.#token } : {}),
+          ...(authenticated && token !== undefined ? { "X-Hermes-Session-Token": token } : {}),
         },
         redirect: "error",
         signal: controller.signal,
@@ -403,10 +472,7 @@ export class HermesBackend implements HermesRuntimeSource {
   async #stopChild(): Promise<void> {
     const child = this.#child;
     this.#child = undefined;
-    if (this.#options.baseUrl === undefined) {
-      this.#baseUrl = undefined;
-      this.#token = undefined;
-    }
+    this.#invalidateConnection();
     if (child === undefined || child.exitCode !== null) return;
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => {
@@ -418,12 +484,29 @@ export class HermesBackend implements HermesRuntimeSource {
       child.once("exit", () => { clearTimeout(timer); resolve(); });
     });
   }
+
+  #invalidateConnection(): void {
+    if (this.#baseUrl !== undefined || this.#token !== undefined) this.#connectionGeneration += 1;
+    this.#baseUrl = undefined;
+    this.#token = undefined;
+    this.#snapshotRefresh = undefined;
+  }
 }
 
-async function delay(timeoutMs: number): Promise<void> {
+async function delay(timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, timeoutMs);
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
     timer.unref();
+    signal?.addEventListener("abort", finish, { once: true });
   });
 }
 

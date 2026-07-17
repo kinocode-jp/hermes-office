@@ -382,6 +382,80 @@ test("managed backend invalidates a crashed generation, recovers once, and never
   }
 });
 
+test("initial start is single-flight and close prevents a delayed CLI probe from spawning Hermes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-start-close-"));
+  const executable = join(directory, "fake-hermes.mjs");
+  const probePath = join(directory, "probe-started");
+  const servePath = join(directory, "serve-started");
+  await writeFile(executable, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  writeFileSync(${JSON.stringify(probePath)}, "started");
+  setTimeout(() => process.stdout.write("Hermes Agent v0.18.2\\n"), 300);
+} else {
+  writeFileSync(${JSON.stringify(servePath)}, "unexpected");
+  setInterval(() => undefined, 1_000);
+}
+`, "utf8");
+  await chmod(executable, 0o755);
+  const backend = new HermesBackend({
+    executable,
+    startTimeoutMs: 1_000,
+    globalSettingsPath: join(directory, "global-settings.json"),
+  });
+  try {
+    const first = backend.start();
+    const second = backend.start();
+    assert.equal(first, second, "concurrent initial starts share one lifecycle flight");
+    await waitForFile(probePath, 1_000);
+    const closing = backend.close();
+    await Promise.all([first, second, closing]);
+    assert.equal(backend.status().state, "stopped");
+    await assert.rejects(readFile(servePath), /ENOENT/, "shutdown observed after probe must fence the spawn boundary");
+  } finally {
+    await backend.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an older managed snapshot cannot overwrite a recovered generation when completion order reverses", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-snapshot-generation-"));
+  const executable = join(directory, "fake-hermes.mjs");
+  const countPath = join(directory, "serve-count.txt");
+  const crashPath = join(directory, "crash-first");
+  const requestPath = join(directory, "generation-1-requested");
+  const releasePath = join(directory, "release-generation-1");
+  const stopPath = join(directory, "stop-workers");
+  await writeSnapshotGenerationFixture(executable, countPath, crashPath, requestPath, releasePath, stopPath);
+  const backend = new HermesBackend({
+    executable, startTimeoutMs: 2_000, requestTimeoutMs: 1_000,
+    managedRestartAttempts: 2, managedRestartBackoffMs: 10,
+    globalSettingsPath: join(directory, "global-settings.json"),
+  });
+  const states: string[] = [];
+  backend.onStatusChange((status) => states.push(status.state));
+  try {
+    assert.equal((await backend.start()).state, "ready");
+    const oldSnapshot = backend.snapshot();
+    await waitForFile(requestPath, 2_000);
+    await writeFile(crashPath, "crash", "utf8");
+    await waitForCondition(() => states.includes("unreachable"), 2_000);
+    await waitForCondition(() => backend.status().state === "ready" && states.includes("unreachable"), 3_000);
+    const recovered = await backend.snapshot();
+    assert.deepEqual(recovered.profiles.map((profile) => profile.id), ["generation-2"]);
+
+    await writeFile(releasePath, "release", "utf8");
+    const stale = await oldSnapshot;
+    assert.deepEqual(stale.profiles, [], "the stale generation is returned as unavailable instead of becoming authoritative");
+    assert.equal(backend.status().state, "ready");
+    assert.deepEqual((await backend.snapshot()).profiles.map((profile) => profile.id), ["generation-2"]);
+  } finally {
+    await writeFile(stopPath, "stop", "utf8").catch(() => undefined);
+    await backend.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("managed recovery stops after its configured attempt bound", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-bound-"));
   const executable = join(directory, "fake-hermes.mjs");
@@ -450,6 +524,70 @@ const watcher = setInterval(() => {
   if (generation === 1 && existsSync(crashPath)) server.close(() => process.exit(1));
 }, 10);
 process.on("SIGTERM", () => { clearInterval(watcher); server.close(() => process.exit(0)); });
+`, "utf8");
+  await chmod(executable, 0o755);
+}
+
+async function writeSnapshotGenerationFixture(
+  executable: string,
+  countPath: string,
+  crashPath: string,
+  requestPath: string,
+  releasePath: string,
+  stopPath: string,
+): Promise<void> {
+  await writeFile(executable, `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+if (process.argv.includes("--version")) {
+  process.stdout.write("Hermes Agent v0.18.2\\n");
+} else if (process.argv[2] === "worker") {
+  const generation = Number(process.argv[3]);
+  const portPath = process.argv[4];
+  const server = createServer((request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/status") response.end(JSON.stringify({ version: "0.18.2" }));
+    else if (request.url === "/api/profiles") {
+      if (generation !== 1 || existsSync(${JSON.stringify(releasePath)})) {
+        response.end(JSON.stringify({ profiles: [{ name: "generation-" + generation }] }));
+      } else {
+        writeFileSync(${JSON.stringify(requestPath)}, "requested");
+        const release = setInterval(() => {
+          if (!existsSync(${JSON.stringify(releasePath)})) return;
+          clearInterval(release);
+          response.end(JSON.stringify({ profiles: [{ name: "generation-1" }] }));
+        }, 5);
+      }
+    } else if (request.url?.startsWith("/api/profiles/sessions")) response.end(JSON.stringify({ sessions: [], total: 0, errors: [] }));
+    else if (request.url === "/api/plugins/kanban/board") response.end(JSON.stringify({ columns: [], latest_event_id: generation }));
+    else { response.statusCode = 404; response.end(); }
+  });
+  server.listen(0, "127.0.0.1", () => writeFileSync(portPath, String(server.address().port)));
+  const stop = setInterval(() => {
+    if (existsSync(${JSON.stringify(stopPath)})) process.exit(0);
+  }, 10);
+  process.on("SIGTERM", () => { clearInterval(stop); process.exit(0); });
+} else {
+  const generation = existsSync(${JSON.stringify(countPath)}) ? Number(readFileSync(${JSON.stringify(countPath)}, "utf8")) + 1 : 1;
+  writeFileSync(${JSON.stringify(countPath)}, String(generation));
+  const portPath = ${JSON.stringify(join(countPath, ".."))} + "/worker-port-" + generation;
+  const worker = spawn(process.execPath, [process.argv[1], "worker", String(generation), portPath], { stdio: "ignore" });
+  const ready = setInterval(() => {
+    if (!existsSync(portPath)) return;
+    clearInterval(ready);
+    process.stdout.write("HERMES_DASHBOARD_READY port=" + readFileSync(portPath, "utf8") + "\\n");
+  }, 5);
+  const crash = setInterval(() => {
+    if (generation === 1 && existsSync(${JSON.stringify(crashPath)})) process.exit(1);
+  }, 5);
+  process.on("SIGTERM", () => {
+    clearInterval(ready); clearInterval(crash);
+    if (worker.exitCode !== null || worker.signalCode !== null) process.exit(0);
+    worker.once("exit", () => process.exit(0));
+    if (!worker.kill("SIGTERM")) process.exit(0);
+  });
+}
 `, "utf8");
   await chmod(executable, 0o755);
 }

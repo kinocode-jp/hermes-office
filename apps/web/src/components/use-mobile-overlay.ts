@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
-const MOBILE_VIEWPORT = "(max-width: 767px)";
+export const PHONE_OVERLAY_VIEWPORT = "(max-width: 767px)";
+export const COMPACT_OVERLAY_VIEWPORT = "(max-width: 1279px)";
 const FOCUSABLE = [
   "a[href]",
   "button:not([disabled])",
@@ -14,23 +15,24 @@ type MobileOverlayOptions = {
   kind: "modal" | "route";
   open: boolean;
   onClose(): void;
+  viewport?: string;
 };
 
-export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose }: MobileOverlayOptions) {
+export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, viewport = PHONE_OVERLAY_VIEWPORT }: MobileOverlayOptions) {
   const [overlayElement, setOverlayElement] = useState<T | null>(null);
   const ref = useCallback((element: T | null) => setOverlayElement(element), []);
   const closeRef = useRef(onClose);
-  const [mobileViewport, setMobileViewport] = useState(isMobileViewport);
+  const [mobileViewport, setMobileViewport] = useState(() => matchesViewport(viewport));
   closeRef.current = onClose;
 
   useEffect(() => {
     if (typeof matchMedia !== "function") return;
-    const query = matchMedia(MOBILE_VIEWPORT);
+    const query = matchMedia(viewport);
     const update = () => setMobileViewport(query.matches);
     update();
     query.addEventListener("change", update);
     return () => query.removeEventListener("change", update);
-  }, []);
+  }, [viewport]);
 
   const active = open && mobileViewport;
   useEffect(() => {
@@ -110,8 +112,8 @@ export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose }:
   return { ref, active };
 }
 
-function isMobileViewport(): boolean {
-  return typeof matchMedia === "function" && matchMedia(MOBILE_VIEWPORT).matches;
+function matchesViewport(viewport: string): boolean {
+  return typeof matchMedia === "function" && matchMedia(viewport).matches;
 }
 
 function focusableElements(container: HTMLElement): HTMLElement[] {

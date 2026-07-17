@@ -52,10 +52,12 @@ test("board and detail redact secret assignments from every free-form Hermes fie
   const secret = "dashboard-example-value-123456";
   const standalone = "xoxb-" + "123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const authorization = "opaque-kanban-credential";
+  const cookie = "office-cookie-example-value-123456";
+  const jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "signature0123456789"].join(".");
   const card = {
     ...CARD,
     title: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}`,
-    body: `OPENAI_API_KEY=${secret}; ${standalone}\nAuthorization: Digest ${authorization}`,
+    body: `OPENAI_API_KEY=${secret}; ${standalone}; ${jwt}\nAuthorization: Digest ${authorization}\nSet-Cookie: hermes_office_session=${cookie}; HttpOnly`,
     latest_summary: `clientSecret=${secret}`,
   };
   const adapter = mockAdapter((request) => request.path.includes("/tasks/")
@@ -75,6 +77,8 @@ test("board and detail redact secret assignments from every free-form Hermes fie
   assert.equal(serialized.includes(secret), false);
   assert.equal(serialized.includes(standalone), false);
   assert.equal(serialized.includes(authorization), false);
+  assert.equal(serialized.includes(cookie), false);
+  assert.equal(serialized.includes(jwt), false);
   assert.equal(serialized.includes("[REDACTED]"), true);
 });
 

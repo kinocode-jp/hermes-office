@@ -174,6 +174,27 @@ test("steer sends one exact live session.steer request and rejects empty or unre
   harness.api.stop();
 });
 
+test("prompt submit distinguishes explicit RPC rejection from commit-unknown transport loss", async () => {
+  const harness = await createHarness();
+  harness.api.ensureSession({ clientSessionId: "client-prompt", profileId: "coder" });
+  await flush();
+  const create = harness.socket.frame("session.create", "coder")!;
+  harness.socket.respond(create.id, { session_id: "live-prompt" });
+  await flush();
+
+  const rejected = harness.api.submitPrompt("client-prompt", "deny", "operation-rejected");
+  const rejectedFrame = harness.socket.frame("prompt.submit", "live-prompt")!;
+  harness.socket.respond(rejectedFrame.id, undefined, { code: -32000, message: "policy denied" });
+  assert.deepEqual(await rejected, { status: "rejected", message: "policy denied" });
+
+  const unconfirmed = harness.api.submitPrompt("client-prompt", "maybe committed", "operation-unknown");
+  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 2);
+  harness.socket.close(1006, "network lost after send");
+  assert.deepEqual(await unconfirmed, { status: "unconfirmed", message: "Chat接続が切断されました。" });
+  assert.equal(harness.socket.frames("prompt.submit", "live-prompt").length, 2, "prompt.submit must not be replayed");
+  harness.api.stop();
+});
+
 test("steer never crosses a target generation, release, or transport close", async () => {
   const harness = await createHarness();
   harness.api.ensureSession({ clientSessionId: "client-race", profileId: "old" });

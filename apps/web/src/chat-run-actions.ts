@@ -21,6 +21,15 @@ export function boundedSteerEvidence(messages: readonly ChatMessage[]): ChatMess
   return evidence;
 }
 
+export function boundedChatOperationEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
+  const evidence = messages.filter((message) => (
+    message.kind === "steer" || message.promptOperation !== undefined
+  )).slice(-MAX_STEER_EVIDENCE_COUNT);
+  let bytes = evidence.reduce((total, message) => total + steerEvidenceBytes(message), 0);
+  while (evidence.length > 0 && bytes > MAX_STEER_EVIDENCE_BYTES) bytes -= steerEvidenceBytes(evidence.shift()!);
+  return evidence;
+}
+
 export function retainBoundedSteerEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
   const retained = new Set(boundedSteerEvidence(messages));
   return messages.filter((message) => message.kind !== "steer" || retained.has(message));

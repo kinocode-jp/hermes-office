@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChatSteerResult } from "../src/chat-api.ts";
+import type { ChatPromptResult, ChatSteerResult } from "../src/chat-api.ts";
 import type { ChatSession } from "../src/domain.ts";
 import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, officeMessage, officeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
 import { ChatSteerMark, chatComposerState, formatChatMessageTime, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
@@ -12,6 +12,7 @@ import {
   openSessionIds,
   reduceChatGatewayEvent,
   registerChatRuntime,
+  reconcilePromptOperationsWithHistory,
   sendMessage,
   sessions,
   setChatSessionDisconnected,
@@ -70,6 +71,54 @@ test("sendMessage rejects every in-flight shape and atomically blocks a second p
   sessions.value = [{ ...ready, status: "waiting" }];
   sendMessage(ready.id, "waiting");
   assert.deepEqual(submitted, ["first"]);
+});
+
+test("prompt submissions expose pending, accepted, rejected, and commit-unknown states without automatic replay", async () => {
+  const submission = deferred<ChatPromptResult>();
+  const calls: Array<{ text: string; operationId: string }> = [];
+  registerChatRuntime({
+    ensureSession() {}, releaseSession() {}, interrupt() {}, async steer() { return { status: "queued" }; },
+    submitPrompt(_sessionId, text, operationId) { calls.push({ text, operationId }); return submission.promise; },
+    async respondClarify() {}, async respondApproval() {},
+  });
+  sessions.value = [{ ...ready }];
+  sendMessage(ready.id, "deploy once");
+  const pending = sessions.value[0]!.messages[0]!;
+  assert.equal(pending.promptOperation?.state, "pending");
+  assert.equal(pending.id, `prompt-${pending.promptOperation?.id}`);
+  assert.equal(calls.length, 1);
+
+  submission.resolve({ status: "unconfirmed", message: "socket closed after send" });
+  await Promise.resolve();
+  assert.equal(sessions.value[0]!.messages[0]!.promptOperation?.state, "unconfirmed");
+  assert.equal(sessions.value[0]!.messages[0]!.status, undefined);
+  assert.equal(canSubmitChatPrompt(sessions.value[0]!), true, "the operator may decide what to do after reviewing commit-unknown evidence");
+  assert.equal(calls.length, 1, "commit-unknown prompts must never be replayed automatically");
+
+  for (const result of [
+    { status: "accepted" } as const,
+    { status: "rejected", message: "policy denied" } as const,
+  ]) {
+    sessions.value = [{ ...ready }];
+    registerChatRuntime({
+      ensureSession() {}, releaseSession() {}, interrupt() {}, async steer() { return { status: "queued" }; },
+      async submitPrompt() { return result; }, async respondClarify() {}, async respondApproval() {},
+    });
+    sendMessage(ready.id, result.status);
+    await Promise.resolve();
+    assert.equal(sessions.value[0]!.messages[0]!.promptOperation?.state, result.status);
+    assert.equal(sessions.value[0]!.messages[0]!.status, result.status === "rejected" ? "failed" : undefined);
+  }
+});
+
+test("authoritative history replaces matching prompt evidence but preserves rejected and unmatched unconfirmed operations", () => {
+  const at = "2026-07-17T01:00:00.000Z";
+  const operation = (id: string, body: string, state: "accepted" | "rejected" | "unconfirmed") => ({
+    id, from: "user" as const, body, at, promptOperation: { id, state },
+  });
+  const local = [operation("accepted", "same", "accepted"), operation("rejected", "same", "rejected"), operation("unknown", "other", "unconfirmed")];
+  const history = [{ id: "remote", from: "user" as const, body: "same", at, status: "complete" as const }];
+  assert.deepEqual(reconcilePromptOperationsWithHistory(local, history).map(({ id }) => id), ["rejected", "unknown"]);
 });
 
 test("chat timestamps render by selected locale without rewriting legacy clock text", () => {

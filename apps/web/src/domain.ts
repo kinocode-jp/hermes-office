@@ -26,6 +26,12 @@ export type ChatMessage = {
   presentation?: { kind: "tool-fallback"; name?: string | undefined; phase: "running" | "complete" } | undefined;
   at: string;
   status?: "streaming" | "complete" | "failed" | "cancelled";
+  /** Client-side evidence for a prompt.submit operation. Never implies acceptance until the RPC acknowledges it. */
+  promptOperation?: {
+    id: string;
+    state: "pending" | "accepted" | "rejected" | "unconfirmed";
+    message?: string | undefined;
+  } | undefined;
 };
 
 export type ChatConnectionState = "disconnected" | "connecting" | "ready" | "error";

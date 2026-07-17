@@ -147,6 +147,7 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   assert.equal(isChatRunActive(sessions.value[0]!), false);
   assert.equal(sessions.value[0]?.pendingInteraction, undefined);
   assert.equal(sessions.value[0]?.messages.find(({ id }) => id === "old-agent")?.status, "cancelled");
+  assert.equal(sessions.value[0]?.messages.find(({ body }) => body === "first prompt")?.promptOperation?.state, "unconfirmed");
 
   const newSocket = sockets[1]!;
   await flush();
@@ -169,9 +170,12 @@ test("prompt start, socket close, and cold resume unlock the composer without re
   assert.equal(sessions.value[0]?.streamingMessageId, "new-agent");
   assert.equal(isChatRunActive(sessions.value[0]!), true);
   assert.equal(canSubmitChatPrompt(sessions.value[0]!), false);
+  assert.equal(sessions.value[0]?.messages.find(({ body }) => body === "first prompt")?.promptOperation?.state, "unconfirmed", "a stale response must not promote commit-unknown evidence");
   assert.deepEqual([...oldSocket.frames("prompt.submit"), ...newSocket.frames("prompt.submit")].map(({ params }) => params.text), ["first prompt", "second prompt"]);
 
   newSocket.respond(secondPrompt.id, { status: "accepted" });
+  await flush();
+  assert.equal(sessions.value[0]?.messages.find(({ body }) => body === "second prompt")?.promptOperation?.state, "accepted");
   newSocket.close(1006, "auth synchronized reconnect");
   await waitFor(() => sockets.length === 3);
   const runningSocket = sockets[2]!;

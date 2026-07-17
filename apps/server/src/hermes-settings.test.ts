@@ -18,6 +18,7 @@ const AWS_SECRET = "aws-example-value-123456";
 const PASSWORD_SECRET = "password-example-value-123456";
 const ANTHROPIC_SECRET = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
 const AUTH_HEADER_SECRET = "opaque-settings-credential";
+const DATABASE_SECRET = "database-password-example-value";
 
 test("profile settings use a profile-pinned backend and expose secret-safe DTOs", async (t) => {
   const requests: Array<{ method: string; token: string; url: string }> = [];
@@ -33,7 +34,7 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
     if (request.url === "/api/memory") {
       writeJson(response, {
         active: "builtin",
-        providers: [{ name: "builtin", description: `Built in; ${ANTHROPIC_SECRET}; AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"\nAuthorization: Token ${AUTH_HEADER_SECRET}`, configured: true, config_path: "/private/config" }],
+        providers: [{ name: "builtin", description: `Built in; ${ANTHROPIC_SECRET}; AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"\nAuthorization: Token ${AUTH_HEADER_SECRET}\npostgresql://alice:${DATABASE_SECRET}@example.test/app`, configured: true, config_path: "/private/config" }],
         builtin_files: { memory: 40, user: 12, path: "/private/memories" },
         credential: "hidden",
       });
@@ -65,14 +66,14 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
   assert.equal(settings.skills[1]?.category, "CATEGORY_TOKEN=[REDACTED]");
   assert.equal(settings.skills[1]?.description, "HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED]");
   assert.deepEqual(settings.memory.builtin, { memoryBytes: 40, userBytes: 12, hasMemory: true, hasUser: true });
-  assert.equal(settings.memory.providers[0]?.description, 'Built in; [REDACTED]; AWS_SECRET_ACCESS_KEY = "[REDACTED]"\nAuthorization: [REDACTED]');
+  assert.equal(settings.memory.providers[0]?.description, 'Built in; [REDACTED]; AWS_SECRET_ACCESS_KEY = "[REDACTED]"\nAuthorization: [REDACTED]\npostgresql://[REDACTED]:[REDACTED]@example.test/app');
   assert.equal(settings.soul.content, "Helpful agent\nOPENAI_API_KEY = '[REDACTED]'");
   assert.equal(settings.soul.redacted, true);
   const serialized = JSON.stringify(settings);
   assert.equal(serialized.includes("/private"), false);
   assert.equal(serialized.includes("supersecretvalue"), false);
   assert.equal(serialized.includes("hidden"), false);
-  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, ANTHROPIC_SECRET, AUTH_HEADER_SECRET]) assert.equal(serialized.includes(secret), false);
+  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, ANTHROPIC_SECRET, AUTH_HEADER_SECRET, DATABASE_SECRET]) assert.equal(serialized.includes(secret), false);
   assert.equal(releases, 1, "one multi-request operation holds exactly one lease");
 
   await assert.rejects(adapter.getProfileSoul("other"), (error: unknown) => error instanceof HermesSettingsError);
@@ -107,7 +108,7 @@ test("skill and memory mutations are validated and use official Hermes routes", 
       return;
     }
     if (request.method === "GET" && request.url === "/api/skills/content?name=local") {
-      writeJson(response, { name: "local", content: `# Skill\ndatabase_password = '${PASSWORD_SECRET}'`, path: "/private/SKILL.md" });
+      writeJson(response, { name: "local", content: `# Skill\ndatabase_password: >-\n  ${PASSWORD_SECRET}\n  second secret line\nsafe: visible`, path: "/private/SKILL.md" });
       return;
     }
     mutations.push({ method: request.method ?? "", url: request.url ?? "", body: await readJson(request) });
@@ -121,7 +122,7 @@ test("skill and memory mutations are validated and use official Hermes routes", 
 
   const content = await adapter.getSkillContent("coder", "local");
   assert.equal(content.name, "local");
-  assert.equal(content.content, "# Skill\ndatabase_password = '[REDACTED]'");
+  assert.equal(content.content, "# Skill\ndatabase_password: [REDACTED]\nsafe: visible");
   assert.equal(content.redacted, true);
   assert.match(content.revision, /^[A-Za-z0-9_-]{43}$/);
   const config = await adapter.getMemoryProviderConfig("coder", "honcho");
@@ -180,6 +181,14 @@ test("skill and memory mutations are validated and use official Hermes routes", 
   );
   await assert.rejects(
     adapter.updateProfileSoul("coder", "Standalone ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateProfileSoul("coder", "password: >\n  correct horse battery staple\nsafe: visible"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateProfileSoul("coder", "Cookie: hermes_office_session=office-cookie-value"),
     (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
   );
   await assert.rejects(

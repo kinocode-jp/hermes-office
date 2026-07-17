@@ -18,7 +18,7 @@ import { InfoTip } from "./info-tip";
 import { useState } from "preact/hooks";
 import { chatSessionTitle, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { loadMoreSessions, sessionInventoryState } from "../inventory";
-import { useMobileOverlay } from "./use-mobile-overlay";
+import { COMPACT_OVERLAY_VIEWPORT, useMobileOverlay } from "./use-mobile-overlay";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
   { id: "chat", label: "profile.chat" },
@@ -114,6 +114,7 @@ export function ProfilePanel() {
     kind: "modal",
     open: mobileInspectorOpen.value,
     onClose: () => { mobileInspectorOpen.value = false; },
+    viewport: COMPACT_OVERLAY_VIEWPORT,
   });
   const profile = selectedProfile.value;
   if (!profile) return null;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { authenticateRemoteDevice } from "../office-api";
-import { localizeRuntimeMessage, t } from "../i18n";
+import { locale, localizeRuntimeMessage, setLocale, t } from "../i18n";
 import { InfoTip } from "./info-tip";
 import {
   officeAccess,
@@ -51,6 +51,14 @@ export function DeviceLogin() {
   return (
     <main class="device-login-shell">
       <section class="device-login-card" aria-labelledby="device-login-title">
+        <button
+          class="device-login-language"
+          type="button"
+          aria-label={t("language.label")}
+          onClick={() => setLocale(locale.value === "ja" ? "en" : "ja")}
+        >
+          {locale.value === "ja" ? "EN" : "日本語"}
+        </button>
         <div class="device-login-mark" aria-hidden="true">H</div>
         <p class="eyebrow">{t("login.remote")}</p>
         <h1 id="device-login-title">{checking ? t("login.connecting") : t("login.title")}</h1>

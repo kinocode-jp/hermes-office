@@ -116,6 +116,20 @@ html, body { height: 100%; }
 :root:not([data-theme="midnight"]) .device-login-card { background: var(--surface-raised); box-shadow: 14px 14px 0 var(--surface-strong), 0 28px 70px var(--shadow); }
 :root:not([data-theme="midnight"]) .device-login-form input { color: var(--paper); background: var(--surface); }
 
+.device-login-card { position: relative; }
+.device-login-language {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  min-height: var(--target-desktop);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  color: var(--paper);
+  background: var(--surface-raised);
+  font-size: var(--text-label);
+  cursor: pointer;
+}
+
 :root:not([data-theme="midnight"]) .live-settings { background: linear-gradient(125deg, color-mix(in srgb, var(--aqua) 5%, transparent), transparent 38%), var(--night); }
 :root:not([data-theme="midnight"]) .settings-ledger,
 :root:not([data-theme="midnight"]) .settings-toolbar { background: var(--surface-raised); box-shadow: 6px 6px 0 var(--shadow); }
@@ -283,6 +297,25 @@ body { font-size: var(--text-body); line-height: 1.5; }
 .task-comment-list p { font-size: var(--text-chat); line-height: 1.65; }
 .profile-command > input { font-size: var(--text-chat); }
 
+.device-login-card .eyebrow,
+.device-login-card::before,
+.device-login-form label span,
+.avatar-picker header small,
+.profile-avatar-button > span:last-child { font-size: var(--text-utility); }
+
+.device-login-message,
+.device-login-form input,
+.device-login-form button,
+.device-retry-button,
+.device-login-language,
+.avatar-picker > p,
+.avatar-picker-actions button,
+.avatar-picker-error { font-size: var(--text-label); }
+
+.avatar-picker h3 { font-size: calc(19px * var(--font-scale)); }
+.device-login-card h1 { font-size: clamp(calc(27px * var(--font-scale)), calc(32px * var(--font-scale)), calc(38px * var(--font-scale))); }
+.device-login-mark { font-size: calc(25px * var(--font-scale)); }
+
 .task-card h3,
 .chat-interaction h3,
 .appearance-section-title h3 { font-size: var(--text-body); }
@@ -330,7 +363,8 @@ body { font-size: var(--text-body); line-height: 1.5; }
   .task-comment-form button,
   .kanban-unconfirmed button,
   .appearance-trigger,
-  .language-button { min-height: var(--target-mobile); }
+  .language-button,
+  .device-login-language { min-height: var(--target-mobile); }
   .mobile-workspace-bar button,
   .mobile-workspace-bar b,
   .mobile-chat-tabs button { font-size: var(--text-utility); }

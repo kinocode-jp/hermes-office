@@ -28,38 +28,61 @@ const runtimeSource = hermesMode === "demo"
         ...(process.env.HERMES_OFFICE_HERMES_TOKEN === undefined ? {} : { sessionToken: process.env.HERMES_OFFICE_HERMES_TOKEN }),
       })
     : new HermesBackend({ executable: process.env.HERMES_OFFICE_HERMES_EXECUTABLE ?? "hermes" });
-if (runtimeSource !== undefined) await runtimeSource.start();
-
-const server = createOfficeServer({
-  host,
-  port,
-  ...(configuredOrigins === undefined ? {} : { allowedOrigins: configuredOrigins }),
-  allowNonLoopback: process.env.HERMES_OFFICE_ALLOW_NON_LOOPBACK === "true",
-  trustedProxyHops,
-  deviceRegistryPath: process.env.HERMES_OFFICE_DEVICE_REGISTRY_PATH ?? join(homedir(), ".hermes-office", "devices.json"),
-  ...(process.env.HERMES_OFFICE_REMOTE_TOKEN === undefined ? {} : { remoteToken: process.env.HERMES_OFFICE_REMOTE_TOKEN }),
-  ...(process.env.HERMES_OFFICE_DESKTOP_CAPABILITY === undefined ? {} : { desktopCapability: process.env.HERMES_OFFICE_DESKTOP_CAPABILITY }),
-  ...(desktopOrigins === undefined ? {} : { desktopOrigins }),
-  ...(process.env.HERMES_OFFICE_WEB_ROOT === undefined ? {} : { staticWebRoot: process.env.HERMES_OFFICE_WEB_ROOT }),
-  ...(runtimeSource === undefined ? {} : { runtimeSource }),
-});
-
-const address = await server.listen();
-process.stdout.write(`Hermes Office Server listening on http://${address.address}:${address.port}\n`);
 
 let shuttingDown = false;
-async function shutdown(): Promise<void> {
-  if (shuttingDown) return;
+let server: ReturnType<typeof createOfficeServer> | undefined;
+let initialization: Promise<void> | undefined;
+let shutdownFlight: Promise<void> | undefined;
+
+function shutdown(): Promise<void> {
+  if (shutdownFlight !== undefined) return shutdownFlight;
   shuttingDown = true;
-  await server.close();
+  const flight = (async () => {
+    await runtimeSource?.close();
+    await initialization?.catch(() => undefined);
+    await server?.close();
+  })();
+  shutdownFlight = flight;
+  return flight;
 }
 
+// Install handlers before the first asynchronous initialization boundary so a
+// partially-started managed Hermes child always reaches the shared cleanup path.
 process.once("SIGINT", () => {
   void shutdown().finally(() => process.exit(0));
 });
 process.once("SIGTERM", () => {
   void shutdown().finally(() => process.exit(0));
 });
+
+initialization = (async () => {
+  try {
+    if (runtimeSource !== undefined) await runtimeSource.start();
+    if (shuttingDown) return;
+
+    const candidate = createOfficeServer({
+      host,
+      port,
+      ...(configuredOrigins === undefined ? {} : { allowedOrigins: configuredOrigins }),
+      allowNonLoopback: process.env.HERMES_OFFICE_ALLOW_NON_LOOPBACK === "true",
+      trustedProxyHops,
+      deviceRegistryPath: process.env.HERMES_OFFICE_DEVICE_REGISTRY_PATH ?? join(homedir(), ".hermes-office", "devices.json"),
+      ...(process.env.HERMES_OFFICE_REMOTE_TOKEN === undefined ? {} : { remoteToken: process.env.HERMES_OFFICE_REMOTE_TOKEN }),
+      ...(process.env.HERMES_OFFICE_DESKTOP_CAPABILITY === undefined ? {} : { desktopCapability: process.env.HERMES_OFFICE_DESKTOP_CAPABILITY }),
+      ...(desktopOrigins === undefined ? {} : { desktopOrigins }),
+      ...(process.env.HERMES_OFFICE_WEB_ROOT === undefined ? {} : { staticWebRoot: process.env.HERMES_OFFICE_WEB_ROOT }),
+      ...(runtimeSource === undefined ? {} : { runtimeSource }),
+    });
+    const address = await candidate.listen();
+    if (shuttingDown) { await candidate.close(); return; }
+    server = candidate;
+    process.stdout.write(`Hermes Office Server listening on http://${address.address}:${address.port}\n`);
+  } catch (error) {
+    await runtimeSource?.close().catch(() => undefined);
+    throw error;
+  }
+})();
+await initialization;
 
 export { createOfficeServer } from "./server.js";
 export { HermesBackend } from "./hermes-backend.js";

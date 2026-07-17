@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { ApprovalChoice, ChatPendingInteraction, ChatSession, Profile } from "../domain";
-import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, t } from "../i18n";
+import type { ApprovalChoice, ChatMessage, ChatPendingInteraction, ChatSession, Profile } from "../domain";
+import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, officeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { activeSessionId, closeSession, interruptSession, officeSnapshot, openSession, reconnectChatSession, respondToApproval, respondToClarification, sendMessage, steerSession } from "../store";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive } from "../session-runtime";
 
@@ -73,11 +73,12 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
         ) : session.messages.map((message) => (
           <div
             key={message.id}
-            class={`message message-${message.from} message-${message.status ?? "complete"}`}
+            class={`message message-${message.from} message-${message.promptOperation?.state ?? message.status ?? "complete"}`}
             style={message.from === "agent" ? { "--agent-color": profile.color } : undefined}
           >
             <span class="visually-hidden">{message.kind === "steer" ? t("chat.steerMessage") : message.from === "user" ? t("chat.you") : message.from === "tool" ? t("chat.tool") : profile.name}</span>
             {message.kind === "steer" && <ChatSteerMark />}
+            {message.promptOperation && <PromptOperationMark operation={message.promptOperation} />}
             {message.from === "tool" && <span class="message-tool-mark" aria-hidden="true">⚙</span>}
             <p>{chatMessageBody(message) || (message.status === "streaming" ? "…" : "")}</p>
             <time>{formatChatMessageTime(message.at)}</time>
@@ -138,6 +139,21 @@ export function formatChatMessageTime(
 
 export function ChatSteerMark() {
   return <span class="message-steer-mark" aria-hidden="true">{t("chat.steerMessage")}</span>;
+}
+
+function PromptOperationMark({ operation }: { operation: NonNullable<ChatMessage["promptOperation"]> }) {
+  const labels: Record<NonNullable<ChatMessage["promptOperation"]>["state"], TranslationKey> = {
+    pending: "chat.prompt.pending",
+    accepted: "chat.prompt.accepted",
+    rejected: "chat.prompt.rejected",
+    unconfirmed: "chat.prompt.unconfirmed",
+  };
+  return (
+    <span class={`message-prompt-state is-${operation.state}`}>
+      <span>{t(labels[operation.state])}</span>
+      {operation.message && <small>{localizeRuntimeMessage(officeRuntimeMessage(operation.message))}</small>}
+    </span>
+  );
 }
 
 export function chatComposerState(session: ChatSession): { canCompose: boolean; canSteer: boolean; runActive: boolean; showStop: boolean } {

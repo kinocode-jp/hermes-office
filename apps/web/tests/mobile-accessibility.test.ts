@@ -4,7 +4,7 @@ import test from "node:test";
 import type { ChatSession } from "../src/domain.ts";
 import { createProfileSession } from "../src/components/profile-panel.tsx";
 import { mobileChatTabPresentation } from "../src/components/chat-workspace.tsx";
-import { locale, setLocale } from "../src/i18n.ts";
+import { locale, preferredBrowserLocale, setLocale } from "../src/i18n.ts";
 import {
   activeSurface,
   activeSessionId,
@@ -211,6 +211,9 @@ test("mobile route and modal overlays expose consistent focus, inert, and naviga
   assert.match(workspace, /role=\{mobileOverlay\.active \? "region" : undefined\}/);
   assert.doesNotMatch(workspace, /aria-modal=/);
   assert.match(profile, /kind: "modal"/);
+  assert.match(profile, /viewport: COMPACT_OVERLAY_VIEWPORT/);
+  assert.match(overlay, /COMPACT_OVERLAY_VIEWPORT = "\(max-width: 1279px\)"/);
+  assert.match(overlay, /PHONE_OVERLAY_VIEWPORT = "\(max-width: 767px\)"/);
   assert.match(profile, /role=\{mobileOverlay\.active \? "dialog" : undefined\}/);
   assert.match(profile, /aria-modal=\{mobileOverlay\.active \? "true" : undefined\}/);
   for (const source of [workspace, profile]) assert.match(source, /data-mobile-overlay-initial-focus/);
@@ -220,6 +223,16 @@ test("mobile route and modal overlays expose consistent focus, inert, and naviga
   assert.match(overlay, /event\.key === "Escape"/);
   assert.match(overlay, /kind !== "modal" \|\| event\.key !== "Tab"/);
   assert.match(overlay, /previousFocus\?\.isConnected/);
+});
+
+test("first-run locale follows the browser and login exposes an unauthenticated language switch", async () => {
+  assert.equal(preferredBrowserLocale({ language: "en-US", languages: ["en-US", "ja-JP"] }), "en");
+  assert.equal(preferredBrowserLocale({ language: "en-US", languages: ["en-US"] }), "en");
+  assert.equal(preferredBrowserLocale({ language: "ja-JP", languages: ["ja-JP"] }), "ja");
+  assert.equal(preferredBrowserLocale({ language: "fr-FR", languages: ["fr-FR"] }), "en");
+  const login = await readFile(new URL("../src/components/device-login.tsx", import.meta.url), "utf8");
+  assert.match(login, /class="device-login-language"/);
+  assert.match(login, /setLocale\(locale\.value === "ja" \? "en" : "ja"\)/);
 });
 
 test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touch targets", async () => {
@@ -244,6 +257,16 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
   const labelSelectors = selectorsUsing(appearance, "font-size: var(--text-label)");
   for (const selector of [".task-assignee-select select", ".task-status-select select", ".task-comments-error", ".task-comments-error button", ".task-card footer button", ".task-comment-form input", ".task-comment-form button", ".kanban-unconfirmed button"]) {
     assert.match(labelSelectors, new RegExp(escapeRegExp(selector)), `${selector} must scale with the label token`);
+  }
+  for (const selector of [".device-login-message", ".device-login-form input", ".device-login-form button", ".device-login-language", ".avatar-picker > p", ".avatar-picker-actions button", ".avatar-picker-error"]) {
+    assert.match(labelSelectors, new RegExp(escapeRegExp(selector)), `${selector} must scale with the label token`);
+  }
+  const utilityWithLogin = selectorsUsing(appearance, "font-size: var(--text-utility)");
+  for (const selector of [".device-login-card .eyebrow", ".device-login-card::before", ".device-login-form label span", ".avatar-picker header small", ".profile-avatar-button > span:last-child"]) {
+    assert.match(utilityWithLogin, new RegExp(escapeRegExp(selector)), `${selector} must scale with the utility token`);
+  }
+  for (const selector of [".device-login-card h1", ".device-login-mark", ".avatar-picker h3"]) {
+    assert.match(declarationsForSelector(appearance, selector), /var\(--font-scale\)/, `${selector} must follow the selected font scale`);
   }
   assert.match(selectorsUsing(appearance, "font-size: var(--text-chat)"), /\.task-comment-list p/);
 

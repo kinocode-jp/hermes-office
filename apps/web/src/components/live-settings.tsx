@@ -8,6 +8,7 @@ import {
 import type { SettingsTab } from "../domain";
 import { localizeRuntimeMessage, officeMessage, officeRuntimeMessage, t, type RuntimeMessage } from "../i18n";
 import { canMutateSettingsTab, settingsMutationAccess } from "../settings-access";
+import { preserveConcurrentDraft } from "../settings-draft";
 import { SettingsMutationRegistry, type SettingsMutationScope } from "../settings-mutation-registry";
 import { officeSnapshot } from "../store";
 import { AccessAudit } from "./access-audit";
@@ -133,17 +134,20 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   const saveGlobal = () => {
     if (!global || !mutationAccess.global) return;
+    const submitted = { globalContext, globalSkills, sharedContext, sharedSkills };
     void perform("global", "global", async () => {
       const updated = await updateGlobalSettings({
         expectedRevision: global.revision,
-        sharedContextEnabled: sharedContext,
-        sharedSkillsEnabled: sharedSkills,
-        context: globalContext,
-        skills: parseSkillLines(globalSkills),
+        sharedContextEnabled: submitted.sharedContext,
+        sharedSkillsEnabled: submitted.sharedSkills,
+        context: submitted.globalContext,
+        skills: parseSkillLines(submitted.globalSkills),
       });
       setGlobal(updated);
-      setGlobalContext(updated.context);
-      setGlobalSkills(updated.skills.join("\n"));
+      setGlobalContext((current) => preserveConcurrentDraft(current, submitted.globalContext, updated.context));
+      setGlobalSkills((current) => preserveConcurrentDraft(current, submitted.globalSkills, updated.skills.join("\n")));
+      setSharedContext((current) => preserveConcurrentDraft(current, submitted.sharedContext, updated.sharedContextEnabled));
+      setSharedSkills((current) => preserveConcurrentDraft(current, submitted.sharedSkills, updated.sharedSkillsEnabled));
     }, "global");
   };
 
@@ -160,10 +164,11 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
   const saveSoul = () => {
     if (!profile || profile.soul.redacted || !mutationAccess.soul) return;
+    const submittedDraft = soulDraft;
     void perform("soul", "soul", async () => {
-      const updated = await updateProfileSoul(profile.profile, soulDraft, profile.soul.revision);
+      const updated = await updateProfileSoul(profile.profile, submittedDraft, profile.soul.revision);
       setProfile((current) => current === null ? current : { ...current, soul: updated });
-      setSoulDraft(updated.content);
+      setSoulDraft((current) => preserveConcurrentDraft(current, submittedDraft, updated.content));
     }, "soul");
   };
 

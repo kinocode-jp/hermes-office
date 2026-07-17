@@ -230,10 +230,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-tool { max-width: 100%; padding-left: 26px; border-color: var(--amber); color: var(--muted); font-family: ui-monospace, monospace; }
 .message-tool-mark { position: absolute; left: 8px; top: 8px; color: var(--amber); font-size: 12px; line-height: 1; }
 .message-steer-mark { display: block; margin-bottom: 3px; color: var(--aqua); font: 700 8px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.message-prompt-state { display: block; margin-bottom: 3px; color: var(--muted); font: 700 var(--text-utility)/1.2 ui-monospace, monospace; }
+.message-prompt-state small { display: block; margin-top: 2px; color: inherit; font: 500 var(--text-utility)/1.35 ui-monospace, monospace; }
+.message-prompt-state.is-rejected { color: var(--coral); }
+.message-prompt-state.is-unconfirmed { color: var(--amber); }
 .message p { margin: 0; font-size: 11px; line-height: 1.55; }
 .message time { display: block; margin-top: 2px; color: rgba(243,232,209,.35); font: 500 9px/1 ui-monospace, monospace; text-align: right; }
 .message-streaming { box-shadow: inset 0 -1px 0 rgba(85,214,190,.45); }
 .message-failed, .message-cancelled { opacity: .62; }
+.message-pending { box-shadow: inset 0 -1px 0 var(--muted); }
+.message-unconfirmed { border-color: var(--amber); background: color-mix(in srgb, var(--amber) 8%, transparent); }
+.message-rejected { border-color: var(--coral); opacity: .72; }
 .chat-connection-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 8px; border-left: 2px solid var(--amber); color: var(--muted); background: rgba(242,184,75,.07); font-size: 9px; }
 .chat-connection-note.is-error { border-color: var(--coral); background: rgba(240,106,87,.07); }
 .chat-connection-note button { min-height: 25px; border: 1px solid currentColor; color: var(--paper); background: transparent; font: 600 8px/1 ui-monospace, monospace; cursor: pointer; }

@@ -45,10 +45,15 @@ export type ChatSteerResult =
   | { status: "rejected" }
   | { status: "invalid" };
 
+export type ChatPromptResult =
+  | { status: "accepted" }
+  | { status: "rejected"; message: string }
+  | { status: "unconfirmed"; message: string };
+
 export type ChatApiConnection = {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
-  submitPrompt(clientSessionId: string, text: string): void;
+  submitPrompt(clientSessionId: string, text: string, operationId: string): Promise<ChatPromptResult>;
   steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
   interrupt(clientSessionId: string): void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
@@ -84,6 +89,18 @@ type PendingRequest = {
   reject(reason: Error): void;
   timeout: ReturnType<typeof setTimeout>;
 };
+
+const RPC_REJECTED = Symbol("rpc-rejected");
+
+type ExplicitRpcRejection = Error & { [RPC_REJECTED]: true };
+
+function explicitRpcRejection(message: string): ExplicitRpcRejection {
+  return Object.assign(new Error(message), { [RPC_REJECTED]: true as const });
+}
+
+function isExplicitRpcRejection(error: unknown): error is ExplicitRpcRejection {
+  return typeof error === "object" && error !== null && RPC_REJECTED in error;
+}
 
 type ActiveTarget = { generation: number; target: ChatTarget };
 type LiveTarget = { clientSessionId: string; generation: number };
@@ -262,7 +279,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const message = error.code === -32006
         ? "このセッションは別の端末で使用中です。別の端末で閉じてから再接続してください。"
         : typeof error.message === "string" ? error.message : "Chat RPCに失敗しました。";
-      request.reject(new Error(message));
+      request.reject(explicitRpcRejection(message));
       return;
     }
     request.resolve(frame.result);
@@ -326,9 +343,9 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     });
   };
 
-  const rpc = (method: string, params: Record<string, string>): Promise<unknown> => {
+  const rpc = (method: string, params: Record<string, string>, requestId?: string): Promise<unknown> => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Chat接続は準備中です。"));
-    const id = randomId();
+    const id = requestId ?? randomId();
     return new Promise((resolve, reject) => {
       const timeout = globalThis.setTimeout(() => {
         pending.delete(id);
@@ -532,16 +549,22 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
       const active = targets.get(clientSessionId);
       if (active !== undefined) deactivateTarget(active);
     },
-    submitPrompt(clientSessionId, text) {
+    async submitPrompt(clientSessionId, text, operationId) {
       const active = targets.get(clientSessionId);
+      const requestSocket = socket;
       const liveSessionId = active === undefined ? undefined : liveSessionIdFor(active, liveToClient);
-      if (!liveSessionId) {
-        callbacks.onSessionError(clientSessionId, "Live Sessionが未接続です。");
-        return;
+      if (!active || !liveSessionId || !requestSocket || requestSocket.readyState !== WebSocket.OPEN) {
+        return { status: "rejected", message: "Live Sessionが未接続です。" };
       }
-      void rpc("prompt.submit", { session_id: liveSessionId, text }).catch((error) => {
-        callbacks.onSessionError(clientSessionId, errorText(error));
-      });
+      try {
+        await rpc("prompt.submit", { session_id: liveSessionId, text }, operationId);
+        return { status: "accepted" };
+      } catch (error) {
+        const message = errorText(error);
+        return isExplicitRpcRejection(error)
+          ? { status: "rejected", message }
+          : { status: "unconfirmed", message };
+      }
     },
     async steer(clientSessionId, text) {
       const trimmed = text.trim();
