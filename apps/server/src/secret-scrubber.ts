@@ -61,28 +61,34 @@ function normalizeTerminalText(value: string): TerminalNormalization {
   const chunks: string[] = [];
   let copiedUntil = 0;
   let cursor = 0;
-  let malformed = false;
   while (cursor < value.length) {
     const sequence = terminalSequenceAt(value, cursor);
     if (sequence === undefined) { cursor += 1; continue; }
+    // Cursor movement, erasure, reset, character-set selection, and unknown
+    // controls cannot be normalized by deleting their bytes: doing so can
+    // retain a decoy character that the terminal would overwrite. Once one is
+    // observed, drop the complete field without scanning or allocating the
+    // attacker-controlled suffix.
+    if (sequence.malformed) return { value: "", malformed: true };
     if (copiedUntil < cursor) chunks.push(value.slice(copiedUntil, cursor));
-    malformed ||= sequence.malformed;
     cursor = Math.max(cursor + 1, sequence.end);
     copiedUntil = cursor;
   }
   if (copiedUntil < value.length) chunks.push(value.slice(copiedUntil));
-  return { value: chunks.join(""), malformed };
+  return { value: chunks.join(""), malformed: false };
 }
 
 function terminalSequenceAt(value: string, start: number): TerminalSequence | undefined {
   const code = value.charCodeAt(start);
   if (code === ESCAPE) return escapeSequenceEnd(value, start);
   if (code === 0x9b) return controlSequenceEnd(value, start, start + 1);
-  if ([0x90, 0x98, 0x9d, 0x9e, 0x9f].includes(code)) {
-    return terminalStringEnd(value, start, start + 1, code === 0x9d);
-  }
-  if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
-    return { end: start + 1, malformed: false };
+  if (code === 0x9d) return terminalStringEnd(value, start, start + 1, true);
+  if (code === 0x0d) return value.charCodeAt(start + 1) === 0x0a
+    ? undefined
+    : { end: start + 1, malformed: true };
+  if ((code < 0x20 && code !== 0x09 && code !== 0x0a)
+    || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+    return { end: start + 1, malformed: true };
   }
   return undefined;
 }
@@ -91,11 +97,13 @@ function escapeSequenceEnd(value: string, start: number): TerminalSequence {
   const next = value.charCodeAt(start + 1);
   if (!Number.isFinite(next)) return { end: start + 1, malformed: true };
   if (next === 0x5b) return controlSequenceEnd(value, start, start + 2);
-  if ([0x50, 0x58, 0x5d, 0x5e, 0x5f].includes(next)) {
-    return terminalStringEnd(value, start, start + 2, next === 0x5d);
+  if (next === 0x5d) return terminalStringEnd(value, start, start + 2, true);
+  // All other ESC forms can move/save/restore the cursor, reset state, select
+  // character sets, invoke a device-control language, or have implementation-
+  // specific effects. They are deliberately outside the removal allowlist.
+  if (next === 0x5c || (next >= 0x30 && next <= 0x7e)) {
+    return { end: start + 2, malformed: true };
   }
-  if (next === 0x5c) return { end: start + 2, malformed: false };
-  if (next >= 0x30 && next <= 0x7e) return { end: start + 2, malformed: false };
   if (next >= 0x20 && next <= 0x2f) {
     let cursor = start + 2;
     while (cursor < value.length && value.charCodeAt(cursor) >= 0x20 && value.charCodeAt(cursor) <= 0x2f) {
@@ -104,7 +112,7 @@ function escapeSequenceEnd(value: string, start: number): TerminalSequence {
     }
     const final = value.charCodeAt(cursor);
     return Number.isFinite(final) && final >= 0x30 && final <= 0x7e
-      ? { end: cursor + 1, malformed: cursor + 1 - start > MAX_TERMINAL_SEQUENCE_LENGTH }
+      ? { end: cursor + 1, malformed: true }
       : { end: cursor, malformed: true };
   }
   return { end: start + 1, malformed: true };
@@ -119,7 +127,14 @@ function controlSequenceEnd(value: string, sequenceStart: number, contentStart: 
     const code = value.charCodeAt(cursor);
     if (code >= 0x40 && code <= 0x7e) {
       const end = cursor + 1;
-      return { end, malformed: malformed || end - sequenceStart > MAX_TERMINAL_SEQUENCE_LENGTH };
+      // SGR is the only CSI family whose removal preserves the displayed text.
+      // Cursor, erase, insert/delete, scroll, save/restore, mode, and unknown
+      // finals are display-state operations and therefore fail closed.
+      return {
+        end,
+        malformed: malformed || intermediate || code !== 0x6d
+          || end - sequenceStart > MAX_TERMINAL_SEQUENCE_LENGTH,
+      };
     }
     if (code >= 0x20 && code <= 0x2f) intermediate = true;
     else if (code < 0x30 || code > 0x3f || intermediate) malformed = true;

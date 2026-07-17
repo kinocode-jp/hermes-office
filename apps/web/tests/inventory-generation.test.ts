@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnapshotProfile, OfficeSnapshotRequestIdentity, Profile } from "../src/domain.ts";
 import { initializeInventory, loadMoreProfiles, loadMoreSessions, profileInventoryState, registerInventorySnapshotRefresh, sessionInventoryState } from "../src/inventory.ts";
 import { defaultAvatarOrdinal } from "../src/avatar-preferences.ts";
+import { characterHueRotation } from "../src/components/character-portrait.tsx";
 import { locale, localizeRuntimeMessage, setLocale } from "../src/i18n.ts";
 import { storedSessionClientId } from "../src/session-identity.ts";
 import { activeSessionId, applyChatGatewayEvent, applyOfficeSnapshot, interruptSession, openSessionIds, profileList, registerChatRuntime, selectedProfileId, sessions } from "../src/store.ts";
@@ -167,6 +168,43 @@ test("only a reliable terminal Profile continuation reconciles avatar slots", as
   }
 });
 
+test("a complete empty roster retires old avatar slots before a mixed partial recovery", () => {
+  const serverUrl = "http://127.0.0.1:55210";
+  const historical = Array.from({ length: 12 }, (_, index) => ({ id: `empty-old-${index}`, name: `Old ${index}`, activity: "idle", activeSessionCount: 0 }));
+  applyOfficeSnapshot(snapshot({ profiles: historical, sequence: 100 }), serverUrl);
+  assert.deepEqual(historical.map(({ id }) => defaultAvatarOrdinal(id)), Array.from({ length: 12 }, (_, index) => index));
+
+  applyOfficeSnapshot(snapshot({ profiles: [], sequence: 101 }), serverUrl);
+  const mixed = [
+    { id: "empty-new-a", name: "New A", activity: "idle", activeSessionCount: 0 },
+    { id: historical[11]!.id, name: "Returned", activity: "idle", activeSessionCount: 0 },
+    { id: "empty-new-b", name: "New B", activity: "idle", activeSessionCount: 0 },
+  ];
+  applyOfficeSnapshot(snapshot({
+    profiles: mixed,
+    profilePage: { returned: mixed.length, available: mixed.length, total: mixed.length, hasMore: false, truncated: true, partialFailures: 1 },
+    sequence: 102,
+  }), serverUrl);
+
+  assert.deepEqual(mixed.map(({ id }) => defaultAvatarOrdinal(id)), [0, 1, 2]);
+  assert.deepEqual(mixed.map(({ id }) => characterHueRotation(id)), [0, 0, 0]);
+});
+
+test("the explicit demo roster authoritatively resets live avatar hues", () => {
+  const serverUrl = "http://127.0.0.1:55211";
+  const live = Array.from({ length: 12 }, (_, index) => ({ id: `demo-old-${index}`, name: `Live ${index}`, activity: "idle", activeSessionCount: 0 }));
+  try {
+    applyOfficeSnapshot(snapshot({ profiles: live, sequence: 110 }), serverUrl);
+    assert.equal(defaultAvatarOrdinal(live[11]!.id), 11);
+
+    applyOfficeSnapshot(snapshot({ features: ["demo"], sequence: 111 }), serverUrl);
+    assert.deepEqual(profileList.value.map(({ id }) => defaultAvatarOrdinal(id)), [0, 1, 2, 3]);
+    assert.deepEqual(profileList.value.map(({ id }) => characterHueRotation(id)), [0, 0, 0, 0]);
+  } finally {
+    applyOfficeSnapshot(snapshot({ sequence: 112 }), serverUrl);
+  }
+});
+
 test("partial terminal inventory preserves LKG until a later complete generation", async () => {
   const browser = installBrowserGlobals();
   const serverUrl = "http://127.0.0.1:55203";
@@ -309,12 +347,13 @@ function snapshot(options: {
   profilePage?: OfficeInventoryPagination;
   sessionPage?: OfficeInventoryPagination;
   sequence?: number;
+  features?: OfficeSnapshot["capabilities"]["features"];
 } = {}): OfficeSnapshot {
   const profiles = options.profiles ?? [{ id: "p0", name: "P0", activity: "idle", activeSessionCount: 0 }];
   const storedSessions = options.sessions ?? [];
   return {
     generatedAt: new Date(options.sequence ?? 1).toISOString(), sequence: options.sequence ?? 1,
-    capabilities: { protocolVersion: 1, serverVersion: "test", runtime: { state: "ready", adapterVersion: "test" }, access: { deviceId: "local", tier: "owner", exposure: "loopback", authentication: "local-cookie", allowedOperations: ["state.read"] }, features: ["chat", "profiles"] },
+    capabilities: { protocolVersion: 1, serverVersion: "test", runtime: { state: "ready", adapterVersion: "test" }, access: { deviceId: "local", tier: "owner", exposure: "loopback", authentication: "local-cookie", allowedOperations: ["state.read"] }, features: options.features ?? ["chat", "profiles"] },
     profiles, sessions: storedSessions,
     inventory: { profiles: options.profilePage ?? terminal(profiles.length), sessions: options.sessionPage ?? terminal(storedSessions.length) },
     boards: []

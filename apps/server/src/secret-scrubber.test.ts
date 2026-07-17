@@ -67,14 +67,13 @@ test("ECMA-48 strings cannot split secret labels or values", () => {
   const oscBel = "\u001b]0;window title\u0007";
   const oscSt = "\u001b]8;;https://example.test\u001b\\";
   const c1Osc = "\u009d0;c1 title\u009c";
-  const dcs = "\u001bP1;2|ignored device control\u001b\\";
   const source = [
     `API${oscBel}_KEY=osc-label-secret`,
     `Coo${oscSt}kie: session=osc-cookie-secret`,
     `client${c1Osc}Secret=c1-label-secret`,
     `password=cred${oscBel}ential`,
     `access\u001b[31mToken=csi-label-secret`,
-    `signing_${dcs}key=dcs-label-secret`,
+    `signing_${oscSt}key=osc-label-secret`,
     `ghp_ABCDEFGHIJKLMNO${oscSt}PQRSTUVWXYZabcdefghij`,
     `{"Coo${c1Osc}kie":"session=json-cookie-secret","safe":true}`,
   ].join("\n");
@@ -163,16 +162,89 @@ test("128 KiB default-ignorable and format-control splits remain bounded and fai
 
 test("well-formed terminal normalization alone stays non-secret and idempotent", () => {
   const source = [
+    "safe\u001b[31mred\u001b[0m text",
+    "safe\u009b32mgreen\u009b0m text",
     "safe\u001b]0;window title\u0007 prose",
     "safe\u001b]8;;https://example.test\u001b\\ link",
-    "safe\u001bP1;2|device control\u001b\\ text",
+    "safe\u009d8;;https://example.test\u009c link",
     "safe\u009d0;c1 title\u009c text",
   ].join("\n");
-  const normalized = ["safe prose", "safe link", "safe text", "safe text"].join("\n");
+  const normalized = ["safered text", "safegreen text", "safe prose", "safe link", "safe link", "safe text"].join("\n");
 
   assert.equal(containsLikelySecret(source), false);
   assert.deepEqual(redactSecrets(source), { value: normalized, redacted: true });
   assert.deepEqual(redactSecrets(normalized), { value: normalized, redacted: false });
+});
+
+test("terminal display-state controls fail closed instead of preserving decoy text", () => {
+  const cases = [
+    ["NUL", "X\u0000API_KEY=nul-secret"],
+    ["backspace", "APIX\u0008_KEY=backspace-secret"],
+    ["vertical tab", "X\u000bAPI_KEY=vertical-tab-secret"],
+    ["form feed", "X\u000cAPI_KEY=form-feed-secret"],
+    ["DEL", "X\u007fAPI_KEY=delete-secret"],
+    ["C1 index", "X\u0084API_KEY=index-secret"],
+    ["C1 next line", "X\u0085API_KEY=next-line-secret"],
+    ["C1 reverse index", "X\u008dAPI_KEY=reverse-index-secret"],
+    ["C1 string terminator", "X\u009cAPI_KEY=terminator-secret"],
+    ["CSI cursor", "APIX\u001b[D_KEY=cursor-secret"],
+    ["C1 CSI cursor", "APIX\u009bD_KEY=c1-cursor-secret"],
+    ["CSI erase", "X\u001b[2KAPI_KEY=erase-secret"],
+    ["CSI insert", "X\u001b[1@API_KEY=insert-secret"],
+    ["CSI delete", "X\u001b[1PAPI_KEY=delete-secret"],
+    ["CSI scroll", "X\u001b[1SAPI_KEY=scroll-secret"],
+    ["CSI save", "X\u001b[sAPI_KEY=save-secret"],
+    ["CSI restore", "X\u001b[uAPI_KEY=restore-secret"],
+    ["CSI mode", "X\u001b[?25hAPI_KEY=mode-secret"],
+    ["unknown CSI final", "X\u001b[1zAPI_KEY=unknown-csi-secret"],
+    ["CSI intermediate SGR", "X\u001b[1$mAPI_KEY=intermediate-secret"],
+    ["ESC cursor save", "X\u001b7API_KEY=save-secret"],
+    ["ESC cursor restore", "X\u001b8API_KEY=restore-secret"],
+    ["ESC index", "X\u001bDAPI_KEY=index-secret"],
+    ["ESC next line", "X\u001bEAPI_KEY=next-line-secret"],
+    ["ESC reverse index", "X\u001bMAPI_KEY=reverse-index-secret"],
+    ["ESC reset", "X\u001bcAPI_KEY=reset-secret"],
+    ["ESC charset", "X\u001b(BAPI_KEY=charset-secret"],
+    ["unknown ESC", "X\u001bZAPI_KEY=unknown-secret"],
+    ["device control string", "X\u001bP1;2|device control\u001b\\API_KEY=dcs-secret"],
+    ["C1 device control string", "X\u0090device control\u009cAPI_KEY=c1-dcs-secret"],
+  ] as const;
+
+  for (const [label, source] of cases) {
+    const once = redactSecrets(source);
+    assert.deepEqual(once, { value: "[REDACTED TERMINAL DATA]", redacted: true }, label);
+    assert.equal(containsLikelySecret(source), true, label);
+    assert.deepEqual(redactSecrets(once.value), { value: once.value, redacted: false }, label);
+  }
+});
+
+test("LF and CRLF remain normal line breaks while lone CR fails closed", () => {
+  const safeLf = "first line\nsecond line";
+  const safeCrLf = "first line\r\nsecond line";
+  const secretCrLf = "safe\r\nAPI_KEY=crlf-secret";
+  const loneCr = "safe\rAPI_KEY=lone-cr-secret";
+
+  assert.deepEqual(redactSecrets(safeLf), { value: safeLf, redacted: false });
+  assert.deepEqual(redactSecrets(safeCrLf), { value: safeCrLf, redacted: false });
+  assert.deepEqual(redactSecrets(secretCrLf), { value: "safe\r\nAPI_KEY=[REDACTED]", redacted: true });
+  assert.equal(containsLikelySecret(secretCrLf), true);
+  assert.deepEqual(redactSecrets(loneCr), { value: "[REDACTED TERMINAL DATA]", redacted: true });
+  assert.equal(containsLikelySecret(loneCr), true);
+});
+
+test("128 KiB terminal decoration and display-state floods stay bounded", () => {
+  const safeSgr = `safe${"\u001b[31m\u001b[0m".repeat(16_384)}text`;
+  const unsafeBackspaces = `safe${"\u0008".repeat(128 * 1024)}API_KEY=flood-secret`;
+  const unsafeCursor = `safe${"\u001b[D".repeat(32_768)}API_KEY=cursor-flood-secret`;
+
+  assert.deepEqual(redactSecrets(safeSgr), { value: "safetext", redacted: true });
+  assert.equal(containsLikelySecret(safeSgr), false);
+  for (const source of [unsafeBackspaces, unsafeCursor]) {
+    const once = redactSecrets(source);
+    assert.deepEqual(once, { value: "[REDACTED TERMINAL DATA]", redacted: true });
+    assert.equal(containsLikelySecret(source), true);
+    assert.deepEqual(redactSecrets(once.value), { value: once.value, redacted: false });
+  }
 });
 
 test("unterminated and overlong terminal strings fail closed in linear scans", () => {

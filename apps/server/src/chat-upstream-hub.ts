@@ -34,6 +34,16 @@ export interface ChatSessionStartSettlement {
 
 type PendingSessionStart = { promise: Promise<void>; settle(): void };
 
+type LeaseCloseOperationResult = {
+  completed: boolean;
+  results: ReadonlyMap<string, HermesChatResult>;
+};
+
+type LeaseCloseResult = LeaseCloseOperationResult & {
+  joined: boolean;
+  targetResult?: HermesChatResult;
+};
+
 type BufferedEvents = {
   events: HermesChatEvent[];
   bytes: number;
@@ -60,6 +70,7 @@ export class ChatUpstreamHub {
   readonly #ownerCleanup = new Map<ChatSessionOwner, Promise<boolean>>();
   readonly #cleanupOperations = new Set<Promise<boolean>>();
   readonly #pendingSessionStarts = new Map<ChatSessionOwner, Set<PendingSessionStart>>();
+  readonly #leaseCloseOperations = new Map<symbol, Promise<LeaseCloseOperationResult>>();
   #unboundEventCount = 0;
   #unboundBytes = 0;
   #connection: HermesChatConnection | undefined;
@@ -265,7 +276,16 @@ export class ChatUpstreamHub {
         this.#coordinator.releaseUnboundOwnerLeases(owner);
       }
       for (const lease of this.#coordinator.ownedSessionLeases(owner)) {
-        await this.#closeLease(owner, lease, 2);
+        const outcome = await this.#closeLease(owner, lease, 2);
+        if (!outcome.completed && outcome.joined) {
+          // A Browser may disconnect while its explicit close owns the live-ID
+          // reservation. Join that authoritative operation first; if it failed
+          // after detachment, retry owner cleanup without the stale Browser
+          // authorization callback before declaring the shared state ambiguous.
+          const unresolved = this.#coordinator.ownedSessionLeases(owner)
+            .find((candidate) => candidate.token === lease.token);
+          if (unresolved !== undefined) await this.#closeLease(owner, unresolved, 2);
+        }
       }
       if (this.#coordinator.ownedSessionLeases(owner).length > 0) {
         await this.#resetGeneration(this.#generation);
@@ -368,12 +388,17 @@ export class ChatUpstreamHub {
     maxAttempts: number,
     targetSessionId?: string,
     authorize?: () => boolean,
-  ): Promise<{ completed: boolean; targetResult?: HermesChatResult }> {
+  ): Promise<LeaseCloseResult> {
+    const existing = this.#leaseCloseOperations.get(lease.token);
+    if (existing !== undefined) {
+      return closeResult(await existing, targetSessionId, true);
+    }
     const closeToken = this.#coordinator.claimOwnedLeaseClose(owner, lease);
-    if (closeToken === undefined) return { completed: false };
-    const remaining = new Set(lease.liveSessionIds);
-    let targetResult: HermesChatResult | undefined;
-    try {
+    if (closeToken === undefined) return { completed: false, results: new Map(), joined: false };
+    let operation: Promise<LeaseCloseOperationResult>;
+    operation = (async () => {
+      const remaining = new Set(lease.liveSessionIds);
+      const results = new Map<string, HermesChatResult>();
       for (let attempt = 0; attempt < maxAttempts && remaining.size > 0; attempt += 1) {
         for (const liveId of [...remaining]) {
           this.discardBufferedSession(liveId);
@@ -383,17 +408,22 @@ export class ChatUpstreamHub {
             );
             if (typeof result.value.closed !== "boolean") continue;
             remaining.delete(liveId);
-            if (liveId === targetSessionId) targetResult = result;
+            results.set(liveId, result);
           } catch { /* Keep the whole lease fail-closed and retry unresolved IDs. */ }
         }
       }
-      if (remaining.size > 0) return { completed: false };
+      if (remaining.size > 0) return { completed: false, results };
       this.#coordinator.releaseLease(owner, lease.token);
       for (const liveId of lease.liveSessionIds) this.discardBufferedSession(liveId);
-      return { completed: true, ...(targetResult === undefined ? {} : { targetResult }) };
-    } finally {
+      return { completed: true, results };
+    })().finally(() => {
+      if (this.#leaseCloseOperations.get(lease.token) === operation) {
+        this.#leaseCloseOperations.delete(lease.token);
+      }
       this.#coordinator.finishOwnedLeaseClose(lease, closeToken);
-    }
+    });
+    this.#leaseCloseOperations.set(lease.token, operation);
+    return closeResult(await operation, targetSessionId, false);
   }
 
   async close(): Promise<void> {
@@ -568,4 +598,17 @@ function promptCommitCouldBeUnconfirmed(error: unknown): boolean {
   if (!(error instanceof HermesChatTransportError)) return true;
   if (error.code === "invalid_request" || error.code === "connection_failed") return false;
   return error.code !== "backend_rejected" || error.rpcCode === undefined;
+}
+
+function closeResult(
+  operation: LeaseCloseOperationResult,
+  targetSessionId: string | undefined,
+  joined: boolean,
+): LeaseCloseResult {
+  const targetResult = targetSessionId === undefined ? undefined : operation.results.get(targetSessionId);
+  return {
+    ...operation,
+    joined,
+    ...(targetResult === undefined ? {} : { targetResult }),
+  };
 }

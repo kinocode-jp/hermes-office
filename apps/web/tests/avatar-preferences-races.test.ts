@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   AvatarPreferences,
@@ -16,6 +17,13 @@ test("avatar picker cannot be dismissed while a durable upload or reset is in fl
   assert.equal(canDismissAvatarPicker(true, false), false);
   assert.equal(canDismissAvatarPicker(false, true), false);
   assert.equal(canDismissAvatarPicker(true, true), false);
+});
+
+test("avatar picker keyboard focus skips the transparent file input", async () => {
+  const source = await readFile(new URL("../src/components/avatar-picker.tsx", import.meta.url), "utf8");
+  assert.match(source, /input:not\(\[disabled\]\):not\(\[tabindex="-1"\]\)/);
+  assert.match(source, /<input ref=\{inputRef\} type="file" hidden aria-hidden="true" tabIndex=\{-1\}/);
+  assert.match(source, /onClick=\{\(\) => inputRef\.current\?\.click\(\)\}/, "the visible upload button remains the file-picker entry point");
 });
 
 test("upload followed by a creature choice cannot restore stale custom state", async () => {

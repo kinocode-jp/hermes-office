@@ -188,7 +188,13 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
     if (runtimeDataSource !== "live") clearRuntimeState();
     return true;
   }
-  if (snapshot.profiles.length === 0) { clearRuntimeState(); return true; }
+  if (snapshot.profiles.length === 0) {
+    if (officeInventoryReliability(snapshot.inventory.profiles) === "complete" && !snapshot.inventory.profiles.hasMore) {
+      reconcileDefaultAvatarProfiles([]);
+    }
+    clearRuntimeState();
+    return true;
+  }
   if (runtimeDataSource === "demo") clearRuntimeState();
 
   const previousProfiles = new Map(profileList.value.map((profile) => [profile.id, profile]));
@@ -345,7 +351,7 @@ export function createSession(profileId: string): string | undefined {
 
 function loadExplicitDemoState(): void {
   clearRuntimeState();
-  registerDefaultAvatarProfiles(profiles.map((profile) => profile.id));
+  reconcileDefaultAvatarProfiles(profiles.map((profile) => profile.id));
   profileList.value = profiles.map((profile) => ({ ...profile, skills: [...profile.skills], inheritedSkills: [...profile.inheritedSkills] }));
   loadKanbanDemoRuntime(createDemoKanbanApi(initialTasks, initialTaskComments, profileList.value.map((profile) => profile.id)));
   sessions.value = initialSessions.map((session) => ({

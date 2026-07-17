@@ -32,7 +32,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     const unregister = dialog ? registerModal(dialog) : undefined;
-    const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button, input:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
+    const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button, input:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])') ?? [])];
     focusable()[0]?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isTopmostModal(dialogRef.current)) return;
@@ -111,7 +111,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
           ))}
         </div>
         <div class="avatar-picker-actions">
-          <input ref={inputRef} type="file" disabled={uploading || resetting} accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
+          <input ref={inputRef} type="file" hidden aria-hidden="true" tabIndex={-1} disabled={uploading || resetting} accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
           <button type="button" class="avatar-upload-button" disabled={uploading || resetting} onClick={() => inputRef.current?.click()}>{t("avatar.upload")}</button>
           <button type="button" class="avatar-reset-button" aria-busy={resetting} disabled={uploading || resetting} onClick={() => void resetAvatar()}>{resetting ? t("avatar.resetting") : t("avatar.reset")}</button>
         </div>
