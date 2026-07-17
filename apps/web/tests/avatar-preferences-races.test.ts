@@ -7,7 +7,7 @@ import {
   type AvatarMap,
   type StoredCustomAvatar,
 } from "../src/avatar-preferences.ts";
-import { canDismissAvatarPicker } from "../src/components/avatar-picker.tsx";
+import { canDismissAvatarPicker, containAvatarPickerTabFocus } from "../src/components/avatar-picker.tsx";
 
 const FIRST_IMAGE = "data:image/png;base64,Zmlyc3Q=";
 const SECOND_IMAGE = "data:image/png;base64,c2Vjb25k";
@@ -21,9 +21,40 @@ test("avatar picker cannot be dismissed while a durable upload or reset is in fl
 
 test("avatar picker keyboard focus skips the transparent file input", async () => {
   const source = await readFile(new URL("../src/components/avatar-picker.tsx", import.meta.url), "utf8");
+  assert.match(source, /button:not\(\[disabled\]\)/);
   assert.match(source, /input:not\(\[disabled\]\):not\(\[tabindex="-1"\]\)/);
   assert.match(source, /<input ref=\{inputRef\} type="file" hidden aria-hidden="true" tabIndex=\{-1\}/);
   assert.match(source, /onClick=\{\(\) => inputRef\.current\?\.click\(\)\}/, "the visible upload button remains the file-picker entry point");
+});
+
+test("avatar picker contains Tab focus when controls are unavailable or focus escaped", () => {
+  const focused: string[] = [];
+  const first = { focus: () => focused.push("first") };
+  const last = { focus: () => focused.push("last") };
+  let controls: unknown[] = [];
+  const dialog = {
+    querySelectorAll: (selector: string) => {
+      assert.match(selector, /button:not\(\[disabled\]\)/, "disabled buttons must not enter the focus ring");
+      return controls;
+    },
+    contains: (element: unknown) => controls.includes(element),
+    focus: () => focused.push("dialog"),
+  } as unknown as HTMLElement;
+  const tab = (activeElement: Element | null, shiftKey = false) => {
+    let prevented = false;
+    const event = { key: "Tab", shiftKey, preventDefault: () => { prevented = true; } };
+    containAvatarPickerTabFocus(dialog, event, activeElement);
+    assert.equal(prevented, true);
+  };
+
+  tab({} as Element);
+  assert.deepEqual(focused, ["dialog"], "an all-disabled dialog retains focus on its focusable container");
+  controls = [first, last];
+  tab({} as Element);
+  tab({} as Element, true);
+  tab(last as unknown as Element);
+  tab(first as unknown as Element, true);
+  assert.deepEqual(focused, ["dialog", "first", "last", "first", "last"], "escaped and boundary focus returns to the appropriate edge");
 });
 
 test("avatar picker initially focuses close instead of opening the information tooltip", async () => {

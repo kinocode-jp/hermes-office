@@ -12,6 +12,37 @@ type AvatarPickerProps = {
 };
 
 const MAX_FILE_BYTES = 1_000_000;
+const AVATAR_PICKER_FOCUSABLE = 'button:not([disabled]), input:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"]):not([disabled])';
+
+type AvatarPickerTabEvent = Pick<KeyboardEvent, "key" | "shiftKey" | "preventDefault">;
+
+export function containAvatarPickerTabFocus(dialog: HTMLElement, event: AvatarPickerTabEvent, activeElement: Element | null): boolean {
+  if (event.key !== "Tab") return false;
+  const controls = [...dialog.querySelectorAll<HTMLElement>(AVATAR_PICKER_FOCUSABLE)];
+  if (controls.length === 0) {
+    event.preventDefault();
+    dialog.focus();
+    return true;
+  }
+  const first = controls[0]!;
+  const last = controls[controls.length - 1]!;
+  if (!activeElement || !dialog.contains(activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+    return true;
+  }
+  if (event.shiftKey && activeElement === first) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if (!event.shiftKey && activeElement === last) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
+}
 
 export function canDismissAvatarPicker(uploading: boolean, resetting: boolean): boolean {
   return !uploading && !resetting;
@@ -35,19 +66,13 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     const unregister = dialog ? registerModal(dialog) : undefined;
-    const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button, input:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])') ?? [])];
     if (closeButtonRef.current) closeButtonRef.current.focus();
-    else focusable()[0]?.focus();
+    else dialog?.querySelector<HTMLElement>(AVATAR_PICKER_FOCUSABLE)?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!isTopmostModal(dialogRef.current)) return;
+      const currentDialog = dialogRef.current;
+      if (!currentDialog || !isTopmostModal(currentDialog)) return;
       if (event.key === "Escape") { event.preventDefault(); if (!busyRef.current) onCloseRef.current(); return; }
-      if (event.key !== "Tab") return;
-      const controls = focusable();
-      if (controls.length === 0) return;
-      const first = controls[0]!;
-      const last = controls[controls.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      containAvatarPickerTabFocus(currentDialog, event, document.activeElement);
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => { unregister?.(); document.removeEventListener("keydown", handleKeyDown); if (canRestoreModalFocus(previousFocus)) previousFocus?.focus(); };
@@ -85,7 +110,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
 
   return (
     <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (!busy && event.currentTarget === event.target) onClose(); }}>
-      <section ref={dialogRef} class="avatar-picker" role="dialog" aria-modal="true" aria-labelledby="avatar-picker-title" aria-describedby="avatar-picker-description">
+      <section ref={dialogRef} class="avatar-picker" role="dialog" aria-modal="true" aria-labelledby="avatar-picker-title" aria-describedby="avatar-picker-description" tabIndex={-1}>
         <header>
           <div>
             <small>{t("avatar.kicker")}</small>

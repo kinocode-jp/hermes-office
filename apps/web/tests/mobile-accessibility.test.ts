@@ -326,6 +326,24 @@ test("small phones preserve scaled primary navigation, safe areas, and touch tar
   assert.match(audit, /\.access-audit__gate > button \{[^}]*width: 100%[^}]*min-height: var\(--target-mobile\)/);
 });
 
+test("compact Profile overlays keep 44px controls through 768, 1024, and 1279px", async () => {
+  const appearance = await readFile(new URL("../src/appearance.css", import.meta.url), "utf8");
+  const compactRule = appearance.match(/@media \(max-width: (\d+)px\) \{([\s\S]*?)\n\}\n\n@media \(max-width: 767px\)/);
+  assert.ok(compactRule, "compact touch-target rules must precede the phone-only rules");
+  const maxWidth = Number(compactRule[1]);
+  for (const viewport of [768, 1024, 1279]) {
+    assert.ok(viewport <= maxWidth, `${viewport}px must receive compact touch targets`);
+  }
+  const compactTargets = selectorsUsing(compactRule[2] ?? "", "min-height: var(--target-mobile)");
+  for (const selector of [".mobile-close", ".panel-tabs button", ".profile-live-route button", ".new-chat-button", ".session-list button", ".avatar-picker header > button", ".avatar-picker-actions button"]) {
+    assert.match(compactTargets, new RegExp(escapeRegExp(selector)), `${selector} must keep a compact-overlay touch target`);
+  }
+  const compactSquareTargets = selectorsUsing(compactRule[2] ?? "", "min-width: var(--target-mobile)");
+  for (const selector of [".mobile-close", ".avatar-picker header > button"]) {
+    assert.match(compactSquareTargets, new RegExp(escapeRegExp(selector)), `${selector} must remain at least 44px wide`);
+  }
+});
+
 test("information triggers remain siblings of headings used as accessible names", async () => {
   const sources = await Promise.all([
     "office-scene.tsx",
