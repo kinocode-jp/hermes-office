@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatSteerResult } from "../src/chat-api.ts";
 import type { ChatSession } from "../src/domain.ts";
-import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
+import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, officeMessage, officeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
 import { ChatSteerMark, chatComposerState, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "../src/session-runtime.ts";
+import { boundedSteerEvidence, MAX_STEER_EVIDENCE_BYTES, MAX_STEER_EVIDENCE_COUNT } from "../src/chat-run-actions.ts";
 import {
   closeSession,
   interruptSession,
@@ -99,6 +100,20 @@ test("active runs steer once without changing authoritative run state", async ()
   assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, 1);
 });
 
+test("accepted Steer evidence is deterministically bounded by count and UTF-8 bytes without body dedupe", () => {
+  const countBound = Array.from({ length: MAX_STEER_EVIDENCE_COUNT + 1 }, (_, index) => ({
+    id: `steer-${index}`, from: "user" as const, kind: "steer" as const, body: "same body", at: "12:00",
+  }));
+  assert.deepEqual(boundedSteerEvidence(countBound).map(({ id }) => id), countBound.slice(1).map(({ id }) => id));
+
+  const largeBody = "界".repeat(Math.ceil(MAX_STEER_EVIDENCE_BYTES / 6));
+  const byteBound = [
+    { id: "old", from: "user" as const, kind: "steer" as const, body: largeBody, at: "12:00" },
+    { id: "new", from: "user" as const, kind: "steer" as const, body: largeBody, at: "12:01" },
+  ];
+  assert.deepEqual(boundedSteerEvidence(byteBound).map(({ id }) => id), ["new"]);
+});
+
 test("steer eligibility fails closed while idle, disconnected, empty, or awaiting interaction", async () => {
   const requests: string[] = [];
   const prompts: string[] = [];
@@ -141,7 +156,7 @@ test("steering labels, placeholders, and failures are localized without overstat
     assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["追加指示", "実行中のHermesに追加指示…", "Hermesキュー受理"]);
     setLocale("en");
     assert.deepEqual([t("chat.steer"), t("chat.steerPlaceholder"), t("chat.steerMessage")], ["Steer", "Add guidance for the running Hermes session…", "Accepted by Hermes queue"]);
-    assert.match(localizeRuntimeMessage("追加指示を送信できませんでした。接続を確認して再試行してください。"), /Unable to send steering guidance/);
+    assert.match(localizeRuntimeMessage(officeRuntimeMessage("追加指示を送信できませんでした。接続を確認して再試行してください。")), /Unable to send steering guidance/);
   } finally { setLocale(previous); }
 });
 
@@ -169,15 +184,20 @@ test("Office-owned chat titles, tool fallbacks, and transport copy switch locale
     assert.equal(chatMessageBody(tool), "Running Shell…");
     assert.equal(chatMessageBody(genericTool), "Tool complete");
     assert.equal(chatMessageBody(HermesDetail), "Shell: 利用者由来の要約");
-    for (const [source, expected] of [
-      ["端末の再認証が必要です。", "This device must be authenticated again."],
-      ["接続復旧後に履歴を再同期します", "History will be resynchronized after the connection recovers."],
-      ["session.resumeがタイムアウトしました。", "session.resume timed out."],
-      ["明示的なデモモードで表示中", "Showing explicit demo mode"],
-      ["Hermes runtimeの準備を待っています", "Waiting for the Hermes runtime"],
-      ["コメントを送信中", "Sending comment"],
-    ] as const) assert.equal(localizeRuntimeMessage(source), expected);
+    for (const [message, expected] of [
+      [officeRuntimeMessage("端末の再認証が必要です。"), "This device must be authenticated again."],
+      [officeRuntimeMessage("接続復旧後に履歴を再同期します"), "History will be resynchronized after the connection recovers."],
+      [officeRuntimeMessage("session.resumeがタイムアウトしました。"), "session.resume timed out."],
+      [officeMessage("runtime.office.demo"), "Showing explicit demo mode"],
+      [officeMessage("runtime.kanban.waiting"), "Waiting for the Hermes runtime"],
+      [officeMessage("runtime.kanban.commenting"), "Sending comment"],
+    ] as const) assert.equal(localizeRuntimeMessage(message), expected);
     assert.equal(localizeRuntimeMessage("Hermesが生成した日本語の自由文"), "Hermesが生成した日本語の自由文");
+    const collision = reduceChatGatewayEvent(ready, {
+      type: "error", liveSessionId: "live", payload: { message: "端末の再認証が必要です。" },
+    });
+    assert.equal(localizeRuntimeMessage(collision.errorMessage!), "端末の再認証が必要です。");
+    assert.equal(localizeRuntimeMessage(officeRuntimeMessage("Office WebSocketへ再接続できませんでした。手動で再試行してください。")), "Unable to reconnect to the Office WebSocket. Retry manually.");
   } finally { setLocale(previous); }
 });
 
@@ -208,7 +228,7 @@ test("failed steering keeps the run active and reports failure without a local m
   assert.equal(await steerSession(ready.id, "keep going"), false);
   assert.equal(isChatRunActive(sessions.value[0]!), true);
   assert.equal(sessions.value[0]?.messages.length, 0);
-  assert.match(sessions.value[0]?.errorMessage ?? "", /追加指示/);
+  assert.match(localizeRuntimeMessage(sessions.value[0]!.errorMessage!), /追加指示/);
 });
 
 test("rejected and malformed steering acknowledgements retain input and never add a success message", async (context) => {
@@ -223,7 +243,7 @@ test("rejected and malformed steering acknowledgements retain input and never ad
       assert.equal(await steerSession(ready.id, `keep ${result.status}`), false);
       assert.equal(sessions.value[0]?.steerPending, false);
       assert.equal(sessions.value[0]?.messages.some(({ kind }) => kind === "steer"), false);
-      assert.match(sessions.value[0]?.errorMessage ?? "", result.status === "rejected" ? /拒否/ : /受付結果/);
+      assert.match(localizeRuntimeMessage(sessions.value[0]!.errorMessage!), result.status === "rejected" ? /拒否/ : /受付結果/);
       sessions.value = [reduceChatGatewayEvent(sessions.value[0]!, {
         type: "message.complete", liveSessionId: "live", payload: { messageId: "agent-done", text: "done" }
       })];
@@ -287,7 +307,7 @@ test("same-target terminal events retain steering until queued or rejected ackno
         assert.equal(sessions.value[0]?.steerPending, false);
         assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, outcome === "queued" ? 1 : 0);
         assert.equal(canSubmitChatPrompt(sessions.value[0]!), true);
-        if (outcome === "rejected") assert.match(sessions.value[0]?.errorMessage ?? "", /拒否/);
+        if (outcome === "rejected") assert.match(localizeRuntimeMessage(sessions.value[0]!.errorMessage!), /拒否/);
       });
     }
   }

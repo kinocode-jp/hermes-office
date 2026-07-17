@@ -1,10 +1,30 @@
 import type { Signal } from "@preact/signals";
-import type { ChatSession } from "./domain";
+import type { ChatMessage, ChatSession } from "./domain";
 import type { ChatSteerResult } from "./chat-api";
 import { canSteerChatSession, isChatRunActive } from "./session-runtime";
 import { nowTime } from "./chat-store-utils";
+import { officeMessage } from "./i18n";
 
 type SessionState = Signal<ChatSession[]>;
+
+export const MAX_STEER_EVIDENCE_COUNT = 64;
+// Larger than Hermes' maximum accepted steer body so one acknowledged
+// operation is never immediately evicted solely because of its own payload.
+export const MAX_STEER_EVIDENCE_BYTES = 256 * 1024;
+
+export function boundedSteerEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
+  const evidence = messages.filter((message) => message.kind === "steer").slice(-MAX_STEER_EVIDENCE_COUNT);
+  let bytes = evidence.reduce((total, message) => total + steerEvidenceBytes(message), 0);
+  while (evidence.length > 0 && bytes > MAX_STEER_EVIDENCE_BYTES) {
+    bytes -= steerEvidenceBytes(evidence.shift()!);
+  }
+  return evidence;
+}
+
+export function retainBoundedSteerEvidence(messages: readonly ChatMessage[]): ChatMessage[] {
+  const retained = new Set(boundedSteerEvidence(messages));
+  return messages.filter((message) => message.kind !== "steer" || retained.has(message));
+}
 
 export function invalidatePendingSteer(session: ChatSession): ChatSession {
   if (session.steerPending !== true && session.steerOperationId === undefined) return session;
@@ -30,8 +50,8 @@ export async function steerChatRun(
         steerPending: false,
         steerOperationId: undefined,
         errorMessage: result.status === "rejected"
-          ? "Hermesが追加指示を拒否しました。内容を確認して再試行してください。"
-          : "Hermesが追加指示の受付結果を返しませんでした。内容を保持しています。",
+          ? officeMessage("runtime.chat.steerRejected")
+          : officeMessage("runtime.chat.steerInvalidAck"),
       } : item);
       return false;
     }
@@ -39,7 +59,7 @@ export async function steerChatRun(
       ...item,
       steerPending: false,
       steerOperationId: undefined,
-      messages: [...item.messages, { id: operationId, from: "user", kind: "steer", body: trimmed, at: nowTime() }],
+      messages: retainBoundedSteerEvidence([...item.messages, { id: operationId, from: "user", kind: "steer", body: trimmed, at: nowTime() }]),
     } : item);
     return state.value.some((item) => item.id === sessionId && item.messages.some(({ id }) => id === operationId));
   } catch {
@@ -47,7 +67,7 @@ export async function steerChatRun(
       ...item,
       steerPending: false,
       steerOperationId: undefined,
-      errorMessage: "追加指示を送信できませんでした。接続を確認して再試行してください。",
+      errorMessage: officeMessage("runtime.chat.steerSendFailed"),
     } : item);
     return false;
   }
@@ -74,4 +94,8 @@ export function interruptChatRun(
 
 function updateSession(state: SessionState, sessionId: string, update: (session: ChatSession) => ChatSession): void {
   state.value = state.value.map((session) => session.id === sessionId ? update(session) : session);
+}
+
+function steerEvidenceBytes(message: ChatMessage): number {
+  return new TextEncoder().encode(`${message.id}\0${message.body}\0${message.at}`).byteLength;
 }

@@ -1,27 +1,38 @@
 import { signal } from "@preact/signals";
 import type { KanbanConnectionState, TaskWritableStatus, WorkTask } from "./domain";
-import type { KanbanApi } from "./kanban-api";
+import { classifyKanbanMutationFailure, type KanbanApi } from "./kanban-api";
 import { createTaskCommentController } from "./kanban-comments";
+import { officeMessage, type RuntimeMessage } from "./i18n";
+
+type KanbanState = { state: KanbanConnectionState; message: RuntimeMessage; latestEventId: number };
+type MutationContext = { api: KanbanApi; runtime: number; operation: number; message: RuntimeMessage };
+export type KanbanSubmissionOutcome = "success" | "rejected" | "commit-unknown" | "stale";
+export type UnconfirmedSubmission = { input: string; operation: number; checked: boolean; checking: boolean };
 
 export const tasks = signal<WorkTask[]>([]);
 export const kanbanAssignees = signal<string[]>([]);
-export const kanbanState = signal<{ state: KanbanConnectionState; message: string; latestEventId: number }>({
+export const kanbanState = signal<KanbanState>({
   state: "idle",
-  message: "Hermes Kanbanへ接続しています",
+  message: officeMessage("runtime.kanban.connecting"),
   latestEventId: 0
 });
+export const unconfirmedTaskCreation = signal<UnconfirmedSubmission | undefined>(undefined);
+export const unconfirmedTaskComments = signal<Record<string, UnconfirmedSubmission>>({});
 
 let kanbanApi: KanbanApi | undefined;
 let liveKanbanApi: KanbanApi | undefined;
 let demoRuntimeActive = false;
-let kanbanMutations = 0;
 let kanbanRefresh: Promise<void> | undefined;
 let kanbanRefreshRequested = 0;
 let kanbanRefreshCompleted = 0;
+const kanbanRefreshOutcomes = new Map<number, boolean>();
 let boardGeneration = 0;
 let runtimeGeneration = 0;
 let operationGeneration = 0;
+let boardError: RuntimeMessage | undefined;
+let mutationError: { runtime: number; operation: number; message: RuntimeMessage } | undefined;
 const currentOperations = new Map<string, number>();
+const pendingMutations = new Map<number, MutationContext>();
 let updateProfileTaskCounts = (_counts: ReadonlyMap<string, number>) => {};
 
 const taskComments = createTaskCommentController(() => kanbanApi);
@@ -37,38 +48,57 @@ export function registerKanbanProfileTaskUpdater(update: (counts: ReadonlyMap<st
 export function registerKanbanRuntime(api: KanbanApi): void {
   liveKanbanApi = api;
   if (demoRuntimeActive) return;
-  kanbanApi = api;
-  runtimeGeneration += 1;
+  activateRuntime(api);
   void refreshKanbanBoard();
 }
 
 export function loadKanbanDemoRuntime(api: KanbanApi): void {
   demoRuntimeActive = true;
-  kanbanApi = api;
-  runtimeGeneration += 1;
-  currentOperations.clear();
-  kanbanMutations = 0;
-  taskComments.collapse();
-  tasks.value = [];
-  kanbanAssignees.value = [];
-  kanbanState.value = { state: "loading", message: "Hermes Kanbanを読み込み中", latestEventId: 0 };
+  activateRuntime(api);
+  kanbanState.value = { state: "loading", message: officeMessage("runtime.kanban.loading"), latestEventId: 0 };
   void refreshKanbanBoard();
 }
 
-export async function refreshKanbanBoard(): Promise<void> {
-  if (!kanbanApi) return;
+function activateRuntime(api: KanbanApi | undefined): void {
+  runtimeGeneration += 1;
+  kanbanApi = api;
+  currentOperations.clear();
+  pendingMutations.clear();
+  boardError = undefined;
+  mutationError = undefined;
+  unconfirmedTaskCreation.value = undefined;
+  unconfirmedTaskComments.value = {};
+  taskComments.collapse();
+  tasks.value = [];
+  kanbanAssignees.value = [];
+}
+
+export async function refreshKanbanBoard(options: { acknowledgeErrors?: boolean } = {}): Promise<boolean> {
+  if (!kanbanApi) return false;
+  const runtime = runtimeGeneration;
+  if (options.acknowledgeErrors) {
+    boardError = undefined;
+    mutationError = undefined;
+  }
   const requested = ++kanbanRefreshRequested;
   while (kanbanRefreshCompleted < requested) {
     kanbanRefresh ??= drainKanbanRefreshes();
     await kanbanRefresh;
   }
+  const succeeded = kanbanRefreshOutcomes.get(requested) ?? false;
+  kanbanRefreshOutcomes.delete(requested);
+  return succeeded && runtime === runtimeGeneration;
 }
 
 async function drainKanbanRefreshes(): Promise<void> {
   try {
     while (kanbanRefreshCompleted < kanbanRefreshRequested) {
+      const previous = kanbanRefreshCompleted;
       const generation = kanbanRefreshRequested;
-      await loadKanbanBoard();
+      const succeeded = await loadKanbanBoard();
+      for (let request = previous + 1; request <= generation; request += 1) {
+        kanbanRefreshOutcomes.set(request, succeeded);
+      }
       kanbanRefreshCompleted = generation;
     }
   } finally {
@@ -76,135 +106,286 @@ async function drainKanbanRefreshes(): Promise<void> {
   }
 }
 
-async function loadKanbanBoard(): Promise<void> {
+async function loadKanbanBoard(): Promise<boolean> {
   const api = kanbanApi!;
   const runtime = runtimeGeneration;
-  kanbanState.value = { ...kanbanState.value, state: "loading", message: "Hermes Kanbanを読み込み中" };
+  if (!hasCurrentMutations() && !currentError()) {
+    kanbanState.value = { ...kanbanState.value, state: "loading", message: officeMessage("runtime.kanban.loading") };
+  }
   try {
     const board = await api.fetchBoard();
-    if (api !== kanbanApi || runtime !== runtimeGeneration) return;
+    if (api !== kanbanApi || runtime !== runtimeGeneration) return false;
     boardGeneration += 1;
+    boardError = undefined;
     tasks.value = board.tasks.map((task) => currentOperations.has(task.id) ? { ...task, pending: true } : task);
     kanbanAssignees.value = board.assignees;
-    kanbanState.value = { state: "ready", message: `${board.tasks.length}件のカード`, latestEventId: board.latestEventId };
+    kanbanState.value = { ...kanbanState.value, latestEventId: board.latestEventId };
     notifyProfileTaskCounts();
     const expanded = expandedTaskId.value;
     if (expanded && !board.tasks.some((task) => task.id === expanded)) taskComments.collapse();
-    else void taskComments.refreshIfExpanded();
+    else await taskComments.refreshIfExpanded();
+    if (api !== kanbanApi || runtime !== runtimeGeneration) return false;
+    publishKanbanState();
+    return true;
   } catch (error) {
-    if (api !== kanbanApi || runtime !== runtimeGeneration) return;
-    setKanbanError(error);
+    if (api !== kanbanApi || runtime !== runtimeGeneration) return false;
+    boardError = errorRuntimeMessage(error);
+    publishKanbanState();
+    return false;
   }
 }
 
 export function resetKanbanRuntimeState(): void {
-  runtimeGeneration += 1;
   demoRuntimeActive = false;
-  kanbanApi = liveKanbanApi;
-  tasks.value = [];
-  kanbanAssignees.value = [];
-  taskComments.collapse();
-  currentOperations.clear();
-  kanbanMutations = 0;
-  kanbanState.value = { state: "idle", message: "Hermes runtimeの準備を待っています", latestEventId: 0 };
+  activateRuntime(liveKanbanApi);
+  kanbanState.value = { state: "idle", message: officeMessage("runtime.kanban.waiting"), latestEventId: 0 };
   notifyProfileTaskCounts();
 }
 
 export async function assignTask(taskId: string, profileId: string | null): Promise<void> {
-  if (!kanbanApi) return;
+  const api = kanbanApi;
   const previous = tasks.value.find((task) => task.id === taskId);
   const nextAssignee = profileId ?? undefined;
-  if (!previous || previous.pending || previous.assigneeId === nextAssignee) return;
-  const operation = beginTaskOperation(taskId, { ...previous, assigneeId: nextAssignee });
+  if (!api || !previous || previous.pending || previous.assigneeId === nextAssignee) return;
+  const context = beginMutation(api, officeMessage("runtime.kanban.assigning"));
+  beginTaskOperation(taskId, context.operation, { ...previous, assigneeId: nextAssignee });
   const startedAtBoard = boardGeneration;
-  beginKanbanMutation("担当を更新中");
   try {
-    await kanbanApi.updateCard(taskId, { assignee: profileId });
+    await context.api.updateCard(taskId, { assignee: profileId });
+    if (!isCurrent(context)) return;
     await refreshKanbanBoard();
   } catch (error) {
+    if (!isCurrent(context)) return;
     await refreshKanbanBoard();
-    if (boardGeneration === startedAtBoard) rollbackAssignee(taskId, operation, nextAssignee, previous.assigneeId);
-    failKanbanMutation(error);
-    finishTaskOperation(taskId, operation);
+    if (!isCurrent(context)) return;
+    if (boardGeneration === startedAtBoard) rollbackAssignee(taskId, context.operation, nextAssignee, previous.assigneeId);
+    finishTaskOperation(taskId, context.operation);
+    failMutation(context, errorRuntimeMessage(error));
     return;
   }
-  finishTaskOperation(taskId, operation);
-  finishKanbanMutation(boardGeneration === startedAtBoard);
+  if (!isCurrent(context)) return;
+  finishTaskOperation(taskId, context.operation);
+  finishMutation(context);
 }
 
 export async function moveTask(taskId: string, status: TaskWritableStatus): Promise<void> {
-  if (!kanbanApi) return;
+  const api = kanbanApi;
   const previous = tasks.value.find((task) => task.id === taskId);
-  if (!previous || previous.pending || previous.status === status) return;
-  const operation = beginTaskOperation(taskId, { ...previous, status });
+  if (!api || !previous || previous.pending || previous.status === status) return;
+  const context = beginMutation(api, officeMessage("runtime.kanban.moving"));
+  beginTaskOperation(taskId, context.operation, { ...previous, status });
   const startedAtBoard = boardGeneration;
-  beginKanbanMutation("カードを移動中");
   try {
-    await kanbanApi.updateCard(taskId, { status });
+    await context.api.updateCard(taskId, { status });
+    if (!isCurrent(context)) return;
     await refreshKanbanBoard();
   } catch (error) {
+    if (!isCurrent(context)) return;
     await refreshKanbanBoard();
-    if (boardGeneration === startedAtBoard) rollbackStatus(taskId, operation, status, previous.status);
-    failKanbanMutation(error);
-    finishTaskOperation(taskId, operation);
+    if (!isCurrent(context)) return;
+    if (boardGeneration === startedAtBoard) rollbackStatus(taskId, context.operation, status, previous.status);
+    finishTaskOperation(taskId, context.operation);
+    failMutation(context, errorRuntimeMessage(error));
     return;
   }
-  finishTaskOperation(taskId, operation);
-  finishKanbanMutation(boardGeneration === startedAtBoard);
+  if (!isCurrent(context)) return;
+  finishTaskOperation(taskId, context.operation);
+  finishMutation(context);
 }
 
-export async function createTask(title: string): Promise<boolean> {
+export async function createTask(title: string): Promise<KanbanSubmissionOutcome> {
   const trimmed = title.trim();
-  if (!trimmed || !kanbanApi) return false;
+  const api = kanbanApi;
+  if (!trimmed || !api) return "rejected";
+  if (unconfirmedTaskCreation.value) return "commit-unknown";
+  const context = beginMutation(api, officeMessage("runtime.kanban.creating"));
   const temporaryId = `pending-${crypto.randomUUID()}`;
   const startedAtBoard = boardGeneration;
   tasks.value = [...tasks.value, { id: temporaryId, title: trimmed, status: "triage", priority: "normal", comments: 0, pending: true }];
-  beginKanbanMutation("カードを作成中");
   try {
-    const created = await kanbanApi.createCard(trimmed);
+    const created = await context.api.createCard(trimmed);
+    if (!isCurrent(context)) return "stale";
     await refreshKanbanBoard();
+    if (!isCurrent(context)) return "stale";
     if (boardGeneration === startedAtBoard) {
       tasks.value = tasks.value.map((task) => task.id === temporaryId ? { ...created, pending: false } : task);
       notifyProfileTaskCounts();
     }
-    finishKanbanMutation(boardGeneration === startedAtBoard);
-    return true;
+    finishMutation(context);
+    return "success";
   } catch (error) {
+    if (!isCurrent(context)) return "stale";
     tasks.value = tasks.value.filter((task) => task.id !== temporaryId);
-    failKanbanMutation(error);
-    return false;
+    const kind = classifyKanbanMutationFailure(error);
+    if (kind === "commit-unknown") {
+      unconfirmedTaskCreation.value = { input: trimmed, operation: context.operation, checked: false, checking: false };
+      failMutation(context, officeMessage("kanban.unknown.title"));
+      return kind;
+    }
+    failMutation(context, errorRuntimeMessage(error));
+    return "rejected";
   }
 }
 
-export async function addTaskComment(taskId: string, body: string): Promise<boolean> {
+export async function addTaskComment(taskId: string, body: string): Promise<KanbanSubmissionOutcome> {
   const trimmed = body.trim();
-  if (!trimmed || !kanbanApi) return false;
+  const api = kanbanApi;
   const previous = tasks.value.find((task) => task.id === taskId);
-  if (!previous || previous.pending) return false;
+  if (!trimmed || !api || !previous || previous.pending) return "rejected";
+  if (unconfirmedTaskComments.value[taskId]) return "commit-unknown";
+  const context = beginMutation(api, officeMessage("runtime.kanban.commenting"));
   const optimisticCount = previous.comments + 1;
-  const operation = beginTaskOperation(taskId, { ...previous, comments: optimisticCount });
+  beginTaskOperation(taskId, context.operation, { ...previous, comments: optimisticCount });
   const startedAtBoard = boardGeneration;
-  beginKanbanMutation("コメントを送信中");
   try {
-    await kanbanApi.addComment(taskId, trimmed);
-    await refreshKanbanBoard();
+    await context.api.addComment(taskId, trimmed);
+    if (!isCurrent(context)) return "stale";
   } catch (error) {
+    if (!isCurrent(context)) return "stale";
+    const kind = classifyKanbanMutationFailure(error);
+    if (kind === "commit-unknown") {
+      rollbackCommentCount(taskId, context.operation, optimisticCount, previous.comments);
+      finishTaskOperation(taskId, context.operation);
+      unconfirmedTaskComments.value = {
+        ...unconfirmedTaskComments.value,
+        [taskId]: { input: trimmed, operation: context.operation, checked: false, checking: false }
+      };
+      failMutation(context, officeMessage("kanban.unknown.title"));
+      return kind;
+    }
     await refreshKanbanBoard();
-    if (boardGeneration === startedAtBoard) rollbackCommentCount(taskId, operation, optimisticCount, previous.comments);
-    failKanbanMutation(error);
-    finishTaskOperation(taskId, operation);
-    return false;
+    if (!isCurrent(context)) return "stale";
+    if (boardGeneration === startedAtBoard) rollbackCommentCount(taskId, context.operation, optimisticCount, previous.comments);
+    finishTaskOperation(taskId, context.operation);
+    failMutation(context, errorRuntimeMessage(error));
+    return "rejected";
   }
-  finishTaskOperation(taskId, operation);
-  finishKanbanMutation(boardGeneration === startedAtBoard);
-  return true;
+
+  const boardSucceeded = await refreshKanbanBoard();
+  if (!isCurrent(context)) return "stale";
+  let detailSucceeded = true;
+  if (!boardSucceeded && expandedTaskId.value === taskId) {
+    detailSucceeded = await taskComments.refreshIfExpanded(taskId) === true;
+  } else if (expandedTaskId.value === taskId) {
+    detailSucceeded = taskCommentDetail.value.cardId === taskId && taskCommentDetail.value.state === "ready";
+  }
+  if (!isCurrent(context)) return "stale";
+  finishTaskOperation(taskId, context.operation);
+  if (!boardSucceeded || !detailSucceeded) {
+    failMutation(context, officeMessage("kanban.commentSentRefreshFailed"));
+  } else {
+    finishMutation(context);
+  }
+  return "success";
 }
 
-function beginTaskOperation(taskId: string, optimistic: WorkTask): number {
-  const operation = ++operationGeneration;
+export async function confirmUnconfirmedTaskCreation(): Promise<boolean> {
+  const pending = unconfirmedTaskCreation.value;
+  const runtime = runtimeGeneration;
+  if (!pending || pending.checking) return false;
+  unconfirmedTaskCreation.value = { ...pending, checking: true };
+  const succeeded = await refreshKanbanBoard();
+  if (runtime !== runtimeGeneration || unconfirmedTaskCreation.value?.input !== pending.input) return false;
+  unconfirmedTaskCreation.value = { ...pending, checked: succeeded, checking: false };
+  return succeeded;
+}
+
+export function allowUnconfirmedTaskResend(): void {
+  const pending = unconfirmedTaskCreation.value;
+  if (!pending?.checked) return;
+  unconfirmedTaskCreation.value = undefined;
+  acknowledgeMutationError(pending.operation);
+}
+
+export async function confirmUnconfirmedComment(taskId: string): Promise<boolean> {
+  const pending = unconfirmedTaskComments.value[taskId];
+  const runtime = runtimeGeneration;
+  if (!pending || pending.checking) return false;
+  unconfirmedTaskComments.value = updateUnconfirmedComment(taskId, { ...pending, checking: true });
+  await refreshKanbanBoard();
+  let succeeded = expandedTaskId.value === taskId
+    && taskCommentDetail.value.cardId === taskId
+    && taskCommentDetail.value.state === "ready";
+  if (!succeeded && expandedTaskId.value === taskId) {
+    succeeded = await taskComments.refreshIfExpanded(taskId) === true;
+  }
+  if (runtime !== runtimeGeneration || unconfirmedTaskComments.value[taskId]?.input !== pending.input) return false;
+  unconfirmedTaskComments.value = updateUnconfirmedComment(taskId, { ...pending, checked: succeeded, checking: false });
+  return succeeded;
+}
+
+export function allowUnconfirmedCommentResend(taskId: string): void {
+  const pending = unconfirmedTaskComments.value[taskId];
+  if (!pending?.checked) return;
+  const next = { ...unconfirmedTaskComments.value };
+  delete next[taskId];
+  unconfirmedTaskComments.value = next;
+  acknowledgeMutationError(pending.operation);
+}
+
+function updateUnconfirmedComment(taskId: string, value: UnconfirmedSubmission): Record<string, UnconfirmedSubmission> {
+  return { ...unconfirmedTaskComments.value, [taskId]: value };
+}
+
+function acknowledgeMutationError(operation: number): void {
+  if (mutationError?.runtime === runtimeGeneration && mutationError.operation === operation) {
+    mutationError = undefined;
+    publishKanbanState();
+  }
+}
+
+function beginMutation(api: KanbanApi, message: RuntimeMessage): MutationContext {
+  const context = { api, runtime: runtimeGeneration, operation: ++operationGeneration, message };
+  pendingMutations.set(context.operation, context);
+  publishKanbanState();
+  return context;
+}
+
+function isCurrent(context: MutationContext): boolean {
+  return context.api === kanbanApi
+    && context.runtime === runtimeGeneration
+    && pendingMutations.get(context.operation) === context;
+}
+
+function finishMutation(context: MutationContext): void {
+  if (!isCurrent(context)) return;
+  pendingMutations.delete(context.operation);
+  publishKanbanState();
+}
+
+function failMutation(context: MutationContext, message: RuntimeMessage): void {
+  if (!isCurrent(context)) return;
+  pendingMutations.delete(context.operation);
+  mutationError = { runtime: context.runtime, operation: context.operation, message };
+  publishKanbanState();
+}
+
+function hasCurrentMutations(): boolean {
+  return [...pendingMutations.values()].some((operation) => operation.runtime === runtimeGeneration);
+}
+
+function currentError(): RuntimeMessage | undefined {
+  return mutationError?.runtime === runtimeGeneration ? mutationError.message : boardError;
+}
+
+function publishKanbanState(): void {
+  const error = currentError();
+  if (error) {
+    kanbanState.value = { ...kanbanState.value, state: "error", message: error };
+    return;
+  }
+  const active = [...pendingMutations.values()].filter((operation) => operation.runtime === runtimeGeneration);
+  const latest = active.at(-1);
+  kanbanState.value = {
+    ...kanbanState.value,
+    state: latest ? "saving" : "ready",
+    message: latest ? latest.message : officeMessage("runtime.kanban.count", { count: tasks.value.length })
+  };
+}
+
+function beginTaskOperation(taskId: string, operation: number, optimistic: WorkTask): void {
   currentOperations.set(taskId, operation);
   tasks.value = tasks.value.map((task) => task.id === taskId ? { ...optimistic, pending: true } : task);
-  return operation;
 }
 
 function finishTaskOperation(taskId: string, operation: number): void {
@@ -230,32 +411,10 @@ function rollbackCommentCount(taskId: string, operation: number, optimistic: num
   tasks.value = tasks.value.map((task) => task.id === taskId && task.comments === optimistic ? { ...task, comments: previous } : task);
 }
 
-function beginKanbanMutation(message: string): void {
-  kanbanMutations += 1;
-  kanbanState.value = { ...kanbanState.value, state: "saving", message };
-}
-
-function finishKanbanMutation(preserveError = false): void {
-  kanbanMutations = Math.max(0, kanbanMutations - 1);
-  if (preserveError && kanbanMutations === 0) return;
-  kanbanState.value = {
-    ...kanbanState.value,
-    state: kanbanMutations > 0 ? "saving" : "ready",
-    message: kanbanMutations > 0 ? "変更を保存中" : `${tasks.value.length}件のカード`
-  };
-}
-
-function failKanbanMutation(error: unknown): void {
-  kanbanMutations = Math.max(0, kanbanMutations - 1);
-  setKanbanError(error);
-}
-
-function setKanbanError(error: unknown): void {
-  kanbanState.value = {
-    ...kanbanState.value,
-    state: "error",
-    message: error instanceof Error ? error.message : "Hermes Kanbanを更新できませんでした"
-  };
+function errorRuntimeMessage(error: unknown): RuntimeMessage {
+  if (typeof error === "string") return officeMessage("runtime.office.error", { detail: error });
+  if (error instanceof Error) return officeMessage("runtime.office.error", { detail: error.message });
+  return officeMessage("runtime.kanban.updateFailed");
 }
 
 function notifyProfileTaskCounts(): void {

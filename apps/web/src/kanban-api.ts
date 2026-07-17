@@ -1,5 +1,5 @@
 import type { TaskComment, TaskStatus, TaskWritableStatus, WorkTask } from "./domain";
-import { officeFetchJson } from "./office-api";
+import { OfficeHttpError, officeFetchJson } from "./office-api";
 
 export type KanbanBoardResult = {
   tasks: WorkTask[];
@@ -22,6 +22,31 @@ export type KanbanApi = {
   addComment(cardId: string, body: string): Promise<void>;
 };
 
+export type KanbanMutationFailureKind = "rejected" | "commit-unknown";
+
+export class KanbanMutationFailure extends Error {
+  constructor(readonly kind: KanbanMutationFailureKind, cause: unknown) {
+    super(kind === "commit-unknown"
+      ? "The Kanban update may have been saved, but its result could not be confirmed."
+      : errorMessage(cause), { cause });
+    this.name = "KanbanMutationFailure";
+  }
+}
+
+/**
+ * A 4xx response (other than Request Timeout) proves that Office Server
+ * rejected the request. Transport failures, 5xx responses, and invalid 2xx
+ * bodies happen after a non-idempotent request may have committed, so callers
+ * must not present them as safe-to-retry failures.
+ */
+export function classifyKanbanMutationFailure(error: unknown): KanbanMutationFailureKind {
+  if (error instanceof KanbanMutationFailure) return error.kind;
+  if (error instanceof OfficeHttpError && error.status >= 400 && error.status < 500 && error.status !== 408) {
+    return "rejected";
+  }
+  return "commit-unknown";
+}
+
 const READ_STATUSES = new Set<TaskStatus>([
   "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"
 ]);
@@ -42,12 +67,16 @@ export function createKanbanApi(): KanbanApi {
       return normalizeCardDetail(value, cardId);
     },
     async createCard(title) {
-      const value = await officeFetchJson<unknown>("/api/v1/kanban/cards", {
-        method: "POST",
-        body: { title, triage: true },
-        timeoutMs: 8_000
-      });
-      return normalizeCardResult(value);
+      try {
+        const value = await officeFetchJson<unknown>("/api/v1/kanban/cards", {
+          method: "POST",
+          body: { title, triage: true },
+          timeoutMs: 8_000
+        });
+        return normalizeCardResult(value);
+      } catch (error) {
+        throw asKanbanMutationFailure(error);
+      }
     },
     async updateCard(cardId, patch) {
       const value = await officeFetchJson<unknown>(`/api/v1/kanban/cards/${encodeURIComponent(cardId)}`, {
@@ -58,13 +87,27 @@ export function createKanbanApi(): KanbanApi {
       return normalizeCardResult(value);
     },
     async addComment(cardId, body) {
-      await officeFetchJson<unknown>(`/api/v1/kanban/cards/${encodeURIComponent(cardId)}/comments`, {
-        method: "POST",
-        body: { body },
-        timeoutMs: 8_000
-      });
+      try {
+        await officeFetchJson<unknown>(`/api/v1/kanban/cards/${encodeURIComponent(cardId)}/comments`, {
+          method: "POST",
+          body: { body },
+          timeoutMs: 8_000
+        });
+      } catch (error) {
+        throw asKanbanMutationFailure(error);
+      }
     }
   };
+}
+
+function asKanbanMutationFailure(error: unknown): KanbanMutationFailure {
+  return error instanceof KanbanMutationFailure
+    ? error
+    : new KanbanMutationFailure(classifyKanbanMutationFailure(error), error);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Hermes Kanban could not be updated.";
 }
 
 export function normalizeCardDetail(value: unknown, requestedCardId: string): KanbanCardDetailResult {

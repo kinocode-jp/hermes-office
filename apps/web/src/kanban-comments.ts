@@ -45,15 +45,15 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
     if (cardId) await load(cardId, true);
   }
 
-  async function refreshIfExpanded(cardId?: string): Promise<void> {
+  async function refreshIfExpanded(cardId?: string): Promise<boolean | undefined> {
     const expanded = expandedTaskId.value;
-    if (!expanded || (cardId !== undefined && expanded !== cardId)) return;
-    await load(expanded, true);
+    if (!expanded || (cardId !== undefined && expanded !== cardId)) return undefined;
+    return await load(expanded, true);
   }
 
-  async function load(cardId: string, preserveComments: boolean): Promise<void> {
+  async function load(cardId: string, preserveComments: boolean): Promise<boolean> {
     const api = getApi();
-    if (!api || expandedTaskId.value !== cardId) return;
+    if (!api || expandedTaskId.value !== cardId) return false;
     const generation = ++loadGeneration;
     const previous = taskCommentDetail.value.cardId === cardId ? taskCommentDetail.value : idleState();
     taskCommentDetail.value = {
@@ -66,7 +66,7 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
     };
     try {
       const detail = await api.fetchCard(cardId);
-      if (generation !== loadGeneration || expandedTaskId.value !== cardId) return;
+      if (generation !== loadGeneration || expandedTaskId.value !== cardId || api !== getApi()) return false;
       taskCommentDetail.value = {
         cardId,
         state: "ready",
@@ -75,14 +75,16 @@ export function createTaskCommentController(getApi: () => KanbanApi | undefined)
         truncated: detail.truncated,
         message: ""
       };
+      return true;
     } catch (error) {
-      if (generation !== loadGeneration || expandedTaskId.value !== cardId) return;
+      if (generation !== loadGeneration || expandedTaskId.value !== cardId || api !== getApi()) return false;
       taskCommentDetail.value = {
         ...taskCommentDetail.value,
         cardId,
         state: "error",
         message: error instanceof Error ? error.message : "Kanban comments are unavailable."
       };
+      return false;
     }
   }
 

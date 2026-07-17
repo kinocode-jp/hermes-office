@@ -15,6 +15,14 @@ import {
   tasks,
   toggleTaskComments
 } from "../store";
+import {
+  allowUnconfirmedCommentResend,
+  allowUnconfirmedTaskResend,
+  confirmUnconfirmedComment,
+  confirmUnconfirmedTaskCreation,
+  unconfirmedTaskComments,
+  unconfirmedTaskCreation
+} from "../kanban-store";
 
 const columns: Array<{ id: TaskStatus; label: TranslationKey; caption: TranslationKey; writable?: TaskWritableStatus }> = [
   { id: "triage", label: "kanban.column.triage", caption: "kanban.caption.triage", writable: "triage" },
@@ -41,12 +49,13 @@ function TaskCard({ task }: { task: WorkTask }) {
     : profileList.value.filter((profile) => kanbanAssignees.value.includes(profile.id));
   const expanded = expandedTaskId.value === task.id;
   const detail = taskCommentDetail.value.cardId === task.id ? taskCommentDetail.value : undefined;
+  const unconfirmedComment = unconfirmedTaskComments.value[task.id];
 
   const submitComment = async (event: SubmitEvent) => {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
     const input = form.elements.namedItem("comment") as HTMLInputElement;
-    if (await addTaskComment(task.id, input.value)) form.reset();
+    if (await addTaskComment(task.id, input.value) === "success") form.reset();
   };
 
   return (
@@ -120,11 +129,44 @@ function TaskCard({ task }: { task: WorkTask }) {
           {detail?.truncated && <p class="task-comments-limit">{t("kanban.commentsLimited", { shown: detail.comments.length, count: detail.availableCommentCount })}</p>}
           <form class="task-comment-form" onSubmit={submitComment}>
             <input name="comment" aria-label={t("kanban.commentAria", { title: task.title })} placeholder={t("kanban.commentPlaceholder")} maxLength={16000} required />
-            <button type="submit" disabled={task.pending}>{t("chat.send")}</button>
+            <button type="submit" disabled={task.pending || Boolean(unconfirmedComment)}>{t("chat.send")}</button>
           </form>
+          {unconfirmedComment && (
+            <UnconfirmedSubmissionNotice
+              detail={t("kanban.unknown.comment")}
+              checked={unconfirmedComment.checked}
+              checking={unconfirmedComment.checking}
+              onCheck={() => void confirmUnconfirmedComment(task.id)}
+              onAllow={() => allowUnconfirmedCommentResend(task.id)}
+            />
+          )}
         </section>
       )}
     </article>
+  );
+}
+
+function UnconfirmedSubmissionNotice({
+  detail,
+  checked,
+  checking,
+  onCheck,
+  onAllow
+}: {
+  detail: string;
+  checked: boolean;
+  checking: boolean;
+  onCheck(): void;
+  onAllow(): void;
+}) {
+  return (
+    <section class="kanban-unconfirmed" role="alert">
+      <strong>{t("kanban.unknown.title")}</strong>
+      <p>{checked ? t("kanban.unknown.checked") : detail}</p>
+      {checked
+        ? <button type="button" onClick={onAllow}>{t("kanban.unknown.retry")}</button>
+        : <button type="button" disabled={checking} onClick={onCheck}>{t("kanban.unknown.check")}</button>}
+    </section>
   );
 }
 
@@ -133,7 +175,7 @@ export function KanbanBoard() {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
     const input = form.elements.namedItem("task-title") as HTMLInputElement;
-    if (await createTask(input.value)) form.reset();
+    if (await createTask(input.value) === "success") form.reset();
   };
   const boardState = kanbanState.value;
 
@@ -146,12 +188,21 @@ export function KanbanBoard() {
         </div>
         <div class={`kanban-sync state-${boardState.state}`} role={boardState.state === "error" ? "alert" : "status"}>
           <span>{localizeRuntimeMessage(boardState.message)}</span>
-          <button type="button" onClick={() => void refreshKanbanBoard()} disabled={boardState.state === "loading"}>{t("kanban.reload")}</button>
+          <button type="button" onClick={() => void refreshKanbanBoard({ acknowledgeErrors: true })} disabled={boardState.state === "loading"}>{t("kanban.reload")}</button>
         </div>
         <form class="task-create" onSubmit={submitTask}>
           <input name="task-title" aria-label={t("kanban.newTask")} placeholder={t("kanban.newTaskPlaceholder")} maxLength={240} required />
-          <button class="primary-button" type="submit" disabled={boardState.state === "loading"}>{t("kanban.add")}</button>
+          <button class="primary-button" type="submit" disabled={boardState.state === "loading" || Boolean(unconfirmedTaskCreation.value)}>{t("kanban.add")}</button>
         </form>
+        {unconfirmedTaskCreation.value && (
+          <UnconfirmedSubmissionNotice
+            detail={t("kanban.unknown.task")}
+            checked={unconfirmedTaskCreation.value.checked}
+            checking={unconfirmedTaskCreation.value.checking}
+            onCheck={() => void confirmUnconfirmedTaskCreation()}
+            onAllow={allowUnconfirmedTaskResend}
+          />
+        )}
       </header>
 
       <div class="kanban-board">

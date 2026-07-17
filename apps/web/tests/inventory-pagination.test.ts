@@ -22,6 +22,17 @@ test("a stored session loaded after the snapshot page remains selectable and res
   assert.deepEqual(getOpenChatTargets().at(-1), { clientSessionId: clientId, profileId: "profile-0", storedSessionId: "session-100" });
 });
 
+test("an authoritative inventory row clears a promoted draft title presentation", () => {
+  sessions.value = [{
+    id: "draft-client", storedSessionId: "stored-draft", liveSessionId: "live-draft", profileId: "profile-0",
+    title: "", titlePresentation: "new-chat", status: "ready", messages: [], remoteKind: "stored",
+  }];
+  mergeInventoryPage(sessionPage([{ id: "stored-draft", profileId: "profile-0", title: "正式タイトル", activity: "idle" }]));
+  assert.equal(sessions.value[0]?.id, "draft-client");
+  assert.equal(sessions.value[0]?.title, "正式タイトル");
+  assert.equal(sessions.value[0]?.titlePresentation, undefined);
+});
+
 test("same raw session IDs in one continuation page keep distinct profile-scoped identities", () => {
   sessions.value = [];
   openSessionIds.value = [];

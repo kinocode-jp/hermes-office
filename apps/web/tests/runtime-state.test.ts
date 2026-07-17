@@ -19,11 +19,13 @@ import {
   registerKanbanRuntime,
   refreshKanbanBoard,
   sessions,
+  setChatSessionReady,
   setOfficeError,
   taskCommentDetail,
   toggleTaskComments,
   tasks
 } from "../src/store.ts";
+import { chatSessionTitle, locale, localizeRuntimeMessage, setLocale } from "../src/i18n.ts";
 
 const serverUrl = "http://127.0.0.1:4317";
 
@@ -104,7 +106,7 @@ test("demo Kanban supports its primary interactions without Hermes", async () =>
   await toggleTaskComments("t-104");
   assert.equal(taskCommentDetail.value.state, "ready");
   assert.equal(taskCommentDetail.value.comments.length, 3);
-  assert.equal(await addTaskComment("t-104", "デモから追加したコメント"), true);
+  assert.equal(await addTaskComment("t-104", "デモから追加したコメント"), "success");
   await waitUntil(() => taskCommentDetail.value.state === "ready" && taskCommentDetail.value.comments.length === 4);
   assert.equal(tasks.value.find((task) => task.id === "t-104")?.comments, 4);
 
@@ -113,7 +115,7 @@ test("demo Kanban supports its primary interactions without Hermes", async () =>
   assert.equal(tasks.value.find((task) => task.id === "t-105")?.status, "blocked");
   assert.equal(tasks.value.find((task) => task.id === "t-107")?.assigneeId, "editor");
 
-  assert.equal(await createTask("デモで作成したカード"), true);
+  assert.equal(await createTask("デモで作成したカード"), "success");
   assert.ok(tasks.value.some((task) => task.title === "デモで作成したカード" && task.status === "triage"));
   await toggleTaskComments("t-104");
 });
@@ -170,7 +172,7 @@ test("an initially unavailable live Profile inventory stays empty and reports de
 
   assert.equal(officeConnection.value.source, "server");
   assert.equal(officeConnection.value.state, "degraded");
-  assert.match(officeConnection.value.message, /Profile一覧/);
+  assert.match(localizeRuntimeMessage(officeConnection.value.message), /Profile一覧/);
   assert.deepEqual(profileList.value, []);
   assert.deepEqual(sessions.value, []);
   assert.deepEqual(openSessionIds.value, []);
@@ -216,6 +218,50 @@ test("temporary live inventory failure and recovery retain last-known-good state
   assert.equal(officeConnection.value.state, "connected");
   assert.deepEqual(openSessionIds.value, [liveSessionId]);
   assert.deepEqual(calls, { ensured: [liveSessionId], released: [] });
+});
+
+test("authoritative stored inventory replaces a promoted draft title presentation in both locales", () => {
+  resetRuntime();
+  recordChatRuntime();
+  applyOfficeSnapshot(snapshot(), serverUrl);
+  createSession("live-profile");
+  const draft = sessions.value.at(-1)!;
+  assert.equal(draft.titlePresentation, "new-chat");
+  setChatSessionReady(draft.id, "live-draft", "stored-draft");
+
+  applyOfficeSnapshot(snapshot({
+    sessions: [{ id: "stored-draft", profileId: "live-profile", title: "障害調査", activity: "idle" }]
+  }), serverUrl);
+  const promoted = sessions.value.find(({ id }) => id === draft.id)!;
+  assert.equal(promoted.remoteKind, "stored");
+  assert.equal(promoted.titlePresentation, undefined);
+
+  const previous = locale.value;
+  try {
+    setLocale("ja");
+    assert.equal(chatSessionTitle(promoted), "障害調査");
+    setLocale("en");
+    assert.equal(chatSessionTitle(promoted), "障害調査");
+    applyOfficeSnapshot(snapshot({
+      sessions: [{ id: "stored-draft", profileId: "live-profile", title: "New chat", activity: "idle" }]
+    }), serverUrl);
+    assert.equal(chatSessionTitle(sessions.value.find(({ id }) => id === draft.id)!), "New chat");
+    applyOfficeSnapshot(snapshot({
+      sessions: [{ id: "stored-draft", profileId: "live-profile", title: "新しい会話", activity: "idle" }]
+    }), serverUrl);
+    assert.equal(chatSessionTitle(sessions.value.find(({ id }) => id === draft.id)!), "新しい会話");
+  } finally { setLocale(previous); }
+});
+
+test("Office reconnect exhaustion is stored as first-party presentation and switches locale", () => {
+  const previous = locale.value;
+  try {
+    setOfficeError("Office WebSocketへ再接続できませんでした。手動で再試行してください。", serverUrl, true);
+    setLocale("ja");
+    assert.equal(localizeRuntimeMessage(officeConnection.value.message), "Office WebSocketへ再接続できませんでした。手動で再試行してください。");
+    setLocale("en");
+    assert.equal(localizeRuntimeMessage(officeConnection.value.message), "Unable to reconnect to the Office WebSocket. Retry manually.");
+  } finally { setLocale(previous); }
 });
 
 test("returning from live data to explicit demo releases live targets and replaces all state", () => {

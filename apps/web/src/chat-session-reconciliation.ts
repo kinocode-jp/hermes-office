@@ -1,5 +1,6 @@
 import type { ChatSession } from "./domain";
 import { invalidatePendingSteer } from "./chat-run-actions";
+import type { RuntimeMessage } from "./i18n";
 
 export type ChatSessionReadyRuntime = {
   running?: boolean;
@@ -46,7 +47,7 @@ export function reconcileChatSessionDisconnected(session: ChatSession): ChatSess
   };
 }
 
-export function reconcileChatSessionError(session: ChatSession, message: string): ChatSession {
+export function reconcileChatSessionError(session: ChatSession, message: RuntimeMessage): ChatSession {
   return {
     ...terminateChatRun(session, "failed"),
     connectionState: "error",

@@ -21,6 +21,7 @@ export function AppearanceSettings() {
   const [open, setOpen] = useState(false);
   const panel = useRef<HTMLElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
+  const restoreFocusTimer = useRef<number | undefined>(undefined);
   const isJapanese = locale.value === "ja";
   const copy = isJapanese ? {
     trigger: "表示設定",
@@ -39,6 +40,8 @@ export function AppearanceSettings() {
   };
 
   useEffect(() => {
+    window.clearTimeout(restoreFocusTimer.current);
+    restoreFocusTimer.current = undefined;
     if (!open) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -53,7 +56,14 @@ export function AppearanceSettings() {
     };
     window.addEventListener("keydown", onKeyDown);
     panel.current?.querySelector<HTMLElement>("button")?.focus();
-    return () => { window.removeEventListener("keydown", onKeyDown); previousFocus.current?.focus(); };
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      const restoreFocus = previousFocus.current;
+      restoreFocusTimer.current = window.setTimeout(() => {
+        restoreFocusTimer.current = undefined;
+        restoreFocus?.focus();
+      }, 0);
+    };
   }, [open]);
 
   return (
@@ -71,14 +81,14 @@ export function AppearanceSettings() {
 
       {open && (
         <>
-          <button class="appearance-scrim" type="button" aria-label={copy.close} onClick={() => setOpen(false)} />
+          <button class="appearance-scrim" type="button" aria-label={copy.close} onPointerDown={() => setOpen(false)} onClick={() => setOpen(false)} />
           <aside ref={panel} id="appearance-panel" class="appearance-panel" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
             <header>
               <div>
                 <p>DISPLAY CONSOLE</p>
                 <h2 id="appearance-title">{copy.title} <span>{isJapanese ? "/ Appearance" : "/ 表示"}</span></h2>
               </div>
-              <button type="button" aria-label={copy.close} onClick={() => setOpen(false)}>×</button>
+              <button type="button" aria-label={copy.close} onPointerDown={() => setOpen(false)} onClick={() => setOpen(false)}>×</button>
             </header>
 
             <section aria-labelledby="theme-heading">

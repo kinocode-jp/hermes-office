@@ -170,7 +170,7 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
       next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
       continue;
     }
-    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, status, remoteKind: "stored" };
+    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, titlePresentation: undefined, status, remoteKind: "stored" };
   }
   sessions.value = next;
   updateProfileSessionCounts();

@@ -10,7 +10,8 @@ import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
 import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
-import { interruptChatRun, steerChatRun } from "./chat-run-actions";
+import { boundedSteerEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
+import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
@@ -26,22 +27,22 @@ export const activeSessionId = signal("");
 export const mobileInspectorOpen = signal(false);
 export const mobileWorkspaceOpen = signal(false);
 export const MAX_OPEN_CHAT_SESSIONS = 4;
-export const chatSocketState = signal<{ state: ChatConnectionState; message: string }>({
+export const chatSocketState = signal<{ state: ChatConnectionState; message: RuntimeMessage }>({
   state: "disconnected",
-  message: "Chat接続を待っています"
+  message: officeMessage("runtime.chat.waiting")
 });
 export const officeSnapshot = signal<OfficeSnapshot | undefined>(undefined);
 export const officeAccess = signal<OfficeAccess>({
   state: "checking",
   serverUrl: "",
-  message: "Office Serverを確認しています"
+  message: officeMessage("runtime.office.checking")
 });
 export const officeConnection = signal<OfficeConnection>({
   state: "connecting",
   source: "server",
   serverUrl: "",
   eventStream: "closed",
-  message: "Office Serverを確認しています"
+  message: officeMessage("runtime.office.checking")
 });
 export const selectedProfile = computed(() =>
   profileList.value.find((profile) => profile.id === selectedProfileId.value)
@@ -96,7 +97,7 @@ export function registerOfficeRetry(action: () => void): void {
 }
 
 export function retryOfficeServer(): void {
-  officeAccess.value = { ...officeAccess.value, state: "checking", message: "Office Serverへ再接続しています" };
+  officeAccess.value = { ...officeAccess.value, state: "checking", message: officeMessage("runtime.office.reconnecting") };
   retryOfficeConnection();
 }
 
@@ -104,30 +105,30 @@ export function requireDeviceLogin(serverUrl: string): void {
   officeAccess.value = {
     state: "login-required",
     serverUrl,
-    message: "この端末からOffice Serverへログインしてください"
+    message: officeMessage("runtime.auth.loginRequired")
   };
 }
 
 export function setDeviceLoginSubmitting(): void {
-  officeAccess.value = { ...officeAccess.value, state: "submitting", message: "端末を認証しています" };
+  officeAccess.value = { ...officeAccess.value, state: "submitting", message: officeMessage("runtime.auth.authenticating") };
 }
 
 export function setDeviceLoginFailure(failure: DeviceLoginFailure): void {
   officeAccess.value = {
     ...officeAccess.value,
     state: failure.code === "unavailable" ? "unavailable" : "login-required",
-    message: failure.message,
+    message: officeRuntimeMessage(failure.message),
     failureCode: failure.code,
     ...(failure.retryAfterSeconds ? { retryAfterSeconds: failure.retryAfterSeconds } : {})
   };
 }
 
 export function setOfficeAuthenticated(serverUrl: string): void {
-  officeAccess.value = { state: "authenticated", serverUrl, message: "端末認証済み" };
+  officeAccess.value = { state: "authenticated", serverUrl, message: officeMessage("runtime.auth.authenticated") };
 }
 
 export function setOfficeAccessUnavailable(serverUrl: string, message: string): void {
-  officeAccess.value = { state: "unavailable", serverUrl, message, failureCode: "unavailable" };
+  officeAccess.value = { state: "unavailable", serverUrl, message: officeRuntimeMessage(message), failureCode: "unavailable" };
 }
 
 export function setOfficeConnecting(serverUrl: string): void {
@@ -136,7 +137,7 @@ export function setOfficeConnecting(serverUrl: string): void {
     state: "connecting",
     serverUrl,
     eventStream: "closed",
-    message: "Office Serverを確認中"
+    message: officeMessage("runtime.office.connecting")
   };
 }
 
@@ -162,9 +163,9 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
     protocolVersion: snapshot.capabilities.protocolVersion,
     generatedAt: snapshot.generatedAt,
     eventStream: officeConnection.value.eventStream,
-    message: explicitDemo ? "明示的なデモモードで表示中"
-      : profileInventoryUnavailable ? "Hermes Profile一覧を一時的に取得できません。再取得を待っています。"
-        : snapshot.capabilities.runtime.state === "ready" ? "Hermes runtime ready" : `Hermes runtime ${snapshot.capabilities.runtime.state}`
+    message: explicitDemo ? officeMessage("runtime.office.demo")
+      : profileInventoryUnavailable ? officeMessage("runtime.office.profileInventoryUnavailable")
+        : officeMessage("runtime.office.hermesState", { state: snapshot.capabilities.runtime.state })
   };
 
   if (explicitDemo) {
@@ -215,6 +216,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
       storedSessionId: live.id,
       profileId: live.profileId,
       title: live.title,
+      titlePresentation: undefined,
       status: mergeServerSessionStatus(previous, live.activity),
       connectionState: previous?.connectionState ?? "disconnected",
       historyState: previous?.historyState ?? "unloaded",
@@ -251,7 +253,7 @@ export function setOfficeError(message: string, serverUrl: string, preserveRunti
     source: "server",
     serverUrl,
     eventStream: "closed",
-    message
+    message: officeRuntimeMessage(message)
   };
 }
 
@@ -353,7 +355,7 @@ function clearRuntimeState(): void {
   activeSessionId.value = "";
   mobileWorkspaceOpen.value = false;
   mobileInspectorOpen.value = false;
-  chatSocketState.value = { state: "disconnected", message: "Chat接続を待っています" };
+  chatSocketState.value = { state: "disconnected", message: officeMessage("runtime.chat.waiting") };
   runtimeDataSource = "none";
 }
 
@@ -396,7 +398,7 @@ export async function respondToClarification(sessionId: string, answer: string):
     await respondClarify(sessionId, pending.requestId, trimmed);
     clearInteraction(sessionId, pending.id);
   } catch {
-    failInteraction(sessionId, pending.id, "回答を送信できませんでした。接続を確認して再試行してください。");
+    failInteraction(sessionId, pending.id, officeMessage("runtime.chat.answerFailed"));
   }
 }
 
@@ -410,7 +412,7 @@ export async function respondToApproval(sessionId: string, choice: ApprovalChoic
     await respondApproval(sessionId, pending.approvalId, choice);
     clearInteraction(sessionId, pending.id);
   } catch {
-    failInteraction(sessionId, pending.id, "承認結果を送信できませんでした。接続を確認して再試行してください。");
+    failInteraction(sessionId, pending.id, officeMessage("runtime.chat.approvalFailed"));
   }
 }
 
@@ -421,7 +423,7 @@ export function reconnectChatSession(sessionId: string): void {
 }
 
 export function setChatSocketState(state: ChatConnectionState, message = ""): void {
-  chatSocketState.value = { state, message };
+  chatSocketState.value = { state, message: message ? officeRuntimeMessage(message) : officeMessage("runtime.chat.waiting") };
 }
 
 export function setChatHistoryLoading(sessionId: string, resetTranscript = false): void {
@@ -431,7 +433,7 @@ export function setChatHistoryLoading(sessionId: string, resetTranscript = false
     ...(resetTranscript ? {
       // Hermes history cannot reconstruct these queue acknowledgements. Keep the
       // bounded, local operation evidence while replacing the durable transcript.
-      messages: session.messages.filter((message) => message.kind === "steer"),
+      messages: boundedSteerEvidence(session.messages),
       streamingMessageId: undefined,
       historyPartial: false,
       historyNotice: undefined,
@@ -446,7 +448,7 @@ export function applyChatHistory(sessionId: string, history: ChatMessage[], reso
       ...session,
       ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
       historyState: "loaded",
-      historyPartial: result?.partial === true, historyNotice: result?.error,
+      historyPartial: result?.partial === true, historyNotice: result?.error ? officeRuntimeMessage(result.error) : undefined,
       errorMessage: session.connectionState === "error" ? session.errorMessage : undefined,
       messages: [...history, ...session.messages.filter((message) => !historyIds.has(message.id))]
     };
@@ -454,7 +456,7 @@ export function applyChatHistory(sessionId: string, history: ChatMessage[], reso
 }
 
 export function setChatHistoryError(sessionId: string, message: string): void {
-  updateChatSession(sessionId, (session) => ({ ...session, historyState: "error", errorMessage: message }));
+  updateChatSession(sessionId, (session) => ({ ...session, historyState: "error", errorMessage: officeRuntimeMessage(message) }));
 }
 
 export function setChatSessionConnecting(sessionId: string): void {
@@ -470,7 +472,7 @@ export function setChatSessionDisconnected(sessionId: string): void {
 }
 
 export function setChatSessionError(sessionId: string, message: string): void {
-  updateChatSession(sessionId, (session) => reconcileChatSessionError(session, message));
+  updateChatSession(sessionId, (session) => reconcileChatSessionError(session, officeRuntimeMessage(message)));
 }
 
 export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent): void {
@@ -572,11 +574,11 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
     };
   }
   if (event.type === "error") {
-    const message = stringValue(payload.message) ?? "Hermesの実行中にエラーが発生しました。";
+    const upstreamText = stringValue(payload.message);
     return {
       ...session,
       status: "ready",
-      errorMessage: message,
+      errorMessage: upstreamText ? upstreamMessage(upstreamText) : officeMessage("runtime.chat.hermesGenericError"),
       streamingMessageId: undefined,
       pendingInteraction: undefined,
       messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
@@ -605,7 +607,7 @@ function clearInteraction(sessionId: string, interactionId: string): void {
     : session);
 }
 
-function failInteraction(sessionId: string, interactionId: string, error: string): void {
+function failInteraction(sessionId: string, interactionId: string, error: RuntimeMessage): void {
   updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
     ? { ...session, pendingInteraction: { ...session.pendingInteraction, submitting: false, error } }
     : session);

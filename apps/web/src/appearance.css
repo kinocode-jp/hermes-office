@@ -108,7 +108,8 @@ html, body { height: 100%; }
 :root:not([data-theme="midnight"]) .control-card textarea,
 :root:not([data-theme="midnight"]) .memory-card textarea,
 :root:not([data-theme="midnight"]) .task-comment-form input,
-:root:not([data-theme="midnight"]) .task-assignee-select select { color: var(--paper); background: var(--surface-raised); }
+:root:not([data-theme="midnight"]) .task-assignee-select select,
+:root:not([data-theme="midnight"]) .task-status-select select { color: var(--paper); background: var(--surface-raised); }
 :root:not([data-theme="midnight"]) .connection-row { background: var(--surface-raised); }
 
 :root:not([data-theme="midnight"]) .device-login-shell { background: var(--night); }
@@ -224,7 +225,14 @@ body { font-size: var(--text-body); line-height: 1.5; }
 .task-id,
 .task-saving,
 .task-assignee-select,
+.task-status-select,
+.task-status-select small,
 .task-card footer,
+.task-comments-state,
+.task-comments-empty,
+.task-comments-limit,
+.task-comment-list header,
+.kanban-unconfirmed,
 .scope-badge,
 .card-kicker,
 .connection-protocol,
@@ -252,8 +260,13 @@ body { font-size: var(--text-body); line-height: 1.5; }
 .kanban-column header b,
 .task-summary,
 .task-assignee-select select,
+.task-status-select select,
+.task-comments-error,
+.task-comments-error button,
+.task-card footer button,
 .task-comment-form input,
 .task-comment-form button,
+.kanban-unconfirmed button,
 .column-empty,
 .connection-row span,
 .theme-choice b,
@@ -266,7 +279,8 @@ body { font-size: var(--text-body); line-height: 1.5; }
 .message p,
 .composer textarea,
 .control-card textarea,
-.memory-card textarea { font-size: var(--text-chat); line-height: 1.65; }
+.memory-card textarea,
+.task-comment-list p { font-size: var(--text-chat); line-height: 1.65; }
 .profile-command > input { font-size: var(--text-chat); }
 
 .task-card h3,
@@ -287,6 +301,7 @@ body { font-size: var(--text-body); line-height: 1.5; }
 .composer button,
 .kanban-sync button,
 .task-comment-form button,
+.kanban-unconfirmed button,
 .appearance-trigger,
 .appearance-panel > header button { min-height: var(--target-desktop); }
 
@@ -307,6 +322,13 @@ body { font-size: var(--text-body); line-height: 1.5; }
   .mobile-close,
   .mobile-workspace-bar button,
   .mobile-chat-tabs button,
+  .task-assignee-select select,
+  .task-status-select select,
+  .task-card footer button,
+  .task-comments-error button,
+  .task-comment-form input,
+  .task-comment-form button,
+  .kanban-unconfirmed button,
   .appearance-trigger,
   .language-button { min-height: var(--target-mobile); }
   .mobile-workspace-bar button,

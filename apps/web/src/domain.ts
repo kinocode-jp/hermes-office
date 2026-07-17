@@ -1,4 +1,5 @@
 import type { Operation } from "@hermes-office/protocol";
+import type { RuntimeMessage } from "./i18n";
 
 export type ProfileStatus = "working" | "waiting" | "idle" | "blocked";
 
@@ -40,7 +41,7 @@ export type ChatPendingInteraction =
       question: string;
       choices: string[];
       submitting: boolean;
-      error?: string | undefined;
+      error?: RuntimeMessage | undefined;
     }
   | {
       id: string;
@@ -51,7 +52,7 @@ export type ChatPendingInteraction =
       choices: ApprovalChoice[];
       allowPermanent: boolean;
       submitting: boolean;
-      error?: string | undefined;
+      error?: RuntimeMessage | undefined;
     };
 
 export type ChatSession = {
@@ -70,8 +71,8 @@ export type ChatSession = {
   connectionState?: ChatConnectionState;
   historyState?: ChatHistoryState;
   historyPartial?: boolean;
-  historyNotice?: string | undefined;
-  errorMessage?: string | undefined;
+  historyNotice?: RuntimeMessage | undefined;
+  errorMessage?: RuntimeMessage | undefined;
   remoteKind?: "demo" | "stored" | "draft" | undefined;
   streamingMessageId?: string | undefined;
   pendingInteraction?: ChatPendingInteraction | undefined;
@@ -116,7 +117,7 @@ export type OfficeAccessState = "checking" | "login-required" | "submitting" | "
 export type OfficeAccess = {
   state: OfficeAccessState;
   serverUrl: string;
-  message: string;
+  message: RuntimeMessage;
   failureCode?: "invalid" | "rate-limited" | "disabled" | "unavailable" | undefined;
   retryAfterSeconds?: number | undefined;
 };
@@ -139,7 +140,7 @@ export type OfficeConnection = {
   protocolVersion?: number;
   generatedAt?: string;
   eventStream: "closed" | "connecting" | "open";
-  message: string;
+  message: RuntimeMessage;
 };
 
 export type OfficeSnapshotProfile = {

@@ -13,6 +13,7 @@ import {
 import { connectChatApi } from "../src/chat-api.ts";
 import { initializeInventory, loadMoreSessions, sessionInventoryState } from "../src/inventory.ts";
 import { applyOfficeSnapshot, officeAccess, officeConnection, officeSnapshot, openSessionIds, reconnectChatSession, registerChatRuntime, registerOfficeRetry, requireDeviceLogin, retryOfficeServer, sessions, setOfficeAuthenticated, setOfficeError, setOfficeEventStream } from "../src/store.ts";
+import { localizeRuntimeMessage } from "../src/i18n.ts";
 
 test("simultaneous live event and chat expiry renew once and reconnect both transports", async () => {
   await withBrowserEnvironment({ protocol: "https:", hostname: "office.example", origin: "https://office.example", fastTimers: true }, async () => {
@@ -429,7 +430,7 @@ test("renew 403 preserves LKG and waits for trusted proxy repair without device 
       await waitFor(() => renewals === 1 && officeConnection.value.state === "error");
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      assert.equal(officeConnection.value.message, REMOTE_PROXY_CONFIGURATION_MESSAGE);
+      assert.equal(localizeRuntimeMessage(officeConnection.value.message), REMOTE_PROXY_CONFIGURATION_MESSAGE);
       assert.equal(officeAccess.value.state, "authenticated");
       assert.equal(officeSnapshot.value?.sequence, 1);
       assert.equal(sessions.value.length, 1);

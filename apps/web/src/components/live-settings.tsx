@@ -6,7 +6,7 @@ import {
   isGlobalContextWithinBudget,
 } from "@hermes-office/protocol";
 import type { SettingsTab } from "../domain";
-import { localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
+import { localizeRuntimeMessage, officeMessage, officeRuntimeMessage, t, type RuntimeMessage } from "../i18n";
 import { canMutateSettingsTab, settingsMutationAccess } from "../settings-access";
 import { officeSnapshot } from "../store";
 import { AccessAudit } from "./access-audit";
@@ -37,7 +37,7 @@ export type LiveSettingsProps = {
   onChanged?: (kind: "global" | "memory" | "skill" | "soul") => void;
 };
 
-type ErrorState = { message?: string; messageKey?: TranslationKey; conflict: boolean };
+type ErrorState = { message: RuntimeMessage; conflict: boolean };
 
 export function LiveSettings({ profileId, profileLabel, initialTab = "global", activeTab, showAccessAudit = false, onTabChange, onChanged }: LiveSettingsProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
@@ -247,7 +247,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
       {error && (
         <div class={`live-settings__notice ${error.conflict ? "is-conflict" : "is-error"}`} role="alert">
           <span>{error.conflict ? t("settings.conflict") : t("settings.offline")}</span>
-          <p>{error.messageKey ? t(error.messageKey) : localizeRuntimeMessage(error.message ?? "")}</p>
+          <p>{localizeRuntimeMessage(error.message)}</p>
           <button type="button" onClick={() => void reload()}>{t("settings.reload")}</button>
         </div>
       )}
@@ -403,8 +403,8 @@ function parseSkillLines(value: string): string[] {
 }
 
 function errorState(reason: unknown): ErrorState {
-  if (reason instanceof SettingsApiError) return { message: reason.message, conflict: reason.kind === "conflict" };
-  return { messageKey: "settings.loadFailed", conflict: false };
+  if (reason instanceof SettingsApiError) return { message: officeRuntimeMessage(reason.message), conflict: reason.kind === "conflict" };
+  return { message: officeMessage("settings.loadFailed"), conflict: false };
 }
 
 function shortRevision(value: string): string { return value.slice(0, 8); }

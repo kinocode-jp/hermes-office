@@ -4,6 +4,7 @@ import { connectChatApi, type ChatApiCallbacks } from "../src/chat-api.ts";
 import { reconcileChatSessionConnecting, reconcileChatSessionReady } from "../src/chat-session-reconciliation.ts";
 import type { ChatSession } from "../src/domain.ts";
 import { canSubmitChatPrompt, isChatRunActive } from "../src/session-runtime.ts";
+import { MAX_STEER_EVIDENCE_COUNT } from "../src/chat-run-actions.ts";
 import {
   applyChatHistory,
   applyChatGatewayEvent,
@@ -312,6 +313,19 @@ test("authoritative reset drops a live row absent from production history but re
   ]);
   assert.deepEqual(sessions.value[0]?.messages.map(({ id }) => id), ["history-stored-1-0", "steer-accepted"]);
   assert.equal(sessions.value[0]?.messages.filter(({ kind }) => kind === "steer").length, 1);
+});
+
+test("authoritative reset deterministically evicts only the oldest accepted Steer evidence over the bound", () => {
+  const evidence = Array.from({ length: MAX_STEER_EVIDENCE_COUNT + 1 }, (_, index) => ({
+    id: `accepted-${index}`, from: "user" as const, kind: "steer" as const, body: "same text", at: "12:00",
+  }));
+  sessions.value = [{
+    ...baseSession,
+    messages: [{ id: "durable", from: "agent", body: "drop me", at: "11:59" }, ...evidence],
+  }];
+  setChatHistoryLoading(baseSession.id, true);
+  assert.deepEqual(sessions.value[0]!.messages.map(({ id }) => id), evidence.slice(1).map(({ id }) => id));
+  assert.equal(sessions.value[0]!.messages.every(({ kind }) => kind === "steer"), true);
 });
 
 function savedHistory(options: { includePersistedDuringReset?: boolean } = {}): unknown {

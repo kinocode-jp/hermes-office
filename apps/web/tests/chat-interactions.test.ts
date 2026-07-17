@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ChatSession, OfficeSnapshot } from "../src/domain.ts";
 import { approvalChoicesForAccess } from "../src/components/chat-pane.tsx";
 import { applyChatGatewayEvent, applyChatHistory, officeSnapshot, reduceChatGatewayEvent, registerChatRuntime, respondToApproval, sessions } from "../src/store.ts";
+import { localizeRuntimeMessage } from "../src/i18n.ts";
 
 const session: ChatSession = {
   id: "client-1",
@@ -39,7 +40,7 @@ test("malformed saved history exposes its safe notice in chat state", () => {
     error: "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。",
   });
   assert.equal(sessions.value[0]?.historyPartial, true);
-  assert.equal(sessions.value[0]?.historyNotice, "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。");
+  assert.equal(localizeRuntimeMessage(sessions.value[0]!.historyNotice!), "Hermesの履歴に読み取れない項目があり、その項目を除外して表示しています。");
 });
 
 test("clarification requests become durable waiting interactions", () => {
