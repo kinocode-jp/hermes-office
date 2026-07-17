@@ -9,7 +9,7 @@ import { loadKanbanDemoRuntime, registerKanbanProfileTaskUpdater, resetKanbanRun
 import { findStoredSession, storedSessionClientId } from "./session-identity";
 import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
-import { approvalChoices, gatewayMessageId, nowTime, stringArray, stringValue } from "./chat-store-utils";
+import { approvalChoices, gatewayMessageId, nowTimestamp, stringArray, stringValue } from "./chat-store-utils";
 import { boundedSteerEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
 import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
@@ -307,10 +307,10 @@ export function closeSession(sessionId: string): void {
   if (openSessionIds.value.length === 0) mobileWorkspaceOpen.value = false;
 }
 
-export function createSession(profileId: string): void {
+export function createSession(profileId: string): string | undefined {
   const isLive = officeConnection.value.source === "server" && officeConnection.value.runtime === "ready";
   const isDemo = officeConnection.value.source === "demo" && officeConnection.value.state === "demo";
-  if ((!isLive && !isDemo) || !profileList.value.some((profile) => profile.id === profileId)) return;
+  if ((!isLive && !isDemo) || !profileList.value.some((profile) => profile.id === profileId)) return undefined;
   const session: ChatSession = {
     id: crypto.randomUUID(),
     profileId,
@@ -325,6 +325,7 @@ export function createSession(profileId: string): void {
   };
   sessions.value = [...sessions.value, session];
   openSession(session.id);
+  return session.id;
 }
 
 function loadExplicitDemoState(): void {
@@ -372,7 +373,7 @@ export function sendMessage(sessionId: string, body: string): void {
           errorMessage: undefined,
           messages: [
             ...session.messages,
-            { id: crypto.randomUUID(), from: "user", body: trimmed, at: new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) }
+            { id: crypto.randomUUID(), from: "user", body: trimmed, at: nowTimestamp() }
           ]
         }
       : session
@@ -519,7 +520,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       ...session,
       status: "streaming",
       streamingMessageId: messageId,
-      messages: [...session.messages, { id: messageId, from: "agent", body: "", at: nowTime(), status: "streaming" }]
+      messages: [...session.messages, { id: messageId, from: "agent", body: "", at: nowTimestamp(), status: "streaming" }]
     };
   }
   if (event.type === "message.delta") {
@@ -533,7 +534,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       streamingMessageId: messageId,
       messages: exists
         ? session.messages.map((message) => message.id === messageId ? { ...message, body: message.body + delta, status: "streaming" } : message)
-        : [...session.messages, { id: messageId, from: "agent", body: delta, at: nowTime(), status: "streaming" }]
+        : [...session.messages, { id: messageId, from: "agent", body: delta, at: nowTimestamp(), status: "streaming" }]
     };
   }
   if (event.type === "message.complete") {
@@ -547,7 +548,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       pendingInteraction: undefined,
       messages: exists
         ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" } : message.status === "streaming" ? { ...message, status: "complete" } : message)
-        : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTime(), status: "complete" as const }] : [])]
+        : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTimestamp(), status: "complete" as const }] : [])]
     };
   }
   if (event.type === "status.update") {
@@ -570,7 +571,7 @@ export function reduceChatGatewayEvent(session: ChatSession, event: ChatGatewayE
       status: event.type === "tool.complete" ? session.status : "streaming",
       messages: exists
         ? session.messages.map((message) => message.id === toolId ? { ...message, body, presentation, status } : message)
-        : [...session.messages, { id: toolId, from: "tool", body, presentation, at: nowTime(), status }]
+        : [...session.messages, { id: toolId, from: "tool", body, presentation, at: nowTimestamp(), status }]
     };
   }
   if (event.type === "error") {

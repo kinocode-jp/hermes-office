@@ -37,3 +37,22 @@ test("a continuation flag without a cursor is rejected", () => {
     /履歴ページ情報/,
   );
 });
+
+test("history timestamps stay locale-neutral while legacy clock text is preserved", () => {
+  const page = normalizeHistoryPage({
+    messages: [
+      { index: 1, role: "assistant", text: "ISO", timestamp: "2026-07-16T01:02:03.000Z" },
+      { index: 2, role: "assistant", text: "Epoch", timestamp: 1_700_000_000 },
+      { index: 3, role: "assistant", text: "Legacy", at: "12:00" },
+      { index: 4, role: "assistant", text: "Arbitrary legacy", at: "around noon" },
+    ],
+    pagination: { direction: "older", hasMore: false },
+  }, "stored-1");
+
+  assert.deepEqual(page.messages.map(({ at }) => at), [
+    "2026-07-16T01:02:03.000Z",
+    "2023-11-14T22:13:20.000Z",
+    "12:00",
+    "around noon",
+  ]);
+});

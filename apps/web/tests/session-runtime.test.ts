@@ -3,7 +3,7 @@ import test from "node:test";
 import type { ChatSteerResult } from "../src/chat-api.ts";
 import type { ChatSession } from "../src/domain.ts";
 import { chatMessageBody, chatSessionTitle, locale, localizeRuntimeMessage, officeMessage, officeRuntimeMessage, setLocale, t } from "../src/i18n.ts";
-import { ChatSteerMark, chatComposerState, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
+import { ChatSteerMark, chatComposerState, formatChatMessageTime, shouldSubmitComposerKey } from "../src/components/chat-pane.tsx";
 import { canSteerChatSession, canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "../src/session-runtime.ts";
 import { boundedSteerEvidence, MAX_STEER_EVIDENCE_BYTES, MAX_STEER_EVIDENCE_COUNT } from "../src/chat-run-actions.ts";
 import {
@@ -61,6 +61,7 @@ test("sendMessage rejects every in-flight shape and atomically blocks a second p
   sendMessage(ready.id, "second");
   assert.deepEqual(submitted, ["first"]);
   assert.equal(sessions.value[0]?.messages.filter((message) => message.from === "user").length, 1);
+  assert.equal(Number.isNaN(Date.parse(sessions.value[0]!.messages[0]!.at)), false);
 
   sessions.value = [{ ...ready, streamingMessageId: "hidden-live" }];
   sendMessage(ready.id, "marker");
@@ -69,6 +70,19 @@ test("sendMessage rejects every in-flight shape and atomically blocks a second p
   sessions.value = [{ ...ready, status: "waiting" }];
   sendMessage(ready.id, "waiting");
   assert.deepEqual(submitted, ["first"]);
+});
+
+test("chat timestamps render by selected locale without rewriting legacy clock text", () => {
+  const timestamp = "2026-07-16T01:02:03.000Z";
+  const date = new Date(timestamp);
+  const japanese = formatChatMessageTime(timestamp, "ja", "Asia/Tokyo");
+  const english = formatChatMessageTime(timestamp, "en", "Asia/Tokyo");
+  assert.equal(japanese, new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" }).format(date));
+  assert.equal(english, new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" }).format(date));
+  assert.notEqual(japanese, english);
+  assert.equal(formatChatMessageTime("12:00", "ja", "Asia/Tokyo"), "12:00");
+  assert.equal(formatChatMessageTime("12:00", "en", "Asia/Tokyo"), "12:00");
+  assert.equal(formatChatMessageTime("legacy timestamp", "en", "Asia/Tokyo"), "legacy timestamp");
 });
 
 test("active runs steer once without changing authoritative run state", async () => {

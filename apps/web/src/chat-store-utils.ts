@@ -17,6 +17,6 @@ export function gatewayMessageId(payload: Record<string, unknown>): string | und
   return stringValue(payload.messageId) ?? stringValue(payload.message_id);
 }
 
-export function nowTime(): string {
-  return new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+export function nowTimestamp(): string {
+  return new Date().toISOString();
 }

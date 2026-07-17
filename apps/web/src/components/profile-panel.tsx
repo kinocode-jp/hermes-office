@@ -57,13 +57,21 @@ function openLiveSettings(tab: Exclude<InspectorTab, "chat">): void {
   mobileInspectorOpen.value = false;
 }
 
+export function createProfileSession(profileId: string): boolean {
+  const sessionId = createSession(profileId);
+  if (sessionId === undefined) return false;
+  mobileInspectorOpen.value = false;
+  mobileWorkspaceOpen.value = true;
+  return true;
+}
+
 function ChatList() {
   const profile = selectedProfile.value;
   const inventory = sessionInventoryState.value;
   if (!profile) return null;
   return (
     <div class="panel-section">
-      <button class="new-chat-button" onClick={() => createSession(profile.id)}>{t("profile.newChat")}</button>
+      <button class="new-chat-button" onClick={() => createProfileSession(profile.id)}>{t("profile.newChat")}</button>
       <div class="session-list">
         {selectedProfileSessions.value.map((session) => (
           <button key={session.id} onClick={() => { openSession(session.id); mobileInspectorOpen.value = false; mobileWorkspaceOpen.value = true; }}>

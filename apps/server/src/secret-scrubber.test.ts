@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { containsLikelySecret, redactSecrets } from "./secret-scrubber.js";
+import { containsLikelySecret, isLikelySecretIdentifier, redactSecrets } from "./secret-scrubber.js";
 
 test("redacts namespaced, quoted, spaced, and lowercase secret assignments", () => {
   const source = [
@@ -54,6 +54,49 @@ test("retains URL query, Bearer, private-key, and ANSI protections", () => {
   assert.match(result.value, /\[REDACTED PRIVATE KEY\]/);
 });
 
+test("redacts short explicit assignments, Basic auth, and HTTP URL userinfo", () => {
+  const source = [
+    "password=x",
+    "note: API_KEY='short7'",
+    'wrapper: "clientSecret=abc"',
+    "Authorization: Basic dXNlcjpwYXNz",
+    "Proxy-Authorization: Basic cHJveHk6cGFzcw==",
+    "https://operator:tiny@example.test/private?mode=safe",
+  ].join("\n");
+
+  const result = redactSecrets(source);
+
+  assert.equal(result.redacted, true);
+  assert.equal(result.value, [
+    "password=[REDACTED]",
+    "note: API_KEY='[REDACTED]'",
+    'wrapper: "clientSecret=[REDACTED]"',
+    "Authorization: Basic [REDACTED]",
+    "Proxy-Authorization: Basic [REDACTED]",
+    "https://[REDACTED]:[REDACTED]@example.test/private?mode=safe",
+  ].join("\n"));
+  for (const line of source.split("\n")) assert.equal(containsLikelySecret(line), true);
+});
+
+test("redacts high-confidence standalone provider credentials", () => {
+  const credentials = [
+    "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+    "github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghij",
+    "AKIAABCDEFGHIJKLMNOP",
+    "ASIAABCDEFGHIJKLMNOP",
+    "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+    "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+    "xoxb-" + "123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "sk_" + "live_ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  ];
+  const source = credentials.map((credential) => `value ${credential} end`).join("\n");
+  const result = redactSecrets(source);
+
+  assert.equal(result.redacted, true);
+  assert.equal(result.value, credentials.map(() => "value [REDACTED] end").join("\n"));
+  for (const credential of credentials) assert.equal(containsLikelySecret(credential), true);
+});
+
 test("rescans nested assignments instead of letting an outer label hide a secret", () => {
   const source = [
     "note: HERMES_DASHBOARD_SESSION_TOKEN=dashboard-example-value",
@@ -68,7 +111,7 @@ test("rescans nested assignments instead of letting an outer label hide a secret
   assert.equal(result.redacted, true);
   assert.equal(result.value, [
     "note: HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED]",
-    "credential: OPENAI_API_KEY=[REDACTED]",
+    "credential: [REDACTED]",
     "status=clientSecret=[REDACTED]",
     'wrapper: "database_password=[REDACTED]"',
     "https://example.test/?session_token=[REDACTED]&mode=safe",
@@ -83,6 +126,7 @@ test("does not treat token metadata or nonsecret prose identifiers as credential
     "accessTokenTtl = 86400000",
     "nonsecret = abcdefgh",
     "secretary = enabled-value",
+    "examples = sk-short, ghp_fixture, AKIAEXAMPLE",
   ].join("\n");
 
   assert.deepEqual(redactSecrets(source), { value: source, redacted: false });
@@ -93,6 +137,16 @@ test("does not treat token metadata or nonsecret prose identifiers as credential
     "database_password = database-example-value",
     "AWS_SECRET_ACCESS_KEY = aws-example-value",
   ]) assert.equal(containsLikelySecret(secret), true);
+  assert.equal(isLikelySecretIdentifier("api_key"), true);
+  assert.equal(isLikelySecretIdentifier("clientSecret"), true);
+  assert.equal(isLikelySecretIdentifier("token_count"), false);
+  for (const identifier of [
+    "private_key", "aws.accessKey", "signing-key", "encryptionKey", "credential",
+    "serviceAuthorization", "session.key",
+  ]) assert.equal(isLikelySecretIdentifier(identifier), true, identifier);
+  for (const metadata of ["private_key_name", "accessKeyCount", "authorization_status", "session-key-ttl"]) {
+    assert.equal(isLikelySecretIdentifier(metadata), false, metadata);
+  }
 });
 
 test("redaction is idempotent for query and assignment placeholders", () => {

@@ -6,6 +6,7 @@ import {
   type AccessAuditSnapshot,
 } from "../audit-api";
 import { locale, t, type TranslationKey } from "../i18n";
+import { accessDeviceName } from "../audit-presentation";
 import { InfoTip } from "./info-tip";
 import "./access-audit.css";
 
@@ -65,7 +66,7 @@ export function AccessAudit() {
         </div>
         <div class="access-audit__current">
           <span>SESSION · {accessMode}</span>
-          <strong>{current?.deviceName ?? t("audit.checking")}</strong>
+          <strong>{accessDeviceName(current)}</strong>
           <small>{current === null || current === undefined ? t("audit.checkingOwner") : current.local ? t("audit.localSafe") : t("audit.remoteSafe")}</small>
         </div>
         <button type="button" onClick={() => void reload()} disabled={loading}>{loading ? t("audit.loading") : t("audit.reload")}</button>

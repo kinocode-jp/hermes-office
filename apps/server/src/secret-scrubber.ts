@@ -6,7 +6,10 @@ export interface SecretRedaction {
 const ANSI_ESCAPE_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/gi;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
+const BASIC_AUTH_PATTERN = /(\b(?:Authorization|Proxy-Authorization)\s*:\s*Basic[ \t]+)[A-Za-z0-9+/]+={0,2}(?=$|[\s,;])/gim;
+const URL_USERINFO_PATTERN = /(https?:\/\/)[^/?#\s@]+:[^/?#\s@]+@/gi;
 const QUERY_SECRET_PATTERN = /([?&](?:access_token|api_?key|password|secret|token)=)[^&#\s]+/gi;
+const KNOWN_CREDENTIAL_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[a-z]-[A-Za-z0-9-]{20,}|sk_live_[A-Za-z0-9]{16,})\b/g;
 const ASSIGNMENT_HEADER_PATTERN = /(^|[^A-Za-z0-9_])(["']?)([A-Za-z_][A-Za-z0-9_.-]*)\2(\s*[:=]\s*)/gim;
 const BENIGN_METADATA_SEGMENTS = new Set([
   "age", "configured", "count", "enabled", "expires", "expiry", "kind",
@@ -19,7 +22,10 @@ export function redactSecrets(value: string): SecretRedaction {
   output = output
     .replace(PRIVATE_KEY_PATTERN, "[REDACTED PRIVATE KEY]")
     .replace(BEARER_PATTERN, "Bearer [REDACTED]")
-    .replace(QUERY_SECRET_PATTERN, "$1[REDACTED]");
+    .replace(BASIC_AUTH_PATTERN, "$1[REDACTED]")
+    .replace(URL_USERINFO_PATTERN, "$1[REDACTED]:[REDACTED]@")
+    .replace(QUERY_SECRET_PATTERN, "$1[REDACTED]")
+    .replace(KNOWN_CREDENTIAL_PATTERN, "[REDACTED]");
   output = redactSensitiveAssignments(output);
   return { value: output, redacted: output !== value };
 }
@@ -29,7 +35,7 @@ export function containsLikelySecret(value: string): boolean {
   return redactSecrets(value).redacted;
 }
 
-function isSensitiveIdentifier(identifier: string): boolean {
+export function isLikelySecretIdentifier(identifier: string): boolean {
   const segments = identifier
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
@@ -37,9 +43,10 @@ function isSensitiveIdentifier(identifier: string): boolean {
     .split(/[_.-]+/)
     .filter(Boolean);
   return segments.some((segment, index) => {
-    const sensitiveLength = segment === "api" && segments[index + 1] === "key"
+    const next = segments[index + 1];
+    const sensitiveLength = next === "key" && ["access", "api", "encryption", "private", "session", "signing"].includes(segment)
       ? 2
-      : ["apikey", "password", "secret", "token"].includes(segment) ? 1 : 0;
+      : ["apikey", "authorization", "credential", "credentials", "password", "secret", "token"].includes(segment) ? 1 : 0;
     if (sensitiveLength === 0) return false;
     const trailing = segments.slice(index + sensitiveLength);
     return trailing.length === 0 || !trailing.every((item) => BENIGN_METADATA_SEGMENTS.has(item));
@@ -53,7 +60,7 @@ function redactSensitiveAssignments(value: string): string {
   let match: RegExpExecArray | null;
   while ((match = ASSIGNMENT_HEADER_PATTERN.exec(value)) !== null) {
     const [whole, , , identifier = "", separator = ""] = match;
-    if (!isSensitiveIdentifier(identifier)) {
+    if (!isLikelySecretIdentifier(identifier)) {
       // Restart at the one-character operator so an immediately nested key in
       // `status=clientSecret=...` still sees a non-identifier prefix. Only the
       // small header is revisited; long values are never repeatedly consumed.
@@ -78,6 +85,14 @@ function assignedValueRange(
   value: string,
   start: number,
 ): { start: number; end: number; canonical: boolean } | undefined {
+  for (const placeholder of ["Bearer [REDACTED]", "Basic [REDACTED]"]) {
+    if (value.startsWith(placeholder, start)) {
+      const placeholderEnd = start + placeholder.length;
+      if (isAssignedValueBoundary(value[placeholderEnd])) {
+        return { start, end: placeholderEnd, canonical: true };
+      }
+    }
+  }
   for (const placeholder of ["[REDACTED]", "[REDACTED PRIVATE KEY]"]) {
     if (value.startsWith(placeholder, start)) {
       const placeholderEnd = start + placeholder.length;
@@ -101,7 +116,7 @@ function assignedValueRange(
       end += 1;
     }
     const contentStart = start + 1;
-    if (end - contentStart < 8) return undefined;
+    if (end === contentStart) return undefined;
     const content = value.slice(contentStart, end);
     return {
       start: contentStart,
@@ -111,7 +126,7 @@ function assignedValueRange(
   }
   let end = start;
   while (end < value.length && !/[\s,;&#}\]"']/.test(value[end] ?? "")) end += 1;
-  if (end - start < 8) return undefined;
+  if (end === start) return undefined;
   return { start, end, canonical: false };
 }
 

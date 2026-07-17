@@ -706,12 +706,20 @@ function messageText(message: Record<string, unknown>): string {
 }
 
 function messageTime(message: Record<string, unknown>): string {
-  if (typeof message.at === "string") return message.at;
+  if (typeof message.at === "string") {
+    if (isLegacyClockTime(message.at)) return message.at;
+    const explicit = new Date(message.at);
+    return Number.isNaN(explicit.valueOf()) ? message.at : explicit.toISOString();
+  }
   const value = message.createdAt ?? message.created_at ?? message.timestamp;
   const date = typeof value === "number"
     ? new Date(value < 10_000_000_000 ? value * 1_000 : value)
     : typeof value === "string" ? new Date(value) : new Date();
-  return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+  return Number.isNaN(date.valueOf()) ? "" : date.toISOString();
+}
+
+function isLegacyClockTime(value: string): boolean {
+  return /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value);
 }
 
 function errorText(error: unknown): string {

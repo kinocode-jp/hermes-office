@@ -5,7 +5,7 @@ import {
   GLOBAL_SETTINGS_MAX_SKILLS,
   isGlobalContextWithinBudget,
 } from "@hermes-office/protocol";
-import { containsLikelySecret, redactSecrets } from "./secret-scrubber.js";
+import { containsLikelySecret, isLikelySecretIdentifier, redactSecrets } from "./secret-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -305,8 +305,10 @@ async function providerConfigWith(client: ProfileClient, provider: string): Prom
   if (!isRecord(raw)) throw invalidBackend();
   const fields = Array.isArray(raw.fields) ? raw.fields.slice(0, 100).flatMap((item): MemoryProviderFieldDto[] => {
     if (!isRecord(item) || typeof item.key !== "string" || !NAME_PATTERN.test(item.key)) return [];
-    const kind = memoryFieldKind(item.kind);
-    const options = Array.isArray(item.options) ? item.options.slice(0, 100).flatMap((option): MemoryProviderFieldDto["options"] => {
+    const declaredKind = memoryFieldKind(item.kind);
+    if (declaredKind === undefined) return [];
+    const kind: MemoryFieldKind = isLikelySecretIdentifier(item.key) ? "secret" : declaredKind;
+    const options = kind !== "secret" && Array.isArray(item.options) ? item.options.slice(0, 100).flatMap((option): MemoryProviderFieldDto["options"] => {
       if (!isRecord(option) || typeof option.value !== "string") return [];
       const value = publicOptionValue(option.value, 200);
       if (value === undefined) return [];
@@ -734,8 +736,13 @@ function requiredProfile(value: unknown): string { if (typeof value !== "string"
 function requiredName(value: unknown, label: string): string { if (typeof value !== "string" || !NAME_PATTERN.test(value)) throw invalid(`${label} name is invalid.`); return value; }
 function requiredProvider(value: unknown, allowBuiltin: boolean): string { if (allowBuiltin && value === "") return ""; if (typeof value !== "string" || !PROVIDER_PATTERN.test(value)) throw invalid("Memory provider is invalid."); return value; }
 function safeProvider(value: unknown): string { return typeof value === "string" && (value === "" || PROVIDER_PATTERN.test(value)) ? value : ""; }
-function memoryFieldKind(value: unknown): MemoryFieldKind { return value === "boolean" || value === "secret" || value === "select" ? value : "text"; }
-function safeFieldValue(value: unknown, kind: MemoryFieldKind): boolean | string | undefined { if (kind === "boolean") return typeof value === "boolean" ? value : undefined; return safePublicText(value, 8_192); }
+function memoryFieldKind(value: unknown): MemoryFieldKind | undefined { return value === "boolean" || value === "secret" || value === "select" || value === "text" ? value : undefined; }
+function safeFieldValue(value: unknown, kind: MemoryFieldKind): boolean | string | undefined {
+  if (kind === "boolean") return typeof value === "boolean" ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const safe = redactSecrets(value);
+  return safe.redacted ? undefined : safe.value.slice(0, 8_192).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+}
 function safePublicText(value: unknown, maxChars: number): string | undefined { return typeof value === "string" ? redactSecrets(value).value.slice(0, maxChars).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "") : undefined; }
 function publicOptionValue(value: string, maxChars: number): string | undefined { const safe = redactSecrets(value); return safe.redacted ? undefined : safe.value.slice(0, maxChars).replace(/[\u0000-\u001f\u007f]/g, ""); }
 function safeBytes(value: unknown): number { const number = finiteNumber(value); return number === undefined ? 0 : Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(number))); }

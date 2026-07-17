@@ -80,7 +80,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             {message.kind === "steer" && <ChatSteerMark />}
             {message.from === "tool" && <span class="message-tool-mark" aria-hidden="true">⚙</span>}
             <p>{chatMessageBody(message) || (message.status === "streaming" ? "…" : "")}</p>
-            <time>{message.at}</time>
+            <time>{formatChatMessageTime(message.at)}</time>
           </div>
         ))}
         {session.pendingInteraction && (
@@ -119,6 +119,21 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
 
 export function shouldSubmitComposerKey(event: Pick<KeyboardEvent, "key" | "shiftKey" | "isComposing" | "keyCode">): boolean {
   return event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
+}
+
+export function formatChatMessageTime(
+  value: string,
+  selectedLocale: "ja" | "en" = locale.value,
+  timeZone?: string
+): string {
+  if (/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value)) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return new Intl.DateTimeFormat(selectedLocale === "ja" ? "ja-JP" : "en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(timeZone === undefined ? {} : { timeZone })
+  }).format(date);
 }
 
 export function ChatSteerMark() {

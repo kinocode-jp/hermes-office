@@ -2,9 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { ChatSession } from "../src/domain.ts";
+import { createProfileSession } from "../src/components/profile-panel.tsx";
 import { mobileChatTabPresentation } from "../src/components/chat-workspace.tsx";
 import { locale, setLocale } from "../src/i18n.ts";
-import { activeSessionId, openSession, openSessionIds, sessions } from "../src/store.ts";
+import {
+  activeSessionId,
+  mobileInspectorOpen,
+  mobileWorkspaceOpen,
+  officeConnection,
+  openSession,
+  openSessionIds,
+  profileList,
+  sessions,
+} from "../src/store.ts";
 
 test("mobile tabs distinguish two sessions from one profile and select the requested session", () => {
   const previousLocale = locale.value;
@@ -81,6 +91,48 @@ test("mobile tabs number duplicate rendered titles by current pane order across 
     sessions.value = [];
     openSessionIds.value = [];
     activeSessionId.value = "";
+  }
+});
+
+test("mobile new chat opens its workspace only after session creation succeeds", () => {
+  const previousConnection = officeConnection.value;
+  const previousProfiles = profileList.value;
+  const previousSessions = sessions.value;
+  const previousOpenIds = openSessionIds.value;
+  const previousActiveId = activeSessionId.value;
+  const previousInspector = mobileInspectorOpen.value;
+  const previousWorkspace = mobileWorkspaceOpen.value;
+  try {
+    officeConnection.value = { ...previousConnection, state: "demo", source: "demo" };
+    profileList.value = [{
+      id: "theo", name: "Theo", role: "Engineering", status: "idle", color: "#087f70",
+      sessions: 0, taskCount: 0, memoryBytes: 0, memoryNote: "", skills: [], inheritedSkills: [],
+    }];
+    sessions.value = [];
+    openSessionIds.value = [];
+    activeSessionId.value = "";
+    mobileInspectorOpen.value = true;
+    mobileWorkspaceOpen.value = false;
+
+    assert.equal(createProfileSession("missing"), false);
+    assert.equal(mobileInspectorOpen.value, true);
+    assert.equal(mobileWorkspaceOpen.value, false);
+    assert.deepEqual(sessions.value, []);
+
+    assert.equal(createProfileSession("theo"), true);
+    assert.equal(mobileInspectorOpen.value, false);
+    assert.equal(mobileWorkspaceOpen.value, true);
+    assert.equal(sessions.value.length, 1);
+    assert.equal(activeSessionId.value, sessions.value[0]?.id);
+    assert.deepEqual(openSessionIds.value, [sessions.value[0]?.id]);
+  } finally {
+    officeConnection.value = previousConnection;
+    profileList.value = previousProfiles;
+    sessions.value = previousSessions;
+    openSessionIds.value = previousOpenIds;
+    activeSessionId.value = previousActiveId;
+    mobileInspectorOpen.value = previousInspector;
+    mobileWorkspaceOpen.value = previousWorkspace;
   }
 });
 

@@ -15,7 +15,7 @@ export type AccessAuditEntry = {
 
 export type AccessAuditSnapshot = {
   records: AccessAuditEntry[];
-  currentAccess: { deviceName: string; local: boolean } | null;
+  currentAccess: { deviceName: string | null; local: boolean } | null;
 };
 
 const MAX_AUDIT_RECORDS = 256;
@@ -81,7 +81,7 @@ export function parseAccessAuditResponse(value: unknown): AccessAuditSnapshot {
     currentAccess: currentRecord === undefined
       ? null
       : {
-          deviceName: currentRecord.deviceName ?? (currentRecord.local ? "このMac" : "Remote device"),
+          deviceName: currentRecord.deviceName,
           local: currentRecord.local,
         },
   };

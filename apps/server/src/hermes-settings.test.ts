@@ -16,6 +16,7 @@ const DASHBOARD_SECRET = "dashboard-example-value-123456";
 const OPENAI_SECRET = "openai-example-value-123456";
 const AWS_SECRET = "aws-example-value-123456";
 const PASSWORD_SECRET = "password-example-value-123456";
+const ANTHROPIC_SECRET = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
 
 test("profile settings use a profile-pinned backend and expose secret-safe DTOs", async (t) => {
   const requests: Array<{ method: string; token: string; url: string }> = [];
@@ -31,7 +32,7 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
     if (request.url === "/api/memory") {
       writeJson(response, {
         active: "builtin",
-        providers: [{ name: "builtin", description: `Built in; AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"`, configured: true, config_path: "/private/config" }],
+        providers: [{ name: "builtin", description: `Built in; ${ANTHROPIC_SECRET}; AWS_SECRET_ACCESS_KEY = \"${AWS_SECRET}\"`, configured: true, config_path: "/private/config" }],
         builtin_files: { memory: 40, user: 12, path: "/private/memories" },
         credential: "hidden",
       });
@@ -63,14 +64,14 @@ test("profile settings use a profile-pinned backend and expose secret-safe DTOs"
   assert.equal(settings.skills[1]?.category, "CATEGORY_TOKEN=[REDACTED]");
   assert.equal(settings.skills[1]?.description, "HERMES_DASHBOARD_SESSION_TOKEN=[REDACTED]");
   assert.deepEqual(settings.memory.builtin, { memoryBytes: 40, userBytes: 12, hasMemory: true, hasUser: true });
-  assert.equal(settings.memory.providers[0]?.description, 'Built in; AWS_SECRET_ACCESS_KEY = "[REDACTED]"');
+  assert.equal(settings.memory.providers[0]?.description, 'Built in; [REDACTED]; AWS_SECRET_ACCESS_KEY = "[REDACTED]"');
   assert.equal(settings.soul.content, "Helpful agent\nOPENAI_API_KEY = '[REDACTED]'");
   assert.equal(settings.soul.redacted, true);
   const serialized = JSON.stringify(settings);
   assert.equal(serialized.includes("/private"), false);
   assert.equal(serialized.includes("supersecretvalue"), false);
   assert.equal(serialized.includes("hidden"), false);
-  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET]) assert.equal(serialized.includes(secret), false);
+  for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, ANTHROPIC_SECRET]) assert.equal(serialized.includes(secret), false);
   assert.equal(releases, 1, "one multi-request operation holds exactly one lease");
 
   await assert.rejects(adapter.getProfileSoul("other"), (error: unknown) => error instanceof HermesSettingsError);
@@ -97,7 +98,9 @@ test("skill and memory mutations are validated and use official Hermes routes", 
               { value: `VALUE_TOKEN=${DASHBOARD_SECRET}`, label: "Must be removed", description: "Unsafe value" },
             ],
           },
-          { key: "api_key", label: `SECRET_LABEL_TOKEN=${DASHBOARD_SECRET}`, kind: "secret", description: "Credential", value: "must-not-leak", is_set: true, options: [] },
+          { key: "endpoint", label: "Endpoint", kind: "text", description: "Non-secret field", value: "password=short7", is_set: true, options: [] },
+          { key: "api_key", label: `SECRET_LABEL_TOKEN=${DASHBOARD_SECRET}`, kind: "text", description: "Misclassified credential", value: "sk-exampleopaquevalue", is_set: true, options: [{ value: "opaque-option", label: "Must not be writable" }] },
+          { key: "future", label: "Unknown field", kind: "password", description: "Must fail closed", value: "opaquecredentialvalue", is_set: true, options: [] },
         ],
       });
       return;
@@ -126,9 +129,15 @@ test("skill and memory mutations are validated and use official Hermes routes", 
   assert.equal(config.fields[0]?.label, "FIELD_TOKEN=[REDACTED]");
   assert.equal(config.fields[0]?.description, "AWS_SECRET_ACCESS_KEY=[REDACTED]");
   assert.deepEqual(config.fields[0]?.options, [{ value: "local", label: "LABEL_TOKEN=[REDACTED]", description: "OPTION_TOKEN=[REDACTED]" }]);
-  assert.equal(config.fields[1]?.label, "SECRET_LABEL_TOKEN=[REDACTED]");
-  assert.equal(config.fields[1]?.kind, "secret");
-  assert.equal("value" in (config.fields[1] ?? {}), false);
+  const endpoint = config.fields.find((field) => field.key === "endpoint");
+  assert.equal(endpoint?.kind, "text");
+  assert.equal("value" in (endpoint ?? {}), false, "redacted values must not become writable placeholders");
+  const secretField = config.fields.find((field) => field.key === "api_key");
+  assert.equal(secretField?.label, "SECRET_LABEL_TOKEN=[REDACTED]");
+  assert.equal(secretField?.kind, "secret", "sensitive keys fail closed even when Hermes misclassifies the kind");
+  assert.equal("value" in (secretField ?? {}), false);
+  assert.deepEqual(secretField?.options, []);
+  assert.equal(config.fields.some((field) => field.key === "future"), false, "unknown field kinds are dropped");
   const serializedConfig = JSON.stringify(config);
   for (const secret of [DASHBOARD_SECRET, OPENAI_SECRET, AWS_SECRET, PASSWORD_SECRET]) assert.equal(serializedConfig.includes(secret), false);
 
@@ -154,6 +163,22 @@ test("skill and memory mutations are validated and use official Hermes routes", 
   );
   await assert.rejects(
     adapter.updateSkillContent("coder", "local", `HERMES_DASHBOARD_SESSION_TOKEN = \"${DASHBOARD_SECRET}\"`),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateSkillContent("coder", "local", "note: password=x"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateProfileSoul("coder", "Authorization: Basic dXNlcjpwYXNz"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateProfileSoul("coder", "See https://operator:tiny@example.test/private"),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    adapter.updateProfileSoul("coder", "Standalone ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"),
     (error: unknown) => error instanceof HermesSettingsError && error.code === "invalid_request",
   );
   await assert.rejects(

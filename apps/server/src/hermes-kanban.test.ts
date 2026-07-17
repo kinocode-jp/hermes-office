@@ -50,10 +50,11 @@ test("board reads are allowlisted and strip paths, secrets, and unknown fields",
 
 test("board and detail redact secret assignments from every free-form Hermes field", async () => {
   const secret = "dashboard-example-value-123456";
+  const standalone = "xoxb-" + "123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const card = {
     ...CARD,
     title: `note: HERMES_DASHBOARD_SESSION_TOKEN=${secret}`,
-    body: `OPENAI_API_KEY=${secret}`,
+    body: `OPENAI_API_KEY=${secret}; ${standalone}`,
     latest_summary: `clientSecret=${secret}`,
   };
   const adapter = mockAdapter((request) => request.path.includes("/tasks/")
@@ -71,6 +72,7 @@ test("board and detail redact secret assignments from every free-form Hermes fie
 
   const serialized = JSON.stringify({ board: await adapter.getBoard(), detail: await adapter.getCard(CARD.id) });
   assert.equal(serialized.includes(secret), false);
+  assert.equal(serialized.includes(standalone), false);
   assert.equal(serialized.includes("[REDACTED]"), true);
 });
 

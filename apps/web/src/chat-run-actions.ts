@@ -2,7 +2,7 @@ import type { Signal } from "@preact/signals";
 import type { ChatMessage, ChatSession } from "./domain";
 import type { ChatSteerResult } from "./chat-api";
 import { canSteerChatSession, isChatRunActive } from "./session-runtime";
-import { nowTime } from "./chat-store-utils";
+import { nowTimestamp } from "./chat-store-utils";
 import { officeMessage } from "./i18n";
 
 type SessionState = Signal<ChatSession[]>;
@@ -59,7 +59,7 @@ export async function steerChatRun(
       ...item,
       steerPending: false,
       steerOperationId: undefined,
-      messages: retainBoundedSteerEvidence([...item.messages, { id: operationId, from: "user", kind: "steer", body: trimmed, at: nowTime() }]),
+      messages: retainBoundedSteerEvidence([...item.messages, { id: operationId, from: "user", kind: "steer", body: trimmed, at: nowTimestamp() }]),
     } : item);
     return state.value.some((item) => item.id === sessionId && item.messages.some(({ id }) => id === operationId));
   } catch {
