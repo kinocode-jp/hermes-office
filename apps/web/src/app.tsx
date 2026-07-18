@@ -99,6 +99,7 @@ export function App() {
         {activeSurface.value === "kanban" && <KanbanBoard />}
         {activeSurface.value === "library" && <LiveSettings key="global-library" profileId={null} initialTab="global" />}
         {activeSurface.value === "settings" && (
+          // Host admin is host-scoped and intentionally survives profile selection; "open live settings" switches to the profile tab.
           settingsTab.value === "host" ? (
             <LiveSettings
               key="settings-host"

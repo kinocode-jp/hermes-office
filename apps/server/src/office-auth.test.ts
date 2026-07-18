@@ -77,7 +77,7 @@ test("remote config status returns configured allowed origins and never exposes 
     trustedProxyHops: 1,
   });
   const local = auth.bootstrapLocal(
-    { headers: { origin: "http://localhost:4173" }, socket: { remoteAddress: "127.0.0.1" } } as unknown as IncomingMessage,
+    { headers: { origin: "http://localhost:4173", host: "localhost:4173" }, socket: { remoteAddress: "127.0.0.1" } } as unknown as IncomingMessage,
     { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse,
   );
   assert.ok(local);
@@ -85,7 +85,7 @@ test("remote config status returns configured allowed origins and never exposes 
   assert.ok(owner);
   assert.equal(owner.enabled, true);
   assert.deepEqual(owner.origins, ["https://office.tailnet.example"]);
-  assert.equal(owner.origins[0], owner.origins[0].toLowerCase());
+  assert.equal(owner.origins[0]?.toLowerCase(), owner.origins[0]);
   assert.equal(owner.trustedProxyHops, 1);
   assert.equal(owner.devices.length, 0);
   assert.equal(JSON.stringify(owner).includes(remoteToken), false);
@@ -100,6 +100,9 @@ test("OfficeAuth rejects invalid configured origins", () => {
     { origin: "https://fragment.example#hash", label: "fragment" },
     { origin: "https://192.0.2.1", label: "IP" },
     { origin: "https://trailing-dot.example.", label: "trailing-dot" },
+    { origin: "https://example-.com", label: "trailing-hyphen-label" },
+    { origin: "https://-example.com", label: "leading-hyphen-label" },
+    { origin: `https://${"a".repeat(64)}.example.com`, label: "overlong-label" },
     { origin: "not a url", label: "malformed" },
     { origin: "", label: "empty" },
   ];

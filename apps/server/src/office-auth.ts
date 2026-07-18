@@ -680,7 +680,7 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
     if (url.search !== "" || url.hash !== "") { throw new Error(`Configured origin at index ${index} must not contain query or fragment.`); }
     if (url.hostname === "" || url.hostname.endsWith(".")) { throw new Error(`Configured origin at index ${index} has an invalid hostname.`); }
     if (isIP(url.hostname) !== 0) { throw new Error(`Configured origin at index ${index} must be a hostname, not an IP address.`); }
-    if (!/^[a-zA-Z0-9][-a-zA-Z0-9]*[a-zA-Z0-9]?(\.[a-zA-Z0-9][-a-zA-Z0-9]*[a-zA-Z0-9]?)*$/.test(url.hostname)) { throw new Error(`Configured origin at index ${index} has an invalid hostname.`); }
+    if (!isValidHostname(url.hostname)) { throw new Error(`Configured origin at index ${index} has an invalid hostname.`); }
     origins.add(url.origin);
   }
   return origins;
@@ -694,6 +694,22 @@ function readDesktopCapability(request: IncomingMessage): string | undefined {
   return undefined;
 }
 function isValidDesktopCapability(value: string): boolean { return value.length >= 32 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value); }
+function isValidHostname(hostname: string): boolean {
+  if (hostname.length < 1 || hostname.length > 253) return false;
+  for (const label of hostname.split(".")) {
+    if (label.length < 1 || label.length > 63) return false;
+    if (label.startsWith("-") || label.endsWith("-")) return false;
+    for (let i = 0; i < label.length; i += 1) {
+      const code = label.charCodeAt(i);
+      if (code === 45) continue; // hyphen
+      if (code >= 48 && code <= 57) continue; // 0-9
+      if (code >= 65 && code <= 90) continue; // A-Z
+      if (code >= 97 && code <= 122) continue; // a-z
+      return false;
+    }
+  }
+  return true;
+}
 function isTrustedLocalHost(value: string | undefined): boolean {
   if (value === undefined || value.length > 256) return false;
   try { const parsed = new URL(`http://${value}`); return parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname); }
