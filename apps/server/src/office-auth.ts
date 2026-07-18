@@ -703,9 +703,10 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
 function isSpecialTauriBridge(value: string): boolean {
   try {
     const url = new URL(value);
-    if (url.protocol !== "tauri:" && url.protocol !== "http:" && url.protocol !== "https:") return false;
-    if (url.hostname.toLowerCase() !== "tauri.localhost") return false;
-    return url.pathname === "/" && url.search === "" && url.hash === "";
+    if (url.port === "") return false;
+    if (url.protocol === "tauri:") return url.hostname === "localhost";
+    if (url.protocol === "http:" || url.protocol === "https:") return url.hostname === "tauri.localhost";
+    return false;
   } catch {
     return false;
   }
