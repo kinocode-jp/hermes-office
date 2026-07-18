@@ -379,8 +379,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (requestUrl.pathname === "/api/v1/host/remote") {
-      const access = auth.authorizeOperation(request, "device.revoke", false);
-      const config = access.allowed ? auth.remoteConfig(access.session) : undefined;
+      const config = auth.remoteConfig(authenticatedSession);
       if (config === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
       else writeJson(response, 200, config, maxResponseJsonBytes);
       return;

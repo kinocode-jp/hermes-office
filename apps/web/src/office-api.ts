@@ -528,9 +528,11 @@ export async function fetchRemoteConfigStatus(serverUrl = officeServerUrl()): Pr
   return await officeFetchJson<RemoteConfigStatus>("/api/v1/host/remote", {}, serverUrl);
 }
 
+export type DeviceRevokeFailureCode = "not_found" | "forbidden" | "unavailable" | "unknown";
+
 export class DeviceRevokeError extends Error {
-  constructor(readonly status: number) {
-    super(`Device revoke failed with HTTP ${status}.`);
+  constructor(readonly status: number, readonly code: DeviceRevokeFailureCode) {
+    super("Device revoke failed.");
     this.name = "DeviceRevokeError";
   }
 }
@@ -540,9 +542,13 @@ export async function revokeRemoteDevice(deviceId: string, serverUrl = officeSer
     await officeFetchJson<{ ok: true }>(`/api/v1/devices/${encodeURIComponent(deviceId)}/revoke`, { method: "POST" }, serverUrl);
   } catch (error) {
     if (error instanceof OfficeHttpError) {
-      throw new DeviceRevokeError(error.status);
+      let code: DeviceRevokeFailureCode = "unknown";
+      if (error.status === 404) code = "not_found";
+      else if (error.status === 401 || error.status === 403) code = "forbidden";
+      else if (error.status === 0 || error.status >= 500) code = "unavailable";
+      throw new DeviceRevokeError(error.status, code);
     }
-    throw new DeviceRevokeError(0);
+    throw new DeviceRevokeError(0, "unavailable");
   }
 }
 

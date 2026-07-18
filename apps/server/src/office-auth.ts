@@ -134,6 +134,10 @@ export class OfficeAuth {
       };
     }
     this.#deviceRegistryPath = normalizeRegistryPath(options.deviceRegistryPath);
+    // SECURITY/ARCHITECTURE: An existing registry is marked enrollment-consumed before parsing.
+    // Corrupt or unreadable content intentionally remains consumed so that registry-write access
+    // cannot reopen enrollment. Owner recovery requires inspecting, replacing, or removing the file
+    // while Office is stopped.
     this.#loadDeviceRegistry();
     this.#onAudit = options.onAudit;
   }

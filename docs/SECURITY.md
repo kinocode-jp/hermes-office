@@ -144,7 +144,9 @@ If remote access is necessary:
    this revokes every older remote device;
 7. if the registry is corrupt, stop Office, move the registry aside as the local
    host owner, configure a different token, restart, and enroll again; never edit
-   the registry while Office is running;
+   the registry while Office is running; an unreadable or corrupt existing registry
+   fails closed and remains enrollment-consumed, so the owner must inspect,
+   replace, or remove it while Office is stopped;
 8. never expose stock `hermes serve` directly.
 
 ## Desktop host administration panel

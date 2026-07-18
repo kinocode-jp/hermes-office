@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { RemoteConfigStatus } from "@hermes-office/protocol";
-import { fetchRemoteConfigStatus, revokeRemoteDevice, DeviceRevokeError } from "../office-api";
-import { locale, t } from "../i18n";
+import { fetchRemoteConfigStatus, revokeRemoteDevice, DeviceRevokeError, type DeviceRevokeFailureCode } from "../office-api";
+import { locale, t, type TranslationKey } from "../i18n";
 import { InfoTip } from "./info-tip";
 import "./access-audit.css";
+
+const REVOKE_ERROR_KEY: Readonly<Record<DeviceRevokeFailureCode, TranslationKey>> = {
+  not_found: "hostAdmin.revokeFailed.notFound",
+  forbidden: "hostAdmin.revokeFailed.forbidden",
+  unavailable: "hostAdmin.revokeFailed.unavailable",
+  unknown: "hostAdmin.revokeFailed.unknown",
+};
 
 export function DeviceAdmin() {
   const [status, setStatus] = useState<RemoteConfigStatus | null>(null);
@@ -11,8 +18,9 @@ export function DeviceAdmin() {
   const [error, setError] = useState(false);
   const [revoking, setRevoking] = useState<ReadonlySet<string>>(() => new Set());
   const [confirmDevice, setConfirmDevice] = useState<RemoteConfigStatus["devices"][number] | null>(null);
-  const [revokeError, setRevokeError] = useState<{ deviceId: string; status: number; message: string } | null>(null);
+  const [revokeError, setRevokeError] = useState<DeviceRevokeFailureCode | null>(null);
   const generation = useRef(0);
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const reload = useCallback(async (showLoading = true) => {
     const currentGeneration = ++generation.current;
@@ -31,7 +39,14 @@ export function DeviceAdmin() {
 
   useEffect(() => {
     void reload();
+    return () => {
+      generation.current += 1;
+    };
   }, [reload]);
+
+  useEffect(() => {
+    if (confirmDevice) confirmButtonRef.current?.focus();
+  }, [confirmDevice]);
 
   const askRevoke = useCallback((device: RemoteConfigStatus["devices"][number]) => {
     setRevokeError(null);
@@ -51,9 +66,7 @@ export function DeviceAdmin() {
       await revokeRemoteDevice(device.id);
       await reload(false);
     } catch (reason) {
-      const message = reason instanceof DeviceRevokeError ? t("hostAdmin.revokeFailed") : t("hostAdmin.revokeFailed");
-      const status = reason instanceof DeviceRevokeError ? reason.status : 0;
-      setRevokeError({ deviceId: device.id, status, message });
+      setRevokeError(reason instanceof DeviceRevokeError ? reason.code : "unavailable");
     } finally {
       setRevoking((prev) => {
         const next = new Set(prev);
@@ -62,6 +75,8 @@ export function DeviceAdmin() {
       });
     }
   }, [reload, revoking]);
+
+  const revokeErrorKey = revokeError ? REVOKE_ERROR_KEY[revokeError] : null;
 
   return (
     <section class="access-audit" aria-labelledby="device-admin-title" aria-busy={loading}>
@@ -136,11 +151,26 @@ export function DeviceAdmin() {
           )}
 
           {confirmDevice && (
-            <div class="access-audit__message" role="dialog" aria-modal="true" aria-labelledby="revoke-confirm-title">
+            <div
+              class="access-audit__message"
+              role="group"
+              aria-labelledby="revoke-confirm-title"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelRevoke();
+                }
+              }}
+            >
               <b id="revoke-confirm-title">{t("hostAdmin.revokeConfirm")}</b>
               <p>{t("hostAdmin.revokePrompt", { name: confirmDevice.displayName })}</p>
               <div class="access-audit__device">
-                <button type="button" onClick={() => void revoke(confirmDevice)} disabled={revoking.has(confirmDevice.id)}>
+                <button
+                  type="button"
+                  ref={confirmButtonRef}
+                  onClick={() => void revoke(confirmDevice)}
+                  disabled={revoking.has(confirmDevice.id)}
+                >
                   {revoking.has(confirmDevice.id) ? t("hostAdmin.revoking") : t("hostAdmin.revoke")}
                 </button>
                 <button type="button" onClick={cancelRevoke}>{t("hostAdmin.revokeCancel")}</button>
@@ -148,9 +178,9 @@ export function DeviceAdmin() {
             </div>
           )}
 
-          {revokeError && (
+          {revokeError && revokeErrorKey && (
             <div class="access-audit__message is-error" role="alert">
-              <b>{t("hostAdmin.revokeFailed")}</b>
+              <b>{t(revokeErrorKey)}</b>
             </div>
           )}
         </div>
