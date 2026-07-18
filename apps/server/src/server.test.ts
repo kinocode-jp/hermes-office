@@ -7,7 +7,7 @@ import type { HermesRuntimeSource } from "./hermes-backend.js";
 import type { HermesChatRequest } from "./hermes-chat.js";
 import { createDemoRuntimeStatus, createDemoSnapshot } from "./demo-state.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
-import { createOfficeServer, isLoopbackHost, makeOriginAllowlist } from "./server.js";
+import { allowedCorsOrigin, createOfficeServer, isLoopbackHost, makeOriginAllowlist } from "./server.js";
 
 test("direct non-loopback listeners are always refused", () => {
   assert.throws(() => createOfficeServer({ host: "0.0.0.0" }), /direct non-loopback bind/);
@@ -34,6 +34,69 @@ test("origin allowlist rejects wildcards and null origins", () => {
     makeOriginAllowlist(["https://office.example/"]).has("https://office.example"),
     true,
   );
+});
+
+test("allowedCorsOrigin resolves normalized inputs to canonical allowlist entries", () => {
+  const allowlist = makeOriginAllowlist([
+    "https://office.example",
+    "http://localhost:4173",
+    "tauri://localhost",
+  ]);
+
+  assert.equal(allowedCorsOrigin("https://office.example/", allowlist), "https://office.example");
+  assert.equal(allowedCorsOrigin("https://OFFICE.EXAMPLE/", allowlist), "https://office.example");
+  assert.equal(allowedCorsOrigin("https://office.example:443/", allowlist), "https://office.example");
+  assert.equal(allowedCorsOrigin("http://localhost:4173/", allowlist), "http://localhost:4173");
+  assert.equal(allowedCorsOrigin("http://LOCALHOST:4173", allowlist), "http://localhost:4173");
+  assert.equal(allowedCorsOrigin("tauri://localhost", allowlist), "tauri://localhost");
+});
+
+test("allowedCorsOrigin rejects disallowed and malformed origins", () => {
+  const allowlist = makeOriginAllowlist(["https://office.example"]);
+
+  assert.equal(allowedCorsOrigin("https://attacker.example", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("https://office.example.evil.com", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("https://office.example/path", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("https://user:pass@office.example", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("https://office.example?query", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("https://office.example#hash", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("*", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("null", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("not a url", allowlist), undefined);
+});
+
+test("CORS response header echoes the canonical allowlist entry, not the raw request origin", async () => {
+  const server = createOfficeServer({ port: 0, allowedOrigins: ["https://office.example"] });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const response = await fetch(`${base}/api/v1/health`, {
+      headers: { Origin: "https://OFFICE.EXAMPLE:443/" },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("access-control-allow-origin"), "https://office.example");
+    assert.equal(response.headers.get("access-control-allow-credentials"), "true");
+    assert.equal(response.headers.get("vary"), "Origin");
+  } finally {
+    await server.close();
+  }
+});
+
+test("CORS header is omitted when no Origin is sent", async () => {
+  const server = createOfficeServer({ port: 0 });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const response = await fetch(`${base}/api/v1/health`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+    assert.equal(response.headers.get("access-control-allow-credentials"), null);
+  } finally {
+    await server.close();
+  }
 });
 
 test("createOfficeServer origin allowlist always includes remote and Tauri origins", async () => {
