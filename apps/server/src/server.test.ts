@@ -41,6 +41,8 @@ test("allowedCorsOrigin resolves normalized inputs to canonical allowlist entrie
     "https://office.example",
     "http://localhost:4173",
     "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
   ]);
 
   assert.equal(allowedCorsOrigin("https://office.example/", allowlist), "https://office.example");
@@ -49,6 +51,10 @@ test("allowedCorsOrigin resolves normalized inputs to canonical allowlist entrie
   assert.equal(allowedCorsOrigin("http://localhost:4173/", allowlist), "http://localhost:4173");
   assert.equal(allowedCorsOrigin("http://LOCALHOST:4173", allowlist), "http://localhost:4173");
   assert.equal(allowedCorsOrigin("tauri://localhost", allowlist), "tauri://localhost");
+  assert.equal(allowedCorsOrigin("TAURI://Localhost", allowlist), "tauri://localhost");
+  assert.equal(allowedCorsOrigin("TAURI://Localhost/", allowlist), "tauri://localhost");
+  assert.equal(allowedCorsOrigin("HTTP://TAURI.Localhost", allowlist), "http://tauri.localhost");
+  assert.equal(allowedCorsOrigin("https://TAURI.Localhost", allowlist), "https://tauri.localhost");
 });
 
 test("allowedCorsOrigin rejects disallowed and malformed origins", () => {
@@ -64,6 +70,9 @@ test("allowedCorsOrigin rejects disallowed and malformed origins", () => {
   assert.equal(allowedCorsOrigin("null", allowlist), undefined);
   assert.equal(allowedCorsOrigin("", allowlist), undefined);
   assert.equal(allowedCorsOrigin("not a url", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("TAURI://Localhost/path", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("TAURI://Localhost?query", allowlist), undefined);
+  assert.equal(allowedCorsOrigin("TAURI://Localhost#hash", allowlist), undefined);
 });
 
 test("CORS response header echoes the canonical allowlist entry, not the raw request origin", async () => {

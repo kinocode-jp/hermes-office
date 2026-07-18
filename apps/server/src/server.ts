@@ -20,6 +20,7 @@ import {
   createDemoSnapshot,
 } from "./demo-state.js";
 import { DEFAULT_OFFICE_ORIGINS, listenerOrigins } from "./server-origins.js";
+import { normalizeOrigin } from "./origin.js";
 
 export interface OfficeServerOptions {
   host?: string;
@@ -629,28 +630,7 @@ export function allowedCorsOrigin(origin: string, allowlist: ReadonlySet<string>
   return undefined;
 }
 
-export function normalizeOrigin(origin: string): string {
-  const value = origin.trim();
-  if (value === "") return value;
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      if (
-        parsed.username !== "" ||
-        parsed.password !== "" ||
-        parsed.pathname !== "/" ||
-        parsed.search !== "" ||
-        parsed.hash !== ""
-      ) {
-        return "";
-      }
-      return parsed.origin;
-    }
-  } catch {
-    return value.replace(/\/$/, "");
-  }
-  return value.replace(/\/$/, "");
-}
+export { normalizeOrigin };
 
 export function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");

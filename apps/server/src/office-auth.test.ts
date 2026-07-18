@@ -36,6 +36,42 @@ test("local bootstrap issues an HttpOnly session and requires CSRF for mutation"
   }
 });
 
+test("desktop capability authenticates with canonicalized origin comparison", async () => {
+  const capability = "c".repeat(64);
+  const auth = new OfficeAuth({
+    desktopCapability: capability,
+    desktopOrigins: ["TAURI://Localhost", "HTTP://Localhost:4173", "http://127.0.0.1:4173"],
+  });
+  const server = createServer((request, response) => {
+    const session = request.url === "/mutate" ? auth.authorizeMutation(request) : auth.authenticate(request);
+    response.writeHead(session === undefined ? 401 : 200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(session ?? {}));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("missing address");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    for (const rawOrigin of ["tauri://localhost", "TAURI://Localhost", "http://localhost:4173", "http://LOCALHOST:4173", "http://127.0.0.1:4173"]) {
+      const result = await fetch(`${base}/read`, {
+        headers: { Origin: rawOrigin, "X-Hermes-Office-Desktop-Capability": capability },
+      });
+      assert.equal(result.status, 200, `expected ${rawOrigin} to authenticate`);
+    }
+
+    for (const malformedOrigin of ["TAURI://Localhost/path", "TAURI://Localhost?query", "TAURI://Localhost#hash", "http://localhost.evil.com"]) {
+      const result = await fetch(`${base}/read`, {
+        headers: { Origin: malformedOrigin, "X-Hermes-Office-Desktop-Capability": capability },
+      });
+      assert.equal(result.status, 401, `expected ${malformedOrigin} to be rejected`);
+    }
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
+
 test("desktop capability is Tauri-only, mutation-capable, and renews its bounded lease", async () => {
   const capability = "c".repeat(64);
   const auth = new OfficeAuth({ desktopCapability: capability });
@@ -98,6 +134,40 @@ test("remote config status returns configured allowed origins and never exposes 
   );
   assert.ok(local);
   assert.equal(auth.remoteConfig(local), undefined);
+});
+
+test("local bootstrap rejects raw local origins with credentials, path, query, or fragment", () => {
+  const auth = new OfficeAuth();
+  const response = { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse;
+  const denied = [
+    { origin: "http://localhost:4173/path", label: "path" },
+    { origin: "http://user:pass@localhost:4173", label: "credentials" },
+    { origin: "http://localhost:4173?query=1", label: "query" },
+    { origin: "http://localhost:4173#hash", label: "fragment" },
+  ];
+  for (const { origin, label } of denied) {
+    const request = {
+      headers: { origin, host: "localhost:4173" },
+      socket: { remoteAddress: "127.0.0.1" },
+    } as unknown as IncomingMessage;
+    assert.equal(auth.bootstrapLocal(request, response), undefined, label);
+  }
+
+  const accepted = [
+    { origin: "http://localhost:4173", label: "lowercase" },
+    { origin: "HTTP://LOCALHOST:4173", label: "uppercase" },
+    { origin: "http://127.0.0.1:4173", label: "ipv4" },
+    { origin: "TAURI://Localhost", label: "tauri-canonical" },
+    { origin: "HTTP://Tauri.Localhost", label: "tauri-http-canonical" },
+    { origin: "HTTPS://Tauri.Localhost", label: "tauri-https-canonical" },
+  ];
+  for (const { origin, label } of accepted) {
+    const request = {
+      headers: { origin, host: "localhost:4173" },
+      socket: { remoteAddress: "127.0.0.1" },
+    } as unknown as IncomingMessage;
+    assert.ok(auth.bootstrapLocal(request, response), label);
+  }
 });
 
 test("OfficeAuth rejects invalid configured origins", () => {

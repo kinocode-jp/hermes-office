@@ -11,6 +11,7 @@ import {
   type Operation,
   type PermissionTier,
 } from "@hermes-office/protocol";
+import { isLoopbackOrigin, isTrustedLocalOrigin, normalizeOrigin } from "./origin.js";
 
 const COOKIE_NAME = "hermes_office_session";
 const DEVICE_COOKIE_NAME = "hermes_office_device";
@@ -642,16 +643,26 @@ function forwardedClientKey(header: string | string[] | undefined, trustedHops: 
   return value.length <= 64 && isIP(value) !== 0 ? value.toLowerCase() : undefined;
 }
 function isTrustedLocalRequest(request: IncomingMessage): boolean {
-  if (!isLoopbackAddress(request.socket.remoteAddress) || !isTrustedLocalOrigin(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  const origin = request.headers.origin;
+  if (origin === undefined) return false;
+  const canonical = normalizeOrigin(origin);
+  if (!isLoopbackAddress(request.socket.remoteAddress) || canonical === "" || !isTrustedLocalOrigin(canonical) || !isTrustedLocalHost(request.headers.host)) return false;
   return request.headers.forwarded === undefined && request.headers["x-forwarded-for"] === undefined && request.headers["x-forwarded-host"] === undefined && request.headers["x-real-ip"] === undefined;
 }
 function isTrustedDesktopRequest(request: IncomingMessage, allowedOrigins: ReadonlySet<string>): boolean {
-  if (!isLoopbackAddress(request.socket.remoteAddress) || request.headers.origin === undefined || !allowedOrigins.has(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  const origin = request.headers.origin;
+  if (origin === undefined) return false;
+  const canonical = normalizeOrigin(origin);
+  if (!isLoopbackAddress(request.socket.remoteAddress) || canonical === "" || !allowedOrigins.has(canonical) || !isTrustedLocalHost(request.headers.host)) return false;
   return request.headers.forwarded === undefined && request.headers["x-forwarded-for"] === undefined && request.headers["x-forwarded-host"] === undefined && request.headers["x-real-ip"] === undefined;
 }
 function validateDesktopOrigins(values: readonly string[]): ReadonlySet<string> {
   const origins = new Set<string>();
-  for (const value of values) { if (!isTrustedLocalOrigin(value)) throw new Error("Desktop origins must be explicit trusted local origins."); origins.add(value); }
+  for (const value of values) {
+    const canonical = normalizeOrigin(value);
+    if (canonical === "" || !isTrustedLocalOrigin(canonical)) throw new Error("Desktop origins must be explicit trusted local origins.");
+    origins.add(canonical);
+  }
   if (origins.size === 0) throw new Error("At least one desktop origin is required.");
   return origins;
 }
@@ -663,12 +674,10 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
     if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
       throw new Error(`Configured origin at index ${index} is invalid.`);
     }
-    if (isTrustedLocalOrigin(value)) {
-      if (value === "tauri://localhost") { origins.add(value); }
-      else {
-        try { origins.add(new URL(value).origin); }
-        catch { throw new Error(`Configured origin at index ${index} is not a valid local origin.`); }
-      }
+    const canonicalLocal = normalizeOrigin(value);
+    if (canonicalLocal !== "" && isTrustedLocalOrigin(canonicalLocal)) {
+      if (canonicalLocal === "tauri://localhost") { origins.add(canonicalLocal); }
+      else { origins.add(new URL(canonicalLocal).origin); }
       continue;
     }
     let url: URL;
@@ -713,17 +722,6 @@ function isValidHostname(hostname: string): boolean {
 function isTrustedLocalHost(value: string | undefined): boolean {
   if (value === undefined || value.length > 256) return false;
   try { const parsed = new URL(`http://${value}`); return parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname); }
-  catch { return false; }
-}
-function isTrustedLocalOrigin(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
-  try { const origin = new URL(value); return (origin.protocol === "http:" || origin.protocol === "https:") && ["localhost", "127.0.0.1"].includes(origin.hostname) && origin.username === "" && origin.password === "" && origin.pathname === "/" && origin.search === "" && origin.hash === ""; }
-  catch { return false; }
-}
-function isLoopbackOrigin(value: string): boolean {
-  if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
-  try { const origin = new URL(value); return ["localhost", "127.0.0.1", "::1"].includes(origin.hostname); }
   catch { return false; }
 }
 function normalizeDeviceName(value: string): string | undefined { const name = value.trim(); return name.length >= 1 && name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(name) ? name : undefined; }
