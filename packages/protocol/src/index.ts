@@ -168,6 +168,18 @@ export interface DeviceSummary {
   revokedAt?: IsoDateTime;
 }
 
+/**
+ * Owner-visible remote access status. Never contains secrets, digests,
+ * credentials, or cookie values. Origins are returned as the canonical
+ * configured HTTPS origins.
+ */
+export interface RemoteConfigStatus {
+  enabled: boolean;
+  origins: readonly string[];
+  trustedProxyHops: number;
+  devices: readonly DeviceSummary[];
+}
+
 export interface RuntimeStatus {
   mode: RuntimeMode;
   state: RuntimeState;

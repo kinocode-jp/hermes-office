@@ -1,4 +1,5 @@
 import { OPERATION_POLICIES } from "@hermes-office/protocol";
+import type { RemoteConfigStatus } from "@hermes-office/protocol";
 import type { OfficeRuntimeState, OfficeSnapshot, OfficeSnapshotRequestIdentity } from "./domain";
 import { classifyDeviceLoginFailure, isLocalOfficeClient, normalizeDeviceName, type DeviceLoginFailure } from "./auth-state";
 import { createAuthenticatedOfficeWebSocket, desktopCapability, desktopCapabilityHeader } from "./desktop-transport";
@@ -521,6 +522,30 @@ export async function authenticateRemoteDevice(deviceNameInput: string, credenti
     return { ok: false, ...classifyDeviceLoginFailure(0, null) };
   }
 }
+
+
+export async function fetchRemoteConfigStatus(serverUrl = officeServerUrl()): Promise<RemoteConfigStatus> {
+  return await officeFetchJson<RemoteConfigStatus>("/api/v1/host/remote", {}, serverUrl);
+}
+
+export class DeviceRevokeError extends Error {
+  constructor(readonly status: number) {
+    super(`Device revoke failed with HTTP ${status}.`);
+    this.name = "DeviceRevokeError";
+  }
+}
+
+export async function revokeRemoteDevice(deviceId: string, serverUrl = officeServerUrl()): Promise<void> {
+  try {
+    await officeFetchJson<{ ok: true }>(`/api/v1/devices/${encodeURIComponent(deviceId)}/revoke`, { method: "POST" }, serverUrl);
+  } catch (error) {
+    if (error instanceof OfficeHttpError) {
+      throw new DeviceRevokeError(error.status);
+    }
+    throw new DeviceRevokeError(0);
+  }
+}
+
 
 export async function logoutRemoteDevice(serverUrl = officeServerUrl()): Promise<void> {
   notifyOfficeAuthChange(serverUrl);

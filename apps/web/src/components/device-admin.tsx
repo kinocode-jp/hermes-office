@@ -1,0 +1,171 @@
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import type { RemoteConfigStatus } from "@hermes-office/protocol";
+import { fetchRemoteConfigStatus, revokeRemoteDevice, DeviceRevokeError } from "../office-api";
+import { locale, t } from "../i18n";
+import { InfoTip } from "./info-tip";
+import "./access-audit.css";
+
+export function DeviceAdmin() {
+  const [status, setStatus] = useState<RemoteConfigStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [revoking, setRevoking] = useState<ReadonlySet<string>>(() => new Set());
+  const [confirmDevice, setConfirmDevice] = useState<RemoteConfigStatus["devices"][number] | null>(null);
+  const [revokeError, setRevokeError] = useState<{ deviceId: string; status: number; message: string } | null>(null);
+  const generation = useRef(0);
+
+  const reload = useCallback(async (showLoading = true) => {
+    const currentGeneration = ++generation.current;
+    if (showLoading) setLoading(true);
+    try {
+      const next = await fetchRemoteConfigStatus();
+      if (generation.current !== currentGeneration) return;
+      setStatus(next);
+      setError(false);
+    } catch {
+      if (generation.current === currentGeneration) setError(true);
+    } finally {
+      if (generation.current === currentGeneration) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const askRevoke = useCallback((device: RemoteConfigStatus["devices"][number]) => {
+    setRevokeError(null);
+    setConfirmDevice(device);
+  }, []);
+
+  const cancelRevoke = useCallback(() => {
+    setConfirmDevice(null);
+  }, []);
+
+  const revoke = useCallback(async (device: RemoteConfigStatus["devices"][number]) => {
+    if (revoking.has(device.id)) return;
+    setRevokeError(null);
+    setConfirmDevice(null);
+    setRevoking((prev) => new Set([...prev, device.id]));
+    try {
+      await revokeRemoteDevice(device.id);
+      await reload(false);
+    } catch (reason) {
+      const message = reason instanceof DeviceRevokeError ? t("hostAdmin.revokeFailed") : t("hostAdmin.revokeFailed");
+      const status = reason instanceof DeviceRevokeError ? reason.status : 0;
+      setRevokeError({ deviceId: device.id, status, message });
+    } finally {
+      setRevoking((prev) => {
+        const next = new Set(prev);
+        next.delete(device.id);
+        return next;
+      });
+    }
+  }, [reload, revoking]);
+
+  return (
+    <section class="access-audit" aria-labelledby="device-admin-title" aria-busy={loading}>
+      <header class="access-audit__gate">
+        <div class="access-audit__title">
+          <p>{t("hostAdmin.eyebrow")}</p>
+          <div class="heading-info-group">
+            <h2 id="device-admin-title">{t("hostAdmin.title")}</h2>
+            <InfoTip text={t("hostAdmin.guide")} align="start" side="bottom" />
+          </div>
+        </div>
+        <button type="button" onClick={() => void reload()} disabled={loading}>
+          {loading ? t("audit.loading") : t("hostAdmin.reload")}
+        </button>
+      </header>
+
+      {error ? (
+        <div class="access-audit__message is-error" role="alert">
+          <b>{t("hostAdmin.loadFailed")}</b>
+        </div>
+      ) : status === null ? (
+        <div class="access-audit__message">{t("audit.loading")}</div>
+      ) : (
+        <div class="access-audit__rail">
+          <div class="access-audit__current">
+            <span>{t("hostAdmin.status")}</span>
+            <strong>{status.enabled ? t("hostAdmin.enabled") : t("hostAdmin.disabled")}</strong>
+          </div>
+
+          <div class="access-audit__current">
+            <span>{t("hostAdmin.proxyHops")}</span>
+            <strong>{status.trustedProxyHops}</strong>
+          </div>
+
+          <div class="access-audit__rail-head" aria-hidden="true">
+            <span>{t("hostAdmin.origins")}</span>
+          </div>
+          {status.origins.length === 0 ? (
+            <div class="access-audit__message">{t("hostAdmin.noOrigins")}</div>
+          ) : (
+            <ol aria-label={t("hostAdmin.origins")}>
+              {status.origins.map((origin) => (
+                <li key={origin}><code>{origin}</code></li>
+              ))}
+            </ol>
+          )}
+
+          <div class="access-audit__rail-head" aria-hidden="true">
+            <span>{t("hostAdmin.devices")}</span>
+          </div>
+          {status.devices.length === 0 ? (
+            <div class="access-audit__message">{t("hostAdmin.noDevices")}</div>
+          ) : (
+            <ol aria-label={t("hostAdmin.devices")}>
+              {status.devices.map((device) => (
+                <li key={device.id} class="access-audit__device">
+                  <span>{device.displayName}</span>
+                  <span class={device.revokedAt ? "is-error" : "is-local"}>
+                    {device.revokedAt ? t("audit.outcome.denied") : device.lastSeenAt ? formatTime(device.lastSeenAt) : ""}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={revoking.has(device.id) || device.revokedAt !== undefined}
+                    onClick={() => askRevoke(device)}
+                    aria-label={t("hostAdmin.revokeAria", { name: device.displayName })}
+                  >
+                    {revoking.has(device.id) ? t("hostAdmin.revoking") : device.revokedAt ? t("hostAdmin.revokeDone") : t("hostAdmin.revoke")}
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )}
+
+          {confirmDevice && (
+            <div class="access-audit__message" role="dialog" aria-modal="true" aria-labelledby="revoke-confirm-title">
+              <b id="revoke-confirm-title">{t("hostAdmin.revokeConfirm")}</b>
+              <p>{t("hostAdmin.revokePrompt", { name: confirmDevice.displayName })}</p>
+              <div class="access-audit__device">
+                <button type="button" onClick={() => void revoke(confirmDevice)} disabled={revoking.has(confirmDevice.id)}>
+                  {revoking.has(confirmDevice.id) ? t("hostAdmin.revoking") : t("hostAdmin.revoke")}
+                </button>
+                <button type="button" onClick={cancelRevoke}>{t("hostAdmin.revokeCancel")}</button>
+              </div>
+            </div>
+          )}
+
+          {revokeError && (
+            <div class="access-audit__message is-error" role="alert">
+              <b>{t("hostAdmin.revokeFailed")}</b>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function formatTime(timestamp: string): string {
+  return new Intl.DateTimeFormat(locale.value === "ja" ? "ja-JP" : "en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp)).replaceAll("/", ".");
+}

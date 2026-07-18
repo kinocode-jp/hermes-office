@@ -49,10 +49,19 @@ tokens and backend URLs are not part of the public browser DTOs.
 
 The remote-device credential digest, fixed `operator` tier, expiry, revocation,
 enrollment-token generation digest, and one-time consumption state are persisted
-in the device registry (by default `~/.hermes-office/devices.json`). Session
-cookies, rate-limit windows, socket bindings, pending approvals, and the bounded
-audit feed remain in memory and reset with the server. The project does not
-implement a general multi-user identity provider or public-internet mode.
+in the device registry (by default `~/.hermes-office/devices.json`). The three
+Office remote environment variables (`HERMES_OFFICE_REMOTE_TOKEN`,
+`HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`) are owned
+by the host environment and inherited only by the Office server child via the
+desktop launcher; they are not forwarded to the managed Hermes Agent runtime. The
+server exposes an owner-only `/api/v1/host/remote` endpoint that reports the
+canonical configured HTTPS origin(s), trusted proxy-hop count, and device metadata
+without returning the enrollment token, device digest, or any credential. The web
+UI renders a desktop-host administration panel only for sessions authenticated with
+the Tauri desktop capability. Session cookies, rate-limit windows, socket
+bindings, pending approvals, and the bounded audit feed remain in memory and reset
+with the server. The project does not implement a general multi-user identity
+provider or public-internet mode.
 
 Hermes stored chat sessions are intentionally shared across the single trusted
 operator namespace rather than owned by one remote device. An authenticated

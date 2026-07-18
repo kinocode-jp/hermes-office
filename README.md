@@ -34,8 +34,10 @@ trusted operator. Do not expose it directly to the public internet. See
 - English/Japanese UI, adjustable text size, light/dark themes, responsive
   phone navigation, and an installable PWA shell.
 - Loopback browser sessions, Tauri launch capabilities, origin/Host checks,
-  CSRF checks for cookie-authenticated writes, bounded request bodies, and an
-  experimental one-time remote-device enrollment/revocation flow.
+  CSRF checks for cookie-authenticated writes, bounded request bodies, an
+  experimental one-time remote-device enrollment/revocation flow, and a
+  desktop-only host administration surface that reports remote access status
+  without exposing secrets.
 
 Deliberate exclusions include raw Memory-file editing, destructive Memory
 reset, provider-secret entry, Skill installation/deletion, arbitrary Hermes
@@ -140,7 +142,11 @@ Remote-device access exists for the same operator, but remains experimental. If
 you use it, keep Office bound to loopback and place an authenticated HTTPS
 private-network proxy such as Tailscale Serve in front of it. Configure one
 unique random, one-time enrollment token of at least 32 characters, one exact
-HTTPS origin, and the exact number of trusted loopback proxy hops:
+HTTPS origin, and the exact number of trusted loopback proxy hops. The
+**Desktop Host Administration** panel in the Tauri desktop UI shows the live
+status, configured origins, and registered devices; it appears only for the owner
+who launched the desktop app and is never shown to local browsers or remote
+operators.
 
 ```bash
 HERMES_OFFICE_REMOTE_TOKEN='replace-with-a-random-32+-character-token' \

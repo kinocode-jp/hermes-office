@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -92,6 +93,10 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
     let mut command = Command::new(node);
     command.env_clear();
     inherit_safe_environment(&mut command);
+    // Office remote-device configuration is owned by the host environment, not
+    // hardcoded or stored in the browser. Pass it through to the server child
+    // only; do not forward it to the managed Hermes runtime.
+    inherit_office_remote_environment(&mut command, env::var_os);
     command
         .arg(script)
         .env("HERMES_OFFICE_HOST", OFFICE_HOST)
@@ -349,6 +354,21 @@ fn inherit_safe_environment(command: &mut Command) {
     }
 }
 
+/// Office remote-device configuration is only meaningful to the Office server
+/// child. Preserve it across env_clear so a host owner can launch remote
+/// access without putting tokens in the browser or source files.
+fn inherit_office_remote_environment(command: &mut Command, lookup: impl Fn(&str) -> Option<OsString>) {
+    for key in [
+        "HERMES_OFFICE_REMOTE_TOKEN",
+        "HERMES_OFFICE_ALLOWED_ORIGINS",
+        "HERMES_OFFICE_TRUSTED_PROXY_HOPS",
+    ] {
+        if let Some(value) = lookup(key).filter(|value| !value.is_empty()) {
+            command.env(key, value);
+        }
+    }
+}
+
 fn node_candidates(home: Option<&Path>) -> Vec<PathBuf> {
     let mut values = Vec::new();
     if let Some(home) = home {
@@ -444,5 +464,42 @@ mod tests {
     #[cfg(debug_assertions)]
     fn debug_capability_matches_the_dev_server_contract() {
         assert_eq!(generate_desktop_capability(), DEBUG_DESKTOP_CAPABILITY);
+    }
+
+    #[test]
+    fn office_remote_environment_allowlist_is_exact_when_host_values_present() {
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert("HERMES_OFFICE_REMOTE_TOKEN", OsString::from("office-token"));
+        lookup.insert("HERMES_OFFICE_ALLOWED_ORIGINS", OsString::from("https://office.example"));
+        lookup.insert("HERMES_OFFICE_TRUSTED_PROXY_HOPS", OsString::from("1"));
+        let mut command = Command::new("/bin/sh");
+        command.env_clear();
+        inherit_office_remote_environment(&mut command, |key| lookup.get(key).cloned());
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            })
+            .collect();
+        assert!(envs.contains(&("HERMES_OFFICE_REMOTE_TOKEN".to_string(), "office-token".to_string())));
+        assert!(envs.contains(&("HERMES_OFFICE_ALLOWED_ORIGINS".to_string(), "https://office.example".to_string())));
+        assert!(envs.contains(&("HERMES_OFFICE_TRUSTED_PROXY_HOPS".to_string(), "1".to_string())));
+        assert_eq!(envs.len(), 3, "only the three allowed Office keys may be forwarded");
+    }
+
+    #[test]
+    fn office_remote_environment_allowlist_ignores_empty_or_missing_values() {
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert("HERMES_OFFICE_REMOTE_TOKEN", OsString::from(""));
+        let mut command = Command::new("/bin/sh");
+        command.env_clear();
+        inherit_office_remote_environment(&mut command, |key| lookup.get(key).cloned());
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            })
+            .collect();
+        assert!(envs.is_empty(), "empty or absent host values must not be forwarded");
     }
 }

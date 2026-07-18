@@ -524,3 +524,97 @@ test("malformed device registry fails closed without reopening enrollment", asyn
     assert.equal((await deviceLogin(`http://127.0.0.1:${address.port}`, REMOTE_TOKEN)).status, 409);
   } finally { await server.close(); }
 });
+
+test("host remote status is owner-only and omits secrets", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-host-remote-"));
+  const deviceRegistryPath = join(directory, "devices.json");
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [LOCAL_ORIGIN, REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    deviceRegistryPath,
+  });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const localLogin = await fetch(`${base}/api/v1/auth/local`, {
+      method: "POST",
+      headers: { Origin: LOCAL_ORIGIN },
+    });
+    assert.equal(localLogin.status, 200);
+    const localCookie = (localLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+
+    const status = await fetch(`${base}/api/v1/host/remote`, {
+      headers: { Origin: LOCAL_ORIGIN, Cookie: localCookie },
+    });
+    assert.equal(status.status, 200);
+    const body = await status.json() as Record<string, unknown>;
+    assert.equal(body.enabled, true);
+    assert.deepEqual(body.origins, [REMOTE_ORIGIN]);
+    assert.equal(body.trustedProxyHops, 1);
+    assert.equal((body.origins as string[]).every((origin) => origin.startsWith("https://")), true);
+    assert.ok(Array.isArray(body.devices));
+    assert.equal(JSON.stringify(body).includes(REMOTE_TOKEN), false);
+
+    const deviceLogin = await fetch(`${base}/api/v1/auth/device`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json", "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },
+      body: JSON.stringify({ token: REMOTE_TOKEN, deviceName: "Travel phone" }),
+    });
+    assert.equal(deviceLogin.status, 200);
+    const deviceCookie = (deviceLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+
+    const remoteStatus = await fetch(`${base}/api/v1/host/remote`, {
+      headers: { Origin: REMOTE_ORIGIN, Cookie: deviceCookie, "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },
+    });
+    assert.equal(remoteStatus.status, 403);
+  } finally { await server.close(); }
+});
+
+
+test("host remote status returns only configured HTTPS origins and omits secrets", async () => {
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [LOCAL_ORIGIN, REMOTE_ORIGIN, "http://127.0.0.1:3000"],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 2,
+  });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const local = await fetch(`${base}/api/v1/auth/local`, { method: "POST", headers: { Origin: LOCAL_ORIGIN } });
+    assert.equal(local.status, 200);
+    const { csrfToken } = await local.json() as { csrfToken: string };
+    const cookie = (local.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+
+    const status = await fetch(`${base}/api/v1/host/remote`, {
+      headers: { Origin: LOCAL_ORIGIN, Cookie: cookie, "X-CSRF-Token": csrfToken },
+    });
+    assert.equal(status.status, 200);
+    const body = await status.json() as { enabled: boolean; origins: string[]; trustedProxyHops: number; devices: unknown[] };
+    assert.equal(body.enabled, true);
+    assert.deepEqual(body.origins, [REMOTE_ORIGIN]);
+    assert.equal(body.trustedProxyHops, 2);
+    assert.equal(Array.isArray(body.devices), true);
+    const text = JSON.stringify(body);
+    assert.equal(text.includes(REMOTE_TOKEN), false);
+    assert.equal(text.includes(LOCAL_ORIGIN), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("invalid remote origins are rejected at server construction", () => {
+  let error: Error | undefined;
+  try {
+    createOfficeServer({
+      port: 0,
+      allowedOrigins: [REMOTE_ORIGIN, "http://not-allowed.example", "https://allowed.tailnet.ts.net/path", "https://user:pass@allowed.tailnet.ts.net"],
+      remoteToken: REMOTE_TOKEN,
+      trustedProxyHops: 1,
+    });
+  } catch (caught) { error = caught as Error; }
+  assert.ok(error);
+  assert.equal(error.message.includes("user:pass"), false, "error must not echo userinfo");
+});

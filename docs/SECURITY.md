@@ -147,6 +147,22 @@ If remote access is necessary:
    the registry while Office is running;
 8. never expose stock `hermes serve` directly.
 
+## Desktop host administration panel
+
+When Hermes Office is launched from the Tauri desktop shell, the owner-only
+**Desktop Host Administration** panel shows whether remote access is enabled,
+the exact configured HTTPS origin(s), the trusted proxy-hop count, and the list
+of registered devices. It lets the owner revoke a device. This panel is
+rendered only for sessions authenticated with the Tauri desktop capability; it
+does not appear for local browsers or remote operators.
+
+The panel never displays the enrollment token, device credential digests, or
+cookies. Changing remote access requires editing the host environment variables
+(`HERMES_OFFICE_REMOTE_TOKEN`, `HERMES_OFFICE_ALLOWED_ORIGINS`,
+`HERMES_OFFICE_TRUSTED_PROXY_HOPS`) and restarting the desktop host. There is no
+in-browser toggle, scheduler, or Tailscale automation that modifies these
+values.
+
 TLS and proxy authentication are provided by the proxy; Office's loopback HTTP
 listener does not itself terminate TLS or validate Tailscale/OIDC identity.
 

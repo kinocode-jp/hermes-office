@@ -12,6 +12,7 @@ import { preserveConcurrentDraft } from "../settings-draft";
 import { SettingsMutationRegistry, type SettingsMutationScope } from "../settings-mutation-registry";
 import { officeSnapshot } from "../store";
 import { AccessAudit } from "./access-audit";
+import { DeviceAdmin } from "./device-admin";
 import { InfoTip } from "./info-tip";
 import {
   SettingsApiError,
@@ -35,13 +36,14 @@ export type LiveSettingsProps = {
   initialTab?: SettingsTab;
   activeTab?: SettingsTab;
   showAccessAudit?: boolean;
+  showHostAdmin?: boolean;
   onTabChange?: (tab: SettingsTab) => void;
   onChanged?: (kind: "global" | "memory" | "skill" | "soul") => void;
 };
 
 type ErrorState = { message: RuntimeMessage; conflict: boolean };
 
-export function LiveSettings({ profileId, profileLabel, initialTab = "global", activeTab, showAccessAudit = false, onTabChange, onChanged }: LiveSettingsProps) {
+export function LiveSettings({ profileId, profileLabel, initialTab = "global", activeTab, showAccessAudit = false, showHostAdmin = false, onTabChange, onChanged }: LiveSettingsProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const visibleTab = activeTab ?? tab;
   const [global, setGlobal] = useState<GlobalAgentSettings | null>(null);
@@ -64,6 +66,7 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
   const snapshot = officeSnapshot.value;
   const mutationAccess = settingsMutationAccess(snapshot);
   const canReadAudit = snapshot?.capabilities.access.allowedOperations.includes("audit.read") === true;
+  const hostAdmin = showHostAdmin && mutationAccess.hostAdmin;
 
   const loadProvider = useCallback(async (targetProfile: string, provider: string, expectedGeneration: number) => {
     if (!provider) {
@@ -111,9 +114,21 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
   }, [loadProvider, profileId]);
 
   useEffect(() => {
+    if (visibleTab === "host") {
+      generation.current += 1;
+      setLoading(false);
+      setError(null);
+      setGlobal(null);
+      setProfile(null);
+      setProviderConfig(null);
+      setProviderValues({});
+      setSoulDraft("");
+      setProviderDraft("");
+      return;
+    }
     void reload();
     return () => { generation.current += 1; };
-  }, [reload]);
+  }, [reload, visibleTab]);
 
   useEffect(() => { setSkillLimit(30); }, [profileId, skillQuery]);
 
@@ -234,11 +249,20 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
 
       {showAccessAudit && canReadAudit && <AccessAudit />}
 
-      {!currentTabWritable && (
-        <div class="live-settings__notice is-read-only" role="status">
-          <span>{t("settings.readOnly")}</span>
-          <p>{mutationAccess.localOwner ? t("settings.permissionUnavailable") : t("settings.localOwnerRequired")}</p>
-        </div>
+      {hostAdmin ? (
+        visibleTab !== "host" && !currentTabWritable && (
+          <div class="live-settings__notice is-read-only" role="status">
+            <span>{t("settings.readOnly")}</span>
+            <p>{mutationAccess.localOwner ? t("settings.permissionUnavailable") : t("settings.localOwnerRequired")}</p>
+          </div>
+        )
+      ) : (
+        !currentTabWritable && (
+          <div class="live-settings__notice is-read-only" role="status">
+            <span>{t("settings.readOnly")}</span>
+            <p>{mutationAccess.localOwner ? t("settings.permissionUnavailable") : t("settings.localOwnerRequired")}</p>
+          </div>
+        )
       )}
 
       <nav class="live-settings__tabs" aria-label={t("settings.categories")}>
@@ -247,8 +271,9 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
           ["skills", t("settings.skills")],
           ["soul", t("settings.identity")],
           ["memory", t("settings.memory")],
+          ...(hostAdmin ? [["host", t("hostAdmin.title")] as const] : []),
         ] as const).map(([id, label]) => (
-          <button key={id} type="button" class={visibleTab === id ? "is-active" : ""} aria-current={visibleTab === id ? "page" : undefined} onClick={() => { setTab(id); onTabChange?.(id); }} disabled={id !== "global" && !profileId}>
+          <button key={id} type="button" class={visibleTab === id ? "is-active" : ""} aria-current={visibleTab === id ? "page" : undefined} onClick={() => { setTab(id); onTabChange?.(id); }} disabled={id !== "global" && id !== "host" && !profileId}>
             {label}
           </button>
         ))}
@@ -262,8 +287,10 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
         </div>
       )}
 
-      {loading && !global ? (
+      {loading && visibleTab !== "host" ? (
         <SettingsSkeleton />
+      ) : visibleTab === "host" ? (
+        hostAdmin && <DeviceAdmin />
       ) : visibleTab === "global" ? (
         <div class="live-settings__grid live-settings__global">
           {global?.skillSync.state === "pending" && (

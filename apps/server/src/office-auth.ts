@@ -64,6 +64,7 @@ export interface OfficeAuthOptions {
   remoteToken?: string;
   desktopCapability?: string;
   desktopOrigins?: readonly string[];
+  allowedOrigins?: readonly string[];
   trustedProxyHops?: number;
   deviceRegistryPath?: string;
   onAudit?: (record: OfficeAuditRecord) => void;
@@ -98,6 +99,7 @@ export class OfficeAuth {
   readonly #desktopCapabilityDigest: Buffer | undefined;
   readonly #desktopSession: OfficeAuthSession | undefined;
   readonly #desktopOrigins: ReadonlySet<string>;
+  readonly #allowedOrigins: ReadonlySet<string>;
   readonly #trustedProxyHops: number;
   readonly #deviceRegistryPath: string | undefined;
   readonly #onAudit: ((record: OfficeAuditRecord) => void) | undefined;
@@ -111,6 +113,7 @@ export class OfficeAuth {
 
   constructor(options: OfficeAuthOptions = {}) {
     this.#desktopOrigins = validateDesktopOrigins(options.desktopOrigins ?? DEFAULT_DESKTOP_ORIGINS);
+    this.#allowedOrigins = validateAllowedOrigins(options.allowedOrigins);
     this.#trustedProxyHops = boundedInteger(options.trustedProxyHops, 0, 0, 8);
     if (options.remoteToken !== undefined) {
       if (options.remoteToken.length < 32 || options.remoteToken.length > 4_096 || options.remoteToken.includes("\0")) {
@@ -285,6 +288,16 @@ export class OfficeAuth {
   listDevices(session: OfficeAuthSession): { devices: DeviceSummary[] } | undefined {
     if (!session.principal.local || session.principal.tier !== "owner") return undefined;
     return { devices: [...this.#devices.values()].map(publicDevice) };
+  }
+
+  remoteConfig(session: OfficeAuthSession): { enabled: boolean; origins: readonly string[]; trustedProxyHops: number; devices: DeviceSummary[] } | undefined {
+    if (!session.principal.local || session.principal.tier !== "owner") return undefined;
+    return {
+      enabled: this.#remoteTokenDigest !== undefined,
+      origins: [...this.#allowedOrigins].filter((origin) => !isLoopbackOrigin(origin) && origin.startsWith("https://")),
+      trustedProxyHops: this.#trustedProxyHops,
+      devices: [...this.#devices.values()].map(publicDevice),
+    };
   }
 
   async revokeDevice(session: OfficeAuthSession, deviceId: string): Promise<boolean> {
@@ -638,6 +651,36 @@ function validateDesktopOrigins(values: readonly string[]): ReadonlySet<string> 
   if (origins.size === 0) throw new Error("At least one desktop origin is required.");
   return origins;
 }
+function validateAllowedOrigins(values: readonly string[] | undefined): ReadonlySet<string> {
+  if (values === undefined || values.length === 0) return new Set<string>();
+  const origins = new Set<string>();
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index]!;
+    if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
+      throw new Error(`Configured origin at index ${index} is invalid.`);
+    }
+    if (isTrustedLocalOrigin(value)) {
+      if (value === "tauri://localhost") { origins.add(value); }
+      else {
+        try { origins.add(new URL(value).origin); }
+        catch { throw new Error(`Configured origin at index ${index} is not a valid local origin.`); }
+      }
+      continue;
+    }
+    let url: URL;
+    try { url = new URL(value); }
+    catch { throw new Error(`Configured origin at index ${index} is not a valid URL.`); }
+    if (url.protocol !== "https:") { throw new Error(`Configured origin at index ${index} must use HTTPS.`); }
+    if (url.username !== "" || url.password !== "") { throw new Error(`Configured origin at index ${index} must not contain credentials.`); }
+    if (url.pathname !== "/") { throw new Error(`Configured origin at index ${index} must not contain a path.`); }
+    if (url.search !== "" || url.hash !== "") { throw new Error(`Configured origin at index ${index} must not contain query or fragment.`); }
+    if (url.hostname === "" || url.hostname.endsWith(".")) { throw new Error(`Configured origin at index ${index} has an invalid hostname.`); }
+    if (isIP(url.hostname) !== 0) { throw new Error(`Configured origin at index ${index} must be a hostname, not an IP address.`); }
+    if (!/^[a-zA-Z0-9][-a-zA-Z0-9]*[a-zA-Z0-9]?(\.[a-zA-Z0-9][-a-zA-Z0-9]*[a-zA-Z0-9]?)*$/.test(url.hostname)) { throw new Error(`Configured origin at index ${index} has an invalid hostname.`); }
+    origins.add(url.origin);
+  }
+  return origins;
+}
 function readDesktopCapability(request: IncomingMessage): string | undefined {
   const header = request.headers[DESKTOP_CAPABILITY_HEADER];
   if (typeof header === "string") return header;
@@ -656,6 +699,11 @@ function isTrustedLocalOrigin(value: string | undefined): boolean {
   if (value === undefined) return false;
   if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
   try { const origin = new URL(value); return (origin.protocol === "http:" || origin.protocol === "https:") && ["localhost", "127.0.0.1"].includes(origin.hostname) && origin.username === "" && origin.password === "" && origin.pathname === "/" && origin.search === "" && origin.hash === ""; }
+  catch { return false; }
+}
+function isLoopbackOrigin(value: string): boolean {
+  if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
+  try { const origin = new URL(value); return ["localhost", "127.0.0.1", "::1"].includes(origin.hostname); }
   catch { return false; }
 }
 function normalizeDeviceName(value: string): string | undefined { const name = value.trim(); return name.length >= 1 && name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(name) ? name : undefined; }

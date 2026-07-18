@@ -63,6 +63,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     ...(options.remoteToken === undefined ? {} : { remoteToken: options.remoteToken }),
     ...(options.desktopCapability === undefined ? {} : { desktopCapability: options.desktopCapability }),
     ...(options.desktopOrigins === undefined ? {} : { desktopOrigins: options.desktopOrigins }),
+    ...(options.allowedOrigins === undefined ? {} : { allowedOrigins: options.allowedOrigins }),
     ...(options.trustedProxyHops === undefined ? {} : { trustedProxyHops: options.trustedProxyHops }),
     ...(options.deviceRegistryPath === undefined ? {} : { deviceRegistryPath: options.deviceRegistryPath }),
     onAudit: (record) => publishAudit(record),
@@ -368,11 +369,20 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       return;
     }
 
+    // Remote-device management routes are local-owner only.
     if (requestUrl.pathname === "/api/v1/devices") {
       const deviceAccess = auth.authorizeOperation(request, "device.revoke", false);
       const devices = deviceAccess.allowed ? auth.listDevices(deviceAccess.session) : undefined;
       if (devices === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
       else writeJson(response, 200, devices, maxResponseJsonBytes);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/v1/host/remote") {
+      const access = auth.authorizeOperation(request, "device.revoke", false);
+      const config = access.allowed ? auth.remoteConfig(access.session) : undefined;
+      if (config === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
+      else writeJson(response, 200, config, maxResponseJsonBytes);
       return;
     }
 
