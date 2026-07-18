@@ -323,7 +323,11 @@ fn validated_local_executable(path: &Path) -> Option<PathBuf> {
         let mode = metadata.permissions().mode();
         let owner = metadata.uid();
         let effective_user = unsafe { libc::geteuid() };
-        if mode & 0o111 == 0 || mode & 0o022 != 0 || (owner != 0 && owner != effective_user) {
+        if mode & 0o6000 != 0
+            || mode & 0o111 == 0
+            || mode & 0o022 != 0
+            || (owner != 0 && owner != effective_user)
+        {
             return None;
         }
     }
@@ -509,6 +513,14 @@ mod tests {
         );
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o777))
             .expect("make fixture writable");
+        assert_eq!(validated_local_executable(&link), None);
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o4755))
+            .expect("make fixture setuid");
+        assert_eq!(validated_local_executable(&link), None);
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o2755))
+            .expect("make fixture setgid");
         assert_eq!(validated_local_executable(&link), None);
 
         fs::remove_dir_all(directory).expect("remove fixture directory");

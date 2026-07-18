@@ -19,6 +19,7 @@ export function DeviceAdmin() {
   const [revoking, setRevoking] = useState<ReadonlySet<string>>(() => new Set());
   const [confirmDevice, setConfirmDevice] = useState<RemoteConfigStatus["devices"][number] | null>(null);
   const [revokeError, setRevokeError] = useState<DeviceRevokeFailureCode | null>(null);
+  const [, setLocaleRevision] = useState(0);
   const generation = useRef(0);
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const revokeTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -45,8 +46,10 @@ export function DeviceAdmin() {
 
   useEffect(() => {
     void reload();
+    const unsubscribe = locale.subscribe(() => setLocaleRevision((value) => value + 1));
     return () => {
       generation.current += 1;
+      unsubscribe();
     };
   }, [reload]);
 
