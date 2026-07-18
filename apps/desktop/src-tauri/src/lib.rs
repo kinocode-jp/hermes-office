@@ -20,8 +20,6 @@ const MAX_VERSION_OUTPUT: u64 = 4096;
 const SUPPORTED_NODE_MAJOR: u64 = 22;
 const SUPPORTED_HERMES_MAJOR: u64 = 0;
 const SUPPORTED_HERMES_MINOR: u64 = 18;
-#[cfg(debug_assertions)]
-const DEBUG_DESKTOP_CAPABILITY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 struct OfficeServerProcess(Mutex<Option<Child>>);
 struct DesktopCapability(String);
@@ -38,20 +36,21 @@ pub fn run() {
         .manage(DesktopCapability(generate_desktop_capability()))
         .invoke_handler(tauri::generate_handler![desktop_capability])
         .setup(|app| {
-            // `tauri dev` already starts Office Server through beforeDevCommand.
-            // The bundled release owns exactly one sidecar process itself.
-            if !cfg!(debug_assertions) {
-                ensure_office_port_available()?;
-                let mut child = start_office_server(app)?;
-                if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT) {
-                    stop_office_server(&mut child);
-                    return Err(error);
-                }
-                *app.state::<OfficeServerProcess>()
-                    .0
-                    .lock()
-                    .expect("server process lock") = Some(child);
+            // Tauri owns exactly one Office Server process in every build mode.
+            // Release spawns the bundled sidecar; debug spawns the local dev server.
+            ensure_office_port_available()?;
+            #[cfg(debug_assertions)]
+            let mut child = start_office_dev_server(app)?;
+            #[cfg(not(debug_assertions))]
+            let mut child = start_office_server(app)?;
+            if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT) {
+                stop_office_server(&mut child);
+                return Err(error);
             }
+            *app.state::<OfficeServerProcess>()
+                .0
+                .lock()
+                .expect("server process lock") = Some(child);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -75,19 +74,7 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         return Err(format!("Office Server resource is missing: {}", script.display()).into());
     }
 
-    let home = env::var_os("HOME").map(PathBuf::from);
-    let node = find_compatible_executable(
-        "HERMES_OFFICE_NODE",
-        &node_candidates(home.as_deref()),
-        node_version_is_compatible,
-    )?
-    .ok_or("An eligible Node.js 22.x local runtime was not found.")?;
-    let hermes = find_compatible_executable(
-        "HERMES_OFFICE_HERMES_EXECUTABLE",
-        &hermes_candidates(home.as_deref()),
-        hermes_version_is_compatible,
-    )?
-    .ok_or("An eligible, compatible Hermes Agent 0.18.x local runtime was not found.")?;
+    let (node, hermes) = resolve_managed_runtime()?;
     let desktop_capability = app.state::<DesktopCapability>().0.clone();
 
     let mut command = Command::new(node);
@@ -107,21 +94,97 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(directory) = home {
+    if let Some(directory) = env::var_os("HOME").map(PathBuf::from) {
         command.current_dir(directory);
     }
     Ok(command.spawn()?)
 }
 
-fn generate_desktop_capability() -> String {
-    #[cfg(debug_assertions)]
-    return DEBUG_DESKTOP_CAPABILITY.to_owned();
+#[cfg(debug_assertions)]
+fn start_office_dev_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Error>> {
+    let repo_root = resolve_repo_root()?;
+    let (node, hermes) = resolve_managed_runtime()?;
+    let desktop_capability = app.state::<DesktopCapability>().0.clone();
+    let tsx = resolve_tsx_cli(&repo_root)?;
 
-    #[cfg(not(debug_assertions))]
+    let mut command = Command::new(node);
+    command.env_clear();
+    inherit_safe_environment(&mut command);
+    // Office remote-device configuration is owned by the host environment, not
+    // hardcoded or stored in the browser. Pass it through to the server child
+    // only; do not forward it to the managed Hermes runtime.
+    inherit_office_remote_environment(&mut command, |key| env::var_os(key));
+    command
+        .current_dir(&repo_root)
+        .arg(&tsx)
+        .arg("watch")
+        .arg(repo_root.join("apps/server/src/index.ts"))
+        .env("HERMES_OFFICE_HOST", OFFICE_HOST)
+        .env("HERMES_OFFICE_PORT", OFFICE_PORT.to_string())
+        .env("HERMES_OFFICE_HERMES_MODE", "managed")
+        .env("HERMES_OFFICE_HERMES_EXECUTABLE", hermes)
+        .env("HERMES_OFFICE_DESKTOP_CAPABILITY", desktop_capability)
+        .env("HERMES_OFFICE_DESKTOP_ORIGINS", "http://localhost:4173")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command.spawn()?)
+}
+
+#[cfg(debug_assertions)]
+fn resolve_tsx_cli(repo_root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let candidate = repo_root.join("node_modules/tsx/dist/cli.mjs");
+    if !candidate.is_file() {
+        return Err(format!(
+            "tsx CLI is not installed at {}. Run `npm install` in the repository root.",
+            candidate.display()
+        )
+        .into());
+    }
+    Ok(candidate)
+}
+
+fn resolve_managed_runtime() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let node = find_compatible_executable(
+        "HERMES_OFFICE_NODE",
+        &node_candidates(home.as_deref()),
+        node_version_is_compatible,
+    )?
+    .ok_or("An eligible Node.js 22.x local runtime was not found.")?;
+    let hermes = find_compatible_executable(
+        "HERMES_OFFICE_HERMES_EXECUTABLE",
+        &hermes_candidates(home.as_deref()),
+        hermes_version_is_compatible,
+    )?
+    .ok_or("An eligible, compatible Hermes Agent 0.18.x local runtime was not found.")?;
+    Ok((node, hermes))
+}
+
+#[cfg(debug_assertions)]
+fn resolve_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // Tauri dev's current_dir depends on the package manager. Anchor the lookup
+    // to the Cargo manifest of this crate for a stable, debug-only path.
+    let crate_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut current = crate_manifest.as_path();
+    loop {
+        let package = current.join("package.json");
+        let tauri_conf = current.join("apps/desktop/src-tauri/tauri.conf.json");
+        if package.is_file() && tauri_conf.is_file() {
+            return Ok(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    Err("Could not locate the Hermes Office repository root. Ensure the working directory is inside the repository.".into())
+}
+
+fn generate_desktop_capability() -> String {
     random_desktop_capability()
 }
 
-#[cfg(any(not(debug_assertions), test))]
 fn random_desktop_capability() -> String {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).expect("operating system random source is unavailable");
@@ -461,9 +524,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    fn debug_capability_matches_the_dev_server_contract() {
-        assert_eq!(generate_desktop_capability(), DEBUG_DESKTOP_CAPABILITY);
+    fn generate_desktop_capability_is_random_in_all_builds() {
+        let first = generate_desktop_capability();
+        let second = generate_desktop_capability();
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
+        assert_ne!(first, second);
     }
 
     #[test]
