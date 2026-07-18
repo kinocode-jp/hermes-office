@@ -684,6 +684,8 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
       else { origins.add(new URL(canonicalLocal).origin); }
       continue;
     }
+    // Port-bearing Tauri bridge variants are not valid remote HTTPS origins.
+    if (isSpecialTauriBridge(value)) { throw new Error(`Configured origin at index ${index} must be an exact portless Tauri bridge origin.`); }
     let url: URL;
     try { url = new URL(value); }
     catch { throw new Error(`Configured origin at index ${index} is not a valid URL.`); }
@@ -697,6 +699,16 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
     origins.add(url.origin);
   }
   return origins;
+}
+function isSpecialTauriBridge(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "tauri:" && url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (url.hostname.toLowerCase() !== "tauri.localhost") return false;
+    return url.pathname === "/" && url.search === "" && url.hash === "";
+  } catch {
+    return false;
+  }
 }
 function readDesktopCapability(request: IncomingMessage): string | undefined {
   const header = request.headers[DESKTOP_CAPABILITY_HEADER];

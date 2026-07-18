@@ -17,9 +17,16 @@ export function normalizeOrigin(origin: string): string {
   }
 }
 
+const SPECIAL_TAURI_ORIGINS = new Set(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]);
+
+function isSpecialTauriOrigin(origin: string | undefined): boolean {
+  if (origin === undefined) return false;
+  return SPECIAL_TAURI_ORIGINS.has(normalizeOrigin(origin));
+}
+
 export function isTrustedLocalOrigin(origin: string | undefined): boolean {
   if (origin === undefined) return false;
-  if (origin === "tauri://localhost" || origin === "http://tauri.localhost" || origin === "https://tauri.localhost") return true;
+  if (isSpecialTauriOrigin(origin)) return true;
   try {
     const parsed = new URL(origin);
     return (
@@ -37,7 +44,7 @@ export function isTrustedLocalOrigin(origin: string | undefined): boolean {
 }
 
 export function isLoopbackOrigin(origin: string): boolean {
-  if (origin === "tauri://localhost" || origin === "http://tauri.localhost" || origin === "https://tauri.localhost") return true;
+  if (isSpecialTauriOrigin(origin)) return true;
   try {
     const parsed = new URL(origin);
     return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);

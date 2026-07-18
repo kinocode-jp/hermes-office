@@ -274,6 +274,10 @@ test("OfficeAuth rejects invalid configured origins", () => {
     { origin: `https://${"a".repeat(64)}.example.com`, label: "overlong-label" },
     { origin: "not a url", label: "malformed" },
     { origin: "", label: "empty" },
+    { origin: "http://tauri.localhost:4173", label: "http-tauri-port" },
+    { origin: "https://tauri.localhost:4173", label: "https-tauri-port" },
+    { origin: "HTTP://Tauri.Localhost:4173", label: "http-tauri-port-mixed-case" },
+    { origin: "HTTPS://Tauri.Localhost:4173", label: "https-tauri-port-mixed-case" },
   ];
   for (const { origin, label, secret } of invalidCases) {
     assert.throws(

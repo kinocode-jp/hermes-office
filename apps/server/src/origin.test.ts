@@ -42,8 +42,11 @@ test("normalizeOrigin canonicalizes, rejects credentials/path/query/fragment, an
 test("isTrustedLocalOrigin accepts the three portless Tauri constants and localhost/127.0.0.1/[::1] with or without port", () => {
   const accepted: { input: string; label: string }[] = [
     { input: "tauri://localhost", label: "tauri" },
+    { input: "TAURI://Localhost", label: "tauri-mixed-case" },
     { input: "http://tauri.localhost", label: "http-tauri" },
+    { input: "HTTP://Tauri.Localhost", label: "http-tauri-mixed-case" },
     { input: "https://tauri.localhost", label: "https-tauri" },
+    { input: "HTTPS://Tauri.Localhost", label: "https-tauri-mixed-case" },
     { input: "http://localhost:4173", label: "localhost-port" },
     { input: "http://localhost", label: "localhost-missing-port" },
     { input: "http://127.0.0.1:4173", label: "ipv4-port" },
@@ -60,8 +63,11 @@ test("isTrustedLocalOrigin accepts the three portless Tauri constants and localh
 
   const rejected: { input: string; label: string }[] = [
     { input: "tauri://localhost:1234", label: "tauri-port" },
+    { input: "TAURI://Localhost:1234", label: "tauri-port-mixed-case" },
     { input: "http://tauri.localhost:4173", label: "http-tauri-port" },
+    { input: "HTTP://Tauri.Localhost:4173", label: "http-tauri-port-mixed-case" },
     { input: "https://tauri.localhost:4173", label: "https-tauri-port" },
+    { input: "HTTPS://Tauri.Localhost:4173", label: "https-tauri-port-mixed-case" },
     { input: "http://localhost:4173/path", label: "path" },
     { input: "http://localhost:4173?query=1", label: "query" },
     { input: "http://localhost:4173#hash", label: "fragment" },
@@ -83,8 +89,11 @@ test("isTrustedLocalOrigin accepts the three portless Tauri constants and localh
 test("isLoopbackOrigin recognizes the three Tauri constants and localhost/127.0.0.1/::1", () => {
   const accepted: { input: string; label: string }[] = [
     { input: "tauri://localhost", label: "tauri" },
+    { input: "TAURI://Localhost", label: "tauri-mixed-case" },
     { input: "http://tauri.localhost", label: "http-tauri" },
+    { input: "HTTP://Tauri.Localhost", label: "http-tauri-mixed-case" },
     { input: "https://tauri.localhost", label: "https-tauri" },
+    { input: "HTTPS://Tauri.Localhost", label: "https-tauri-mixed-case" },
     { input: "http://localhost:4173", label: "localhost" },
     { input: "http://127.0.0.1:4173", label: "ipv4" },
     { input: "http://[::1]:4173", label: "ipv6" },
