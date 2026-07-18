@@ -137,7 +137,7 @@ export const OPERATION_POLICIES: Readonly<Record<Operation, OperationPolicy>> = 
   "runtime.stop": policy("runtime.stop", "owner", "local-only", true),
   "runtime.configure": policy("runtime.configure", "owner", "local-only", true),
   "secret.write": policy("secret.write", "owner", "local-only", true),
-  "device.revoke": policy("device.revoke", "owner", "step-up-required", true),
+  "device.revoke": policy("device.revoke", "owner", "local-only", true),
   "audit.read": policy("audit.read", "owner", "read-only", false),
 } as const;
 
