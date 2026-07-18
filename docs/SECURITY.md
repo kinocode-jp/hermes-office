@@ -144,8 +144,31 @@ If remote access is necessary:
    this revokes every older remote device;
 7. if the registry is corrupt, stop Office, move the registry aside as the local
    host owner, configure a different token, restart, and enroll again; never edit
-   the registry while Office is running;
+   the registry while Office is running; an unreadable or corrupt existing registry
+   fails closed and remains enrollment-consumed, so the owner must inspect,
+   replace, or remove it while Office is stopped;
 8. never expose stock `hermes serve` directly.
+
+## Desktop host administration panel
+
+The owner-only **Desktop Host Administration** panel is rendered only for
+sessions authenticated with the Tauri desktop capability and does not appear for
+local browsers or remote operators. It shows whether remote access is enabled,
+the canonical configured HTTPS origins, the trusted proxy-hop count, and the
+list of registered devices, and it lets the owner revoke a device.
+
+The panel never displays the enrollment token, device credential digests, or
+cookies.
+
+Changing remote access requires editing `HERMES_OFFICE_REMOTE_TOKEN`,
+`HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`, and
+restarting Office; no in-browser toggle, scheduler, or Tailscale automation
+modifies them.
+
+The `/api/v1/host/remote` status endpoint requires the Tauri desktop capability,
+while POST `/api/v1/devices/:id/revoke` deliberately remains local-owner + CSRF
+on the trusted loopback listener so the owner can recover when the Tauri
+desktop bridge is unavailable.
 
 TLS and proxy authentication are provided by the proxy; Office's loopback HTTP
 listener does not itself terminate TLS or validate Tailscale/OIDC identity.

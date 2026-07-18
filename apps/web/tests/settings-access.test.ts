@@ -5,7 +5,7 @@ import type { OfficeSnapshot } from "../src/domain.ts";
 import { canMutateSettingsTab, settingsMutationAccess } from "../src/settings-access.ts";
 import { preserveConcurrentDraft } from "../src/settings-draft.ts";
 
-function snapshot(allowedOperations: Operation[], tier: "operator" | "manager" | "owner", exposure: "loopback" | "tailnet"): OfficeSnapshot {
+function snapshot(allowedOperations: Operation[], tier: "operator" | "manager" | "owner", exposure: "loopback" | "tailnet", authentication?: "local-cookie" | "device-cookie" | "desktop-capability"): OfficeSnapshot {
   return {
     generatedAt: "2026-07-16T00:00:00.000Z",
     sequence: 1,
@@ -17,7 +17,7 @@ function snapshot(allowedOperations: Operation[], tier: "operator" | "manager" |
         deviceId: "device-1",
         tier,
         exposure,
-        authentication: exposure === "loopback" ? "local-cookie" : "device-cookie",
+        authentication: authentication ?? (exposure === "loopback" ? "local-cookie" : "device-cookie"),
         allowedOperations,
       },
     },
@@ -37,7 +37,7 @@ test("settings mutations fail closed for a remote operator snapshot", () => {
     "tailnet",
   ));
 
-  assert.deepEqual(access, { global: false, skill: false, soul: false, memory: false, localOwner: false });
+  assert.deepEqual(access, { global: false, skill: false, soul: false, memory: false, localOwner: false, hostAdmin: false });
   assert.equal(canMutateSettingsTab(access, "global"), false);
   assert.equal(canMutateSettingsTab(access, "skills"), false);
   assert.equal(canMutateSettingsTab(access, "soul"), false);
@@ -50,14 +50,23 @@ test("each settings control follows its exact server-advertised operation", () =
     "manager",
     "tailnet",
   ));
-  assert.deepEqual(partial, { global: false, skill: false, soul: true, memory: true, localOwner: false });
+  assert.deepEqual(partial, { global: false, skill: false, soul: true, memory: true, localOwner: false, hostAdmin: false });
 
   const owner = settingsMutationAccess(snapshot(
     ["state.read", "global-settings.update", "skill.enable", "profile.update", "memory.update"],
     "owner",
     "loopback",
   ));
-  assert.deepEqual(owner, { global: true, skill: true, soul: true, memory: true, localOwner: true });
+  assert.deepEqual(owner, { global: true, skill: true, soul: true, memory: true, localOwner: true, hostAdmin: false });
+
+  const desktopOwner = settingsMutationAccess(snapshot(
+    ["state.read", "global-settings.update", "skill.enable", "profile.update", "memory.update"],
+    "owner",
+    "tailnet",
+    "desktop-capability",
+  ));
+  assert.deepEqual(desktopOwner, { global: true, skill: true, soul: true, memory: true, localOwner: false, hostAdmin: true });
+  assert.equal(canMutateSettingsTab(desktopOwner, "host"), true);
 });
 
 test("settings mutations remain disabled until a validated snapshot exists", () => {
@@ -67,6 +76,7 @@ test("settings mutations remain disabled until a validated snapshot exists", () 
     soul: false,
     memory: false,
     localOwner: false,
+    hostAdmin: false,
   });
 });
 

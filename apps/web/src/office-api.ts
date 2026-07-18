@@ -1,4 +1,5 @@
 import { OPERATION_POLICIES } from "@hermes-office/protocol";
+import type { RemoteConfigStatus } from "@hermes-office/protocol";
 import type { OfficeRuntimeState, OfficeSnapshot, OfficeSnapshotRequestIdentity } from "./domain";
 import { classifyDeviceLoginFailure, isLocalOfficeClient, normalizeDeviceName, type DeviceLoginFailure } from "./auth-state";
 import { createAuthenticatedOfficeWebSocket, desktopCapability, desktopCapabilityHeader } from "./desktop-transport";
@@ -81,6 +82,15 @@ export class OfficeHttpError extends Error {
     this.name = "OfficeHttpError";
   }
 }
+
+export class OfficeRemoteConfigError extends Error {
+  constructor(readonly status: number) {
+    super("Remote host configuration is unavailable.");
+    this.name = "OfficeRemoteConfigError";
+  }
+}
+
+export type RemoteConfigFailureCode = "not_allowed" | "load_failed";
 
 // A cold Hermes snapshot can legitimately take several seconds while its
 // profile/session indexes initialize. Keep the UI responsive, but do not
@@ -521,6 +531,41 @@ export async function authenticateRemoteDevice(deviceNameInput: string, credenti
     return { ok: false, ...classifyDeviceLoginFailure(0, null) };
   }
 }
+
+
+export async function fetchRemoteConfigStatus(serverUrl = officeServerUrl()): Promise<RemoteConfigStatus> {
+  try {
+    return await officeFetchJson<RemoteConfigStatus>("/api/v1/host/remote", {}, serverUrl);
+  } catch (error) {
+    if (error instanceof OfficeHttpError) throw new OfficeRemoteConfigError(error.status);
+    throw new OfficeRemoteConfigError(0);
+  }
+}
+
+export type DeviceRevokeFailureCode = "not_found" | "forbidden" | "unavailable" | "unknown";
+
+export class DeviceRevokeError extends Error {
+  constructor(readonly status: number, readonly code: DeviceRevokeFailureCode) {
+    super("Device revoke failed.");
+    this.name = "DeviceRevokeError";
+  }
+}
+
+export async function revokeRemoteDevice(deviceId: string, serverUrl = officeServerUrl()): Promise<void> {
+  try {
+    await officeFetchJson<{ ok: true }>(`/api/v1/devices/${encodeURIComponent(deviceId)}/revoke`, { method: "POST" }, serverUrl);
+  } catch (error) {
+    if (error instanceof OfficeHttpError) {
+      let code: DeviceRevokeFailureCode = "unknown";
+      if (error.status === 404) code = "not_found";
+      else if (error.status === 401 || error.status === 403) code = "forbidden";
+      else if (error.status === 0 || error.status >= 500) code = "unavailable";
+      throw new DeviceRevokeError(error.status, code);
+    }
+    throw new DeviceRevokeError(0, "unavailable");
+  }
+}
+
 
 export async function logoutRemoteDevice(serverUrl = officeServerUrl()): Promise<void> {
   notifyOfficeAuthChange(serverUrl);

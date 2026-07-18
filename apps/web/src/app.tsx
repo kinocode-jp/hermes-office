@@ -98,15 +98,31 @@ export function App() {
         {activeSurface.value === "office" && <OfficeScene profiles={profileList.value} />}
         {activeSurface.value === "kanban" && <KanbanBoard />}
         {activeSurface.value === "library" && <LiveSettings key="global-library" profileId={null} initialTab="global" />}
-        {activeSurface.value === "settings" && <LiveSettings
-          key={`settings-${selectedProfile.value?.id ?? "global"}`}
-          profileId={selectedProfile.value?.id ?? null}
-          {...(selectedProfile.value?.name === undefined ? {} : { profileLabel: selectedProfile.value.name })}
-          initialTab={selectedProfile.value ? settingsTab.value : "global"}
-          activeTab={selectedProfile.value ? settingsTab.value : "global"}
-          showAccessAudit
-          onTabChange={(tab) => { settingsTab.value = tab; }}
-        />}
+        {activeSurface.value === "settings" && (
+          // Host admin is host-scoped and intentionally survives profile selection; "open live settings" switches to the profile tab.
+          settingsTab.value === "host" ? (
+            <LiveSettings
+              key="settings-host"
+              profileId={null}
+              initialTab="host"
+              activeTab="host"
+              showAccessAudit
+              showHostAdmin
+              onTabChange={(tab) => { settingsTab.value = tab; }}
+            />
+          ) : (
+            <LiveSettings
+              key={`settings-${selectedProfile.value?.id ?? "global"}`}
+              profileId={selectedProfile.value?.id ?? null}
+              {...(selectedProfile.value?.name === undefined ? {} : { profileLabel: selectedProfile.value.name })}
+              initialTab={selectedProfile.value ? settingsTab.value : "global"}
+              activeTab={selectedProfile.value ? settingsTab.value : "global"}
+              showAccessAudit
+              showHostAdmin
+              onTabChange={(tab) => { settingsTab.value = tab; }}
+            />
+          )
+        )}
       </main>
 
       <ProfilePanel />

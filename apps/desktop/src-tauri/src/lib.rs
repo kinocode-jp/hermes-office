@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -12,15 +13,17 @@ use tauri::{Manager, RunEvent};
 
 const OFFICE_HOST: &str = "127.0.0.1";
 const OFFICE_PORT: u16 = 4317;
+const OFFICE_PROTOCOL_VERSION: i64 = 1;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_VERSION_OUTPUT: u64 = 4096;
+const MAX_HTTP_HEADERS: usize = 8192;
+const MAX_HEALTH_RESPONSE: u64 = 4096;
+const DESKTOP_CAPABILITY_HEADER: &str = "X-Hermes-Office-Desktop-Capability";
 const SUPPORTED_NODE_MAJOR: u64 = 22;
 const SUPPORTED_HERMES_MAJOR: u64 = 0;
 const SUPPORTED_HERMES_MINOR: u64 = 18;
-#[cfg(debug_assertions)]
-const DEBUG_DESKTOP_CAPABILITY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 struct OfficeServerProcess(Mutex<Option<Child>>);
 struct DesktopCapability(String);
@@ -37,20 +40,22 @@ pub fn run() {
         .manage(DesktopCapability(generate_desktop_capability()))
         .invoke_handler(tauri::generate_handler![desktop_capability])
         .setup(|app| {
-            // `tauri dev` already starts Office Server through beforeDevCommand.
-            // The bundled release owns exactly one sidecar process itself.
-            if !cfg!(debug_assertions) {
-                ensure_office_port_available()?;
-                let mut child = start_office_server(app)?;
-                if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT) {
-                    stop_office_server(&mut child);
-                    return Err(error);
-                }
-                *app.state::<OfficeServerProcess>()
-                    .0
-                    .lock()
-                    .expect("server process lock") = Some(child);
+            // Tauri owns exactly one Office Server process in every build mode.
+            // Release spawns the bundled sidecar; debug spawns the local dev server.
+            ensure_office_port_available()?;
+            let desktop_capability = app.state::<DesktopCapability>().0.clone();
+            #[cfg(debug_assertions)]
+            let mut child = start_office_dev_server(app)?;
+            #[cfg(not(debug_assertions))]
+            let mut child = start_office_server(app)?;
+            if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability) {
+                stop_office_server(&mut child);
+                return Err(error);
             }
+            *app.state::<OfficeServerProcess>()
+                .0
+                .lock()
+                .expect("server process lock") = Some(child);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -74,6 +79,77 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         return Err(format!("Office Server resource is missing: {}", script.display()).into());
     }
 
+    let (node, hermes) = resolve_managed_runtime()?;
+    let desktop_capability = app.state::<DesktopCapability>().0.clone();
+
+    let mut command = Command::new(node);
+    command.env_clear();
+    inherit_safe_environment(&mut command);
+    // Office remote-device configuration is owned by the host environment, not
+    // hardcoded or stored in the browser. Pass it through to the server child
+    // only; do not forward it to the managed Hermes runtime.
+    inherit_office_remote_environment(&mut command, |key| env::var_os(key));
+    command
+        .arg(script)
+        .env("HERMES_OFFICE_HOST", OFFICE_HOST)
+        .env("HERMES_OFFICE_PORT", OFFICE_PORT.to_string())
+        .env("HERMES_OFFICE_HERMES_MODE", "managed")
+        .env("HERMES_OFFICE_HERMES_EXECUTABLE", hermes)
+        .env("HERMES_OFFICE_DESKTOP_CAPABILITY", desktop_capability)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let current_dir = home.filter(|path| path.is_dir()).unwrap_or(resource_dir);
+    command.current_dir(current_dir);
+    Ok(command.spawn()?)
+}
+
+#[cfg(debug_assertions)]
+fn start_office_dev_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Error>> {
+    let repo_root = resolve_repo_root()?;
+    let (node, hermes) = resolve_managed_runtime()?;
+    let desktop_capability = app.state::<DesktopCapability>().0.clone();
+    let tsx = resolve_tsx_cli(&repo_root)?;
+
+    let mut command = Command::new(node);
+    command.env_clear();
+    inherit_safe_environment(&mut command);
+    // Office remote-device configuration is owned by the host environment, not
+    // hardcoded or stored in the browser. Pass it through to the server child
+    // only; do not forward it to the managed Hermes runtime.
+    inherit_office_remote_environment(&mut command, |key| env::var_os(key));
+    command
+        .current_dir(&repo_root)
+        .arg(&tsx)
+        .arg("watch")
+        .arg(repo_root.join("apps/server/src/index.ts"))
+        .env("HERMES_OFFICE_HOST", OFFICE_HOST)
+        .env("HERMES_OFFICE_PORT", OFFICE_PORT.to_string())
+        .env("HERMES_OFFICE_HERMES_MODE", "managed")
+        .env("HERMES_OFFICE_HERMES_EXECUTABLE", hermes)
+        .env("HERMES_OFFICE_DESKTOP_CAPABILITY", desktop_capability)
+        .env("HERMES_OFFICE_DESKTOP_ORIGINS", "http://localhost:4173")
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    Ok(command.spawn()?)
+}
+
+#[cfg(debug_assertions)]
+fn resolve_tsx_cli(repo_root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let candidate = repo_root.join("node_modules/tsx/dist/cli.mjs");
+    if !candidate.is_file() {
+        return Err(format!(
+            "tsx CLI is not installed at {}. Run `npm install` in the repository root.",
+            candidate.display()
+        )
+        .into());
+    }
+    Ok(candidate)
+}
+
+fn resolve_managed_runtime() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let home = env::var_os("HOME").map(PathBuf::from);
     let node = find_compatible_executable(
         "HERMES_OFFICE_NODE",
@@ -87,36 +163,33 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         hermes_version_is_compatible,
     )?
     .ok_or("An eligible, compatible Hermes Agent 0.18.x local runtime was not found.")?;
-    let desktop_capability = app.state::<DesktopCapability>().0.clone();
+    Ok((node, hermes))
+}
 
-    let mut command = Command::new(node);
-    command.env_clear();
-    inherit_safe_environment(&mut command);
-    command
-        .arg(script)
-        .env("HERMES_OFFICE_HOST", OFFICE_HOST)
-        .env("HERMES_OFFICE_PORT", OFFICE_PORT.to_string())
-        .env("HERMES_OFFICE_HERMES_MODE", "managed")
-        .env("HERMES_OFFICE_HERMES_EXECUTABLE", hermes)
-        .env("HERMES_OFFICE_DESKTOP_CAPABILITY", desktop_capability)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(directory) = home {
-        command.current_dir(directory);
+#[cfg(debug_assertions)]
+fn resolve_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // Tauri dev's current_dir depends on the package manager. Anchor the lookup
+    // to the Cargo manifest of this crate for a stable, debug-only path.
+    let crate_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut current = crate_manifest.as_path();
+    loop {
+        let package = current.join("package.json");
+        let tauri_conf = current.join("apps/desktop/src-tauri/tauri.conf.json");
+        if package.is_file() && tauri_conf.is_file() {
+            return Ok(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
     }
-    Ok(command.spawn()?)
+    Err("Could not locate the Hermes Office repository root. Ensure the working directory is inside the repository.".into())
 }
 
 fn generate_desktop_capability() -> String {
-    #[cfg(debug_assertions)]
-    return DEBUG_DESKTOP_CAPABILITY.to_owned();
-
-    #[cfg(not(debug_assertions))]
     random_desktop_capability()
 }
 
-#[cfg(any(not(debug_assertions), test))]
 fn random_desktop_capability() -> String {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).expect("operating system random source is unavailable");
@@ -140,6 +213,7 @@ fn ensure_office_port_available() -> Result<(), Box<dyn std::error::Error>> {
 fn wait_for_office_server(
     child: &mut Child,
     timeout: Duration,
+    desktop_capability: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + timeout;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
@@ -147,7 +221,10 @@ fn wait_for_office_server(
         if let Some(status) = child.try_wait()? {
             return Err(format!("Office Server exited during startup ({status}).").into());
         }
-        if health_check(address) {
+        if health_check(address) && desktop_capability_check(address, desktop_capability) {
+            if let Some(status) = child.try_wait()? {
+                return Err(format!("Office Server exited during startup ({status}).").into());
+            }
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -171,12 +248,90 @@ fn health_check(address: SocketAddr) -> bool {
     {
         return false;
     }
-    let mut response = [0_u8; 2048];
-    let Ok(size) = stream.read(&mut response) else {
+    let mut response = Vec::new();
+    let read_result = stream
+        .take(MAX_HEALTH_RESPONSE + 1)
+        .read_to_end(&mut response);
+    if read_result.is_err() || response.len() as u64 > MAX_HEALTH_RESPONSE {
+        return false;
+    }
+    let text = match String::from_utf8(response) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let Some((headers, body)) = text.split_once("\r\n\r\n") else {
         return false;
     };
-    let text = String::from_utf8_lossy(&response[..size]);
-    text.starts_with("HTTP/1.1 200") && text.contains("\"protocolVersion\"")
+    http_status_is_ok(headers) && health_body_is_compatible(body)
+}
+
+fn http_status_is_ok(headers: &str) -> bool {
+    let mut tokens = headers.split_whitespace();
+    let Some(version) = tokens.next() else {
+        return false;
+    };
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return false;
+    }
+    let Some(status) = tokens.next() else {
+        return false;
+    };
+    status == "200"
+}
+
+fn desktop_capability_check(address: SocketAddr, desktop_capability: &str) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+        return false;
+    };
+    let timeout = Some(Duration::from_millis(500));
+    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+        return false;
+    }
+    let request = format!(
+        "GET /api/v1/host/remote HTTP/1.1\r\nHost: {OFFICE_HOST}:{OFFICE_PORT}\r\n{DESKTOP_CAPABILITY_HEADER}: {desktop_capability}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buffer = [0_u8; 512];
+    let mut total = 0_usize;
+    let mut response = Vec::new();
+    let mut found_headers = false;
+    loop {
+        let Ok(size) = stream.read(&mut buffer) else {
+            return false;
+        };
+        if size == 0 {
+            break;
+        }
+        total += size;
+        if total > MAX_HTTP_HEADERS {
+            return false;
+        }
+        response.extend_from_slice(&buffer[..size]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            found_headers = true;
+            break;
+        }
+    }
+    if !found_headers {
+        return false;
+    }
+    let text = match String::from_utf8(response) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    http_status_is_ok(&text)
+}
+
+fn health_body_is_compatible(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value
+        .get("protocolVersion")
+        .and_then(|version| version.as_i64())
+        == Some(OFFICE_PROTOCOL_VERSION)
 }
 
 fn stop_office_server(child: &mut Child) {
@@ -255,7 +410,11 @@ fn validated_local_executable(path: &Path) -> Option<PathBuf> {
         let mode = metadata.permissions().mode();
         let owner = metadata.uid();
         let effective_user = unsafe { libc::geteuid() };
-        if mode & 0o111 == 0 || mode & 0o022 != 0 || (owner != 0 && owner != effective_user) {
+        if mode & 0o6000 != 0
+            || mode & 0o111 == 0
+            || mode & 0o022 != 0
+            || (owner != 0 && owner != effective_user)
+        {
             return None;
         }
     }
@@ -349,6 +508,21 @@ fn inherit_safe_environment(command: &mut Command) {
     }
 }
 
+/// Office remote-device configuration is only meaningful to the Office server
+/// child. Preserve it across env_clear so a host owner can launch remote
+/// access without putting tokens in the browser or source files.
+fn inherit_office_remote_environment(command: &mut Command, lookup: impl Fn(&str) -> Option<OsString>) {
+    for key in [
+        "HERMES_OFFICE_REMOTE_TOKEN",
+        "HERMES_OFFICE_ALLOWED_ORIGINS",
+        "HERMES_OFFICE_TRUSTED_PROXY_HOPS",
+    ] {
+        if let Some(value) = lookup(key).filter(|value| !value.is_empty()) {
+            command.env(key, value);
+        }
+    }
+}
+
 fn node_candidates(home: Option<&Path>) -> Vec<PathBuf> {
     let mut values = Vec::new();
     if let Some(home) = home {
@@ -428,6 +602,14 @@ mod tests {
             .expect("make fixture writable");
         assert_eq!(validated_local_executable(&link), None);
 
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o4755))
+            .expect("make fixture setuid");
+        assert_eq!(validated_local_executable(&link), None);
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o2755))
+            .expect("make fixture setgid");
+        assert_eq!(validated_local_executable(&link), None);
+
         fs::remove_dir_all(directory).expect("remove fixture directory");
     }
 
@@ -441,8 +623,68 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    fn debug_capability_matches_the_dev_server_contract() {
-        assert_eq!(generate_desktop_capability(), DEBUG_DESKTOP_CAPABILITY);
+    fn generate_desktop_capability_is_random_in_all_builds() {
+        let first = generate_desktop_capability();
+        let second = generate_desktop_capability();
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn http_status_is_ok_only_for_exact_200() {
+        assert!(http_status_is_ok("HTTP/1.1 200 OK"));
+        assert!(http_status_is_ok("HTTP/1.0 200"));
+        assert!(!http_status_is_ok("HTTP/1.1 2000"));
+        assert!(!http_status_is_ok("HTTP/1.1 403 Forbidden"));
+        assert!(!http_status_is_ok("malformed"));
+    }
+
+    #[test]
+    fn health_body_compatibility_matches_protocol_version() {
+        assert!(health_body_is_compatible(r#"{"protocolVersion":1}"#));
+        assert!(health_body_is_compatible(
+            r#"{"status":"ok","protocolVersion":1,"details":{}}"#
+        ));
+        assert!(!health_body_is_compatible(r#"{"protocolVersion":2}"#));
+        assert!(!health_body_is_compatible(r#"{"status":"ok"}"#));
+        assert!(!health_body_is_compatible("not-json"));
+    }
+
+    #[test]
+    fn office_remote_environment_allowlist_is_exact_when_host_values_present() {
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert("HERMES_OFFICE_REMOTE_TOKEN", OsString::from("office-token"));
+        lookup.insert("HERMES_OFFICE_ALLOWED_ORIGINS", OsString::from("https://office.example"));
+        lookup.insert("HERMES_OFFICE_TRUSTED_PROXY_HOPS", OsString::from("1"));
+        let mut command = Command::new("/bin/sh");
+        command.env_clear();
+        inherit_office_remote_environment(&mut command, |key| lookup.get(key).cloned());
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            })
+            .collect();
+        assert!(envs.contains(&("HERMES_OFFICE_REMOTE_TOKEN".to_string(), "office-token".to_string())));
+        assert!(envs.contains(&("HERMES_OFFICE_ALLOWED_ORIGINS".to_string(), "https://office.example".to_string())));
+        assert!(envs.contains(&("HERMES_OFFICE_TRUSTED_PROXY_HOPS".to_string(), "1".to_string())));
+        assert_eq!(envs.len(), 3, "only the three allowed Office keys may be forwarded");
+    }
+
+    #[test]
+    fn office_remote_environment_allowlist_ignores_empty_or_missing_values() {
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert("HERMES_OFFICE_REMOTE_TOKEN", OsString::from(""));
+        let mut command = Command::new("/bin/sh");
+        command.env_clear();
+        inherit_office_remote_environment(&mut command, |key| lookup.get(key).cloned());
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            })
+            .collect();
+        assert!(envs.is_empty(), "empty or absent host values must not be forwarded");
     }
 }

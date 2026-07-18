@@ -524,3 +524,75 @@ test("malformed device registry fails closed without reopening enrollment", asyn
     assert.equal((await deviceLogin(`http://127.0.0.1:${address.port}`, REMOTE_TOKEN)).status, 409);
   } finally { await server.close(); }
 });
+
+test("host remote status is desktop-capability-only, secret-free, and blocks local browser or remote devices", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-office-host-remote-"));
+  const deviceRegistryPath = join(directory, "devices.json");
+  const desktopCapability = "d".repeat(64);
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [LOCAL_ORIGIN, REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+    desktopCapability,
+    deviceRegistryPath,
+  });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const localLogin = await fetch(`${base}/api/v1/auth/local`, {
+      method: "POST",
+      headers: { Origin: LOCAL_ORIGIN },
+    });
+    assert.equal(localLogin.status, 200);
+    const localCookie = (localLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+
+    const localBrowserStatus = await fetch(`${base}/api/v1/host/remote`, {
+      headers: { Origin: LOCAL_ORIGIN, Cookie: localCookie },
+    });
+    assert.equal(localBrowserStatus.status, 403);
+
+    const desktopStatus = await fetch(`${base}/api/v1/host/remote`, {
+      headers: {
+        Origin: "tauri://localhost",
+        Host: "localhost:4317",
+        "X-Hermes-Office-Desktop-Capability": desktopCapability,
+      },
+    });
+    assert.equal(desktopStatus.status, 200);
+    const body = await desktopStatus.json() as Record<string, unknown>;
+    assert.equal(body.enabled, true);
+    assert.deepEqual(body.origins, [REMOTE_ORIGIN]);
+    assert.equal(body.trustedProxyHops, 1);
+    assert.equal((body.origins as string[]).every((origin) => origin.startsWith("https://")), true);
+    assert.ok(Array.isArray(body.devices));
+    assert.equal(JSON.stringify(body).includes(REMOTE_TOKEN), false);
+
+    const deviceLogin = await fetch(`${base}/api/v1/auth/device`, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json", "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },
+      body: JSON.stringify({ token: REMOTE_TOKEN, deviceName: "Travel phone" }),
+    });
+    assert.equal(deviceLogin.status, 200);
+    const deviceCookie = responseCookies(deviceLogin);
+
+    const remoteStatus = await fetch(`${base}/api/v1/host/remote`, {
+      headers: { Origin: REMOTE_ORIGIN, Cookie: deviceCookie, "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },
+    });
+    assert.equal(remoteStatus.status, 403);
+  } finally { await server.close(); }
+});
+
+test("invalid remote origins are rejected at server construction", () => {
+  let error: Error | undefined;
+  try {
+    createOfficeServer({
+      port: 0,
+      allowedOrigins: [REMOTE_ORIGIN, "http://not-allowed.example", "https://allowed.tailnet.ts.net/path", "https://user:pass@allowed.tailnet.ts.net"],
+      remoteToken: REMOTE_TOKEN,
+      trustedProxyHops: 1,
+    });
+  } catch (caught) { error = caught as Error; }
+  assert.ok(error);
+  assert.equal(error.message.includes("user:pass"), false, "error must not echo userinfo");
+});
