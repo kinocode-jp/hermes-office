@@ -20,7 +20,8 @@ export function DeviceAdmin() {
   const [confirmDevice, setConfirmDevice] = useState<RemoteConfigStatus["devices"][number] | null>(null);
   const [revokeError, setRevokeError] = useState<DeviceRevokeFailureCode | null>(null);
   const generation = useRef(0);
-  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const revokeTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const reload = useCallback(async (showLoading = true) => {
     const currentGeneration = ++generation.current;
@@ -50,11 +51,20 @@ export function DeviceAdmin() {
   }, [reload]);
 
   useEffect(() => {
-    if (confirmDevice) confirmButtonRef.current?.focus();
+    if (confirmDevice) cancelButtonRef.current?.focus();
   }, [confirmDevice]);
 
-  const askRevoke = useCallback((device: RemoteConfigStatus["devices"][number]) => {
+  useEffect(() => {
+    if (!confirmDevice && revokeTriggerRef.current) {
+      const trigger = revokeTriggerRef.current;
+      revokeTriggerRef.current = null;
+      requestAnimationFrame(() => trigger.focus());
+    }
+  }, [confirmDevice]);
+
+  const askRevoke = useCallback((device: RemoteConfigStatus["devices"][number], trigger: EventTarget | null) => {
     setRevokeError(null);
+    revokeTriggerRef.current = trigger instanceof HTMLButtonElement ? trigger : null;
     setConfirmDevice(device);
   }, []);
 
@@ -66,6 +76,7 @@ export function DeviceAdmin() {
     if (revoking.has(device.id)) return;
     setRevokeError(null);
     setConfirmDevice(null);
+    revokeTriggerRef.current = null;
     setRevoking((prev) => new Set([...prev, device.id]));
     try {
       await revokeRemoteDevice(device.id);
@@ -149,7 +160,7 @@ export function DeviceAdmin() {
                   <button
                     type="button"
                     disabled={revoking.has(device.id) || device.revokedAt !== undefined}
-                    onClick={() => askRevoke(device)}
+                    onClick={(event) => askRevoke(device, event.currentTarget)}
                     aria-label={t("hostAdmin.revokeAria", { name: device.displayName })}
                   >
                     {revoking.has(device.id) ? t("hostAdmin.revoking") : device.revokedAt ? t("hostAdmin.revokeDone") : t("hostAdmin.revoke")}
@@ -176,13 +187,18 @@ export function DeviceAdmin() {
               <div class="access-audit__device">
                 <button
                   type="button"
-                  ref={confirmButtonRef}
+                  ref={cancelButtonRef}
+                  onClick={cancelRevoke}
+                >
+                  {t("hostAdmin.revokeCancel")}
+                </button>
+                <button
+                  type="button"
                   onClick={() => void revoke(confirmDevice)}
                   disabled={revoking.has(confirmDevice.id)}
                 >
                   {revoking.has(confirmDevice.id) ? t("hostAdmin.revoking") : t("hostAdmin.revoke")}
                 </button>
-                <button type="button" onClick={cancelRevoke}>{t("hostAdmin.revokeCancel")}</button>
               </div>
             </div>
           )}

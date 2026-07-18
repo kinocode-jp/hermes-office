@@ -241,10 +241,12 @@ export function LiveSettings({ profileId, profileLabel, initialTab = "global", a
           <p>{t("settings.eyebrow")}</p>
           <h1>{t("settings.title")}</h1>
         </div>
-        <div class="live-settings__target">
-          <span>{t("settings.target")}</span>
-          <b>{profileName}</b>
-        </div>
+        {visibleTab !== "host" && (
+          <div class="live-settings__target">
+            <span>{t("settings.target")}</span>
+            <b>{profileName}</b>
+          </div>
+        )}
       </header>
 
       {showAccessAudit && canReadAudit && <AccessAudit />}
