@@ -261,6 +261,11 @@ test("local bootstrap accepts IPv6 loopback [::1] origin and Host, rejects non-l
 });
 
 test("OfficeAuth rejects invalid configured origins", () => {
+  assert.throws(
+    () => new OfficeAuth({ remoteToken: "b".repeat(64), allowedOrigins: ["TAURI://Localhost:4173"] }),
+    (error: unknown) => error instanceof Error && error.message.includes("exact portless Tauri bridge origin"),
+    "uppercase tauri port-bearing origin must require exact portless Tauri bridge origin",
+  );
   const invalidCases = [
     { origin: "http://insecure.example", label: "non-loopback HTTP" },
     { origin: "https://with-path.example/path", label: "path" },

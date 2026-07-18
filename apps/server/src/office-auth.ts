@@ -704,8 +704,9 @@ function isSpecialTauriBridge(value: string): boolean {
   try {
     const url = new URL(value);
     if (url.port === "") return false;
-    if (url.protocol === "tauri:") return url.hostname === "localhost";
-    if (url.protocol === "http:" || url.protocol === "https:") return url.hostname === "tauri.localhost";
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol === "tauri:") return hostname === "localhost";
+    if (url.protocol === "http:" || url.protocol === "https:") return hostname === "tauri.localhost";
     return false;
   } catch {
     return false;
