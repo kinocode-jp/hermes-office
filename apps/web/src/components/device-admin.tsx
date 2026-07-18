@@ -144,7 +144,7 @@ export function DeviceAdmin() {
                 <li key={device.id} class="access-audit__device">
                   <span>{device.displayName}</span>
                   <span class={device.revokedAt ? "is-error" : "is-local"}>
-                    {device.revokedAt ? t("audit.outcome.denied") : device.lastSeenAt ? formatTime(device.lastSeenAt) : ""}
+                    {device.revokedAt ? t("audit.outcome.denied") : device.lastSeenAt ? formatTime(device.lastSeenAt) : t("hostAdmin.neverSeen")}
                   </span>
                   <button
                     type="button"

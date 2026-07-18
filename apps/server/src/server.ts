@@ -150,7 +150,9 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (request.method === "POST" && requestUrl.pathname === "/api/v1/auth/local") {
-      if (origin === undefined || requestHasBody(request)) {
+      const hasBody = requestHasBody(request);
+      if (origin === undefined || hasBody) {
+        if (hasBody) request.resume();
         writeError(response, 400, "bad_request", "Local bootstrap requires an allowed browser origin and no body.", maxJsonBytes);
         return;
       }
@@ -218,6 +220,8 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     if (request.method === "OPTIONS") {
+      // GET/POST are widely used. PUT and PATCH are intentionally supported here
+      // for settings-http and kanban-http mutations, so keep them in the allowlist.
       response.writeHead(204, {
         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, X-CSRF-Token, X-Hermes-Office-Desktop-Capability",
