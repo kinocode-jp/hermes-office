@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { RemoteConfigStatus } from "@hermes-office/protocol";
-import { fetchRemoteConfigStatus, revokeRemoteDevice, DeviceRevokeError, type DeviceRevokeFailureCode } from "../office-api";
+import { fetchRemoteConfigStatus, revokeRemoteDevice, DeviceRevokeError, OfficeRemoteConfigError, type DeviceRevokeFailureCode, type RemoteConfigFailureCode } from "../office-api";
 import { locale, t, type TranslationKey } from "../i18n";
 import { InfoTip } from "./info-tip";
 import "./access-audit.css";
@@ -15,7 +15,7 @@ const REVOKE_ERROR_KEY: Readonly<Record<DeviceRevokeFailureCode, TranslationKey>
 export function DeviceAdmin() {
   const [status, setStatus] = useState<RemoteConfigStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<RemoteConfigFailureCode | null>(null);
   const [revoking, setRevoking] = useState<ReadonlySet<string>>(() => new Set());
   const [confirmDevice, setConfirmDevice] = useState<RemoteConfigStatus["devices"][number] | null>(null);
   const [revokeError, setRevokeError] = useState<DeviceRevokeFailureCode | null>(null);
@@ -29,9 +29,14 @@ export function DeviceAdmin() {
       const next = await fetchRemoteConfigStatus();
       if (generation.current !== currentGeneration) return;
       setStatus(next);
-      setError(false);
-    } catch {
-      if (generation.current === currentGeneration) setError(true);
+      setError(null);
+    } catch (reason) {
+      if (generation.current !== currentGeneration) return;
+      if (reason instanceof OfficeRemoteConfigError && (reason.status === 401 || reason.status === 403)) {
+        setError("not_allowed");
+      } else {
+        setError("load_failed");
+      }
     } finally {
       if (generation.current === currentGeneration) setLoading(false);
     }
@@ -93,7 +98,11 @@ export function DeviceAdmin() {
         </button>
       </header>
 
-      {error ? (
+      {error === "not_allowed" ? (
+        <div class="access-audit__message is-error" role="alert">
+          <b>{t("hostAdmin.notAllowed")}</b>
+        </div>
+      ) : error === "load_failed" ? (
         <div class="access-audit__message is-error" role="alert">
           <b>{t("hostAdmin.loadFailed")}</b>
         </div>

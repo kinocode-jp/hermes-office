@@ -83,6 +83,15 @@ export class OfficeHttpError extends Error {
   }
 }
 
+export class OfficeRemoteConfigError extends Error {
+  constructor(readonly status: number) {
+    super("Remote host configuration is unavailable.");
+    this.name = "OfficeRemoteConfigError";
+  }
+}
+
+export type RemoteConfigFailureCode = "not_allowed" | "load_failed";
+
 // A cold Hermes snapshot can legitimately take several seconds while its
 // profile/session indexes initialize. Keep the UI responsive, but do not
 // drop into demo fallback during a normal first launch.
@@ -525,7 +534,12 @@ export async function authenticateRemoteDevice(deviceNameInput: string, credenti
 
 
 export async function fetchRemoteConfigStatus(serverUrl = officeServerUrl()): Promise<RemoteConfigStatus> {
-  return await officeFetchJson<RemoteConfigStatus>("/api/v1/host/remote", {}, serverUrl);
+  try {
+    return await officeFetchJson<RemoteConfigStatus>("/api/v1/host/remote", {}, serverUrl);
+  } catch (error) {
+    if (error instanceof OfficeHttpError) throw new OfficeRemoteConfigError(error.status);
+    throw new OfficeRemoteConfigError(0);
+  }
 }
 
 export type DeviceRevokeFailureCode = "not_found" | "forbidden" | "unavailable" | "unknown";

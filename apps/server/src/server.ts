@@ -55,14 +55,15 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const maxResponseJsonBytes = boundedInteger(options.maxResponseJsonBytes, 4 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024);
   const maxEventBytes = boundedInteger(options.maxEventBytes, 64 * 1024, 1_024, 1024 * 1024);
   const maxWebSocketClients = boundedInteger(options.maxWebSocketClients, 32, 1, 256);
-  const originAllowlist = new Set(makeOriginAllowlist(options.allowedOrigins ?? DEFAULT_OFFICE_ORIGINS));
+  const effectiveDesktopOrigins = options.desktopOrigins ?? DEFAULT_OFFICE_ORIGINS;
+  const originAllowlist = new Set(makeOriginAllowlist([...(options.allowedOrigins ?? DEFAULT_OFFICE_ORIGINS), ...effectiveDesktopOrigins]));
   const runtimeSource = options.runtimeSource;
   const staticWeb = options.staticWebRoot === undefined ? undefined : new StaticWebAssets(options.staticWebRoot);
   let publishAudit = (_record: OfficeAuditRecord): void => {};
   const auth = new OfficeAuth({
     ...(options.remoteToken === undefined ? {} : { remoteToken: options.remoteToken }),
     ...(options.desktopCapability === undefined ? {} : { desktopCapability: options.desktopCapability }),
-    ...(options.desktopOrigins === undefined ? {} : { desktopOrigins: options.desktopOrigins }),
+    desktopOrigins: effectiveDesktopOrigins,
     ...(options.allowedOrigins === undefined ? {} : { allowedOrigins: options.allowedOrigins }),
     ...(options.trustedProxyHops === undefined ? {} : { trustedProxyHops: options.trustedProxyHops }),
     ...(options.deviceRegistryPath === undefined ? {} : { deviceRegistryPath: options.deviceRegistryPath }),
@@ -292,6 +293,11 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     const revokeDeviceMatch = /^\/api\/v1\/devices\/([^/]+)\/revoke$/.exec(requestUrl.pathname);
     if (request.method === "POST" && revokeDeviceMatch !== null) {
       if (requestHasBody(request)) { request.resume(); writeError(response, 413, "bad_request", "Device revocation request bodies are not accepted.", maxJsonBytes); return; }
+      // SECURITY: POST device revoke is intentionally local-owner + CSRF, not
+      // desktop-exclusive. It forms a trusted loopback recovery boundary so the
+      // owner can revoke devices even if the Tauri desktop bridge is unavailable.
+      // This path is not exposed to remote devices and is not weakened by
+      // removing or bypassing CSRF.
       const access = auth.authorizeOperation(request, "device.revoke", true);
       if (!access.allowed) { writeAuthorizationError(response, access.reason, maxJsonBytes); return; }
       let deviceId: string;
@@ -380,7 +386,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
 
     if (requestUrl.pathname === "/api/v1/host/remote") {
       const config = auth.remoteConfig(authenticatedSession);
-      if (config === undefined) writeError(response, 403, "forbidden", "Verified local owner access is required.", maxJsonBytes);
+      if (config === undefined) writeError(response, 403, "forbidden", "Verified local desktop owner access is required.", maxJsonBytes);
       else writeJson(response, 200, config, maxResponseJsonBytes);
       return;
     }

@@ -71,17 +71,19 @@ test("desktop capability is Tauri-only, mutation-capable, and renews its bounded
 
 test("remote config status returns configured allowed origins and never exposes secrets", () => {
   const remoteToken = "a".repeat(64);
+  const capability = "d".repeat(64);
   const auth = new OfficeAuth({
     remoteToken,
+    desktopCapability: capability,
     allowedOrigins: ["https://Office.Tailnet.Example:443/", "http://localhost:4173", "tauri://localhost", "http://127.0.0.1:4173"],
     trustedProxyHops: 1,
   });
-  const local = auth.bootstrapLocal(
-    { headers: { origin: "http://localhost:4173", host: "localhost:4173" }, socket: { remoteAddress: "127.0.0.1" } } as unknown as IncomingMessage,
-    { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse,
+  const desktop = auth.authenticate(
+    { headers: { origin: "tauri://localhost", host: "localhost:4317", "x-hermes-office-desktop-capability": capability }, socket: { remoteAddress: "127.0.0.1" } } as unknown as IncomingMessage,
   );
-  assert.ok(local);
-  const owner = auth.remoteConfig(local);
+  assert.ok(desktop);
+  assert.equal(desktop.principal.id, "local-desktop");
+  const owner = auth.remoteConfig(desktop);
   assert.ok(owner);
   assert.equal(owner.enabled, true);
   assert.deepEqual(owner.origins, ["https://office.tailnet.example"]);
@@ -89,6 +91,13 @@ test("remote config status returns configured allowed origins and never exposes 
   assert.equal(owner.trustedProxyHops, 1);
   assert.equal(owner.devices.length, 0);
   assert.equal(JSON.stringify(owner).includes(remoteToken), false);
+
+  const local = auth.bootstrapLocal(
+    { headers: { origin: "http://localhost:4173", host: "localhost:4173" }, socket: { remoteAddress: "127.0.0.1" } } as unknown as IncomingMessage,
+    { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse,
+  );
+  assert.ok(local);
+  assert.equal(auth.remoteConfig(local), undefined);
 });
 
 test("OfficeAuth rejects invalid configured origins", () => {

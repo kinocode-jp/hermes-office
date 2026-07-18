@@ -295,7 +295,7 @@ export class OfficeAuth {
   }
 
   remoteConfig(session: OfficeAuthSession): { enabled: boolean; origins: readonly string[]; trustedProxyHops: number; devices: DeviceSummary[] } | undefined {
-    if (!session.principal.local || session.principal.tier !== "owner") return undefined;
+    if (session.principal.id !== "local-desktop" || session.principal.tier !== "owner" || !session.principal.local) return undefined;
     return {
       enabled: this.#remoteTokenDigest !== undefined,
       origins: [...this.#allowedOrigins].filter((origin) => !isLoopbackOrigin(origin) && origin.startsWith("https://")),

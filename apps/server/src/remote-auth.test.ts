@@ -525,14 +525,16 @@ test("malformed device registry fails closed without reopening enrollment", asyn
   } finally { await server.close(); }
 });
 
-test("host remote status is owner-only and omits secrets", async () => {
+test("host remote status is desktop-capability-only, secret-free, and blocks local browser or remote devices", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-office-host-remote-"));
   const deviceRegistryPath = join(directory, "devices.json");
+  const desktopCapability = "d".repeat(64);
   const server = createOfficeServer({
     port: 0,
     allowedOrigins: [LOCAL_ORIGIN, REMOTE_ORIGIN],
     remoteToken: REMOTE_TOKEN,
     trustedProxyHops: 1,
+    desktopCapability,
     deviceRegistryPath,
   });
   const address = await server.listen();
@@ -545,11 +547,20 @@ test("host remote status is owner-only and omits secrets", async () => {
     assert.equal(localLogin.status, 200);
     const localCookie = (localLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
 
-    const status = await fetch(`${base}/api/v1/host/remote`, {
+    const localBrowserStatus = await fetch(`${base}/api/v1/host/remote`, {
       headers: { Origin: LOCAL_ORIGIN, Cookie: localCookie },
     });
-    assert.equal(status.status, 200);
-    const body = await status.json() as Record<string, unknown>;
+    assert.equal(localBrowserStatus.status, 403);
+
+    const desktopStatus = await fetch(`${base}/api/v1/host/remote`, {
+      headers: {
+        Origin: "tauri://localhost",
+        Host: "localhost:4317",
+        "X-Hermes-Office-Desktop-Capability": desktopCapability,
+      },
+    });
+    assert.equal(desktopStatus.status, 200);
+    const body = await desktopStatus.json() as Record<string, unknown>;
     assert.equal(body.enabled, true);
     assert.deepEqual(body.origins, [REMOTE_ORIGIN]);
     assert.equal(body.trustedProxyHops, 1);
@@ -570,39 +581,6 @@ test("host remote status is owner-only and omits secrets", async () => {
     });
     assert.equal(remoteStatus.status, 403);
   } finally { await server.close(); }
-});
-
-
-test("host remote status returns only configured HTTPS origins and omits secrets", async () => {
-  const server = createOfficeServer({
-    port: 0,
-    allowedOrigins: [LOCAL_ORIGIN, REMOTE_ORIGIN, "http://127.0.0.1:3000"],
-    remoteToken: REMOTE_TOKEN,
-    trustedProxyHops: 2,
-  });
-  const address = await server.listen();
-  const base = `http://127.0.0.1:${address.port}`;
-  try {
-    const local = await fetch(`${base}/api/v1/auth/local`, { method: "POST", headers: { Origin: LOCAL_ORIGIN } });
-    assert.equal(local.status, 200);
-    const { csrfToken } = await local.json() as { csrfToken: string };
-    const cookie = (local.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
-
-    const status = await fetch(`${base}/api/v1/host/remote`, {
-      headers: { Origin: LOCAL_ORIGIN, Cookie: cookie, "X-CSRF-Token": csrfToken },
-    });
-    assert.equal(status.status, 200);
-    const body = await status.json() as { enabled: boolean; origins: string[]; trustedProxyHops: number; devices: unknown[] };
-    assert.equal(body.enabled, true);
-    assert.deepEqual(body.origins, [REMOTE_ORIGIN]);
-    assert.equal(body.trustedProxyHops, 2);
-    assert.equal(Array.isArray(body.devices), true);
-    const text = JSON.stringify(body);
-    assert.equal(text.includes(REMOTE_TOKEN), false);
-    assert.equal(text.includes(LOCAL_ORIGIN), false);
-  } finally {
-    await server.close();
-  }
 });
 
 test("invalid remote origins are rejected at server construction", () => {

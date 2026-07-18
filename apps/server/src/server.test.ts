@@ -36,6 +36,18 @@ test("origin allowlist rejects wildcards and null origins", () => {
   );
 });
 
+test("createOfficeServer origin allowlist always includes remote and Tauri origins", async () => {
+  const remoteOrigin = "https://office.tailnet.example";
+  const server = createOfficeServer({ port: 0, allowedOrigins: [remoteOrigin] });
+  await server.listen();
+  try {
+    assert.equal(server.originAllowlist.has(remoteOrigin), true);
+    assert.equal(server.originAllowlist.has("tauri://localhost"), true);
+  } finally {
+    await server.close();
+  }
+});
+
 test("snapshot is bounded, explicit, and does not expose secret-shaped fields", async () => {
   const server = createOfficeServer({ port: 0 });
   const address = await server.listen();
