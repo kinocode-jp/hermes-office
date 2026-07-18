@@ -24,7 +24,7 @@ export function isTrustedLocalOrigin(origin: string | undefined): boolean {
     const parsed = new URL(origin);
     return (
       (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]") &&
       parsed.username === "" &&
       parsed.password === "" &&
       parsed.pathname === "/" &&

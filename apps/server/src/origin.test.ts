@@ -39,7 +39,7 @@ test("normalizeOrigin canonicalizes, rejects credentials/path/query/fragment, an
   }
 });
 
-test("isTrustedLocalOrigin accepts the three portless Tauri constants and localhost/127.0.0.1 with or without port", () => {
+test("isTrustedLocalOrigin accepts the three portless Tauri constants and localhost/127.0.0.1/[::1] with or without port", () => {
   const accepted: { input: string; label: string }[] = [
     { input: "tauri://localhost", label: "tauri" },
     { input: "http://tauri.localhost", label: "http-tauri" },
@@ -48,6 +48,10 @@ test("isTrustedLocalOrigin accepts the three portless Tauri constants and localh
     { input: "http://localhost", label: "localhost-missing-port" },
     { input: "http://127.0.0.1:4173", label: "ipv4-port" },
     { input: "https://127.0.0.1:4173", label: "https-ipv4" },
+    { input: "http://[::1]:4173", label: "ipv6-loopback-port" },
+    { input: "https://[::1]:4173", label: "https-ipv6-loopback" },
+    { input: "http://[::1]", label: "ipv6-loopback-missing-port" },
+    { input: "HTTP://[::1]:4173", label: "uppercase-ipv6-loopback" },
     { input: "HTTP://LOCALHOST:4173", label: "uppercase" },
   ];
   for (const { input, label } of accepted) {
@@ -63,6 +67,10 @@ test("isTrustedLocalOrigin accepts the three portless Tauri constants and localh
     { input: "http://localhost:4173#hash", label: "fragment" },
     { input: "http://user:pass@localhost:4173", label: "credentials" },
     { input: "http://example.com:4173", label: "non-loopback" },
+    { input: "http://[::2]:4173", label: "non-loopback-ipv6" },
+    { input: "http://[2001:db8::1]:4173", label: "non-loopback-ipv6-ula" },
+    { input: "http://[::1:4173", label: "malformed-ipv6-bracket" },
+    { input: "http://::1:4173", label: "malformed-ipv6-unbracketed" },
     { input: "", label: "empty" },
   ];
   for (const { input, label } of rejected) {

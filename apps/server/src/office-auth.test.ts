@@ -225,6 +225,41 @@ test("Tauri bridge origins must be the exact portless constants; port-bearing Ta
   assert.ok(local);
 });
 
+test("local bootstrap accepts IPv6 loopback [::1] origin and Host, rejects non-loopback/malformed IPv6", () => {
+  const auth = new OfficeAuth();
+  const response = { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse;
+
+  const accepted = [
+    { origin: "http://[::1]:4173", host: "[::1]:4173", label: "ipv6-loopback-port" },
+    { origin: "HTTP://[::1]:4173", host: "[::1]:4173", label: "uppercase-ipv6" },
+  ];
+  for (const { origin, host, label } of accepted) {
+    const request = {
+      headers: { origin, host },
+      socket: { remoteAddress: "::1" },
+    } as unknown as IncomingMessage;
+    assert.ok(auth.bootstrapLocal(request, response), label);
+  }
+
+  const denied = [
+    { origin: "http://[::2]:4173", host: "[::2]:4173", label: "non-loopback-ipv6" },
+    { origin: "http://[2001:db8::1]:4173", host: "[2001:db8::1]:4173", label: "non-loopback-ula" },
+    { origin: "http://[::1]:4173", host: "[::2]:4173", label: "origin-host-mismatch" },
+    { origin: "http://[::1]:4173/path", host: "[::1]:4173", label: "path" },
+    { origin: "http://[::1]:4173?query=1", host: "[::1]:4173", label: "query" },
+    { origin: "http://[::1]:4173#hash", host: "[::1]:4173", label: "fragment" },
+    { origin: "http://user:pass@[::1]:4173", host: "[::1]:4173", label: "credentials" },
+    { origin: "http://[::1:4173", host: "[::1:4173", label: "malformed-host-bracket" },
+  ];
+  for (const { origin, host, label } of denied) {
+    const request = {
+      headers: { origin, host },
+      socket: { remoteAddress: "::1" },
+    } as unknown as IncomingMessage;
+    assert.equal(auth.bootstrapLocal(request, response), undefined, label);
+  }
+});
+
 test("OfficeAuth rejects invalid configured origins", () => {
   const invalidCases = [
     { origin: "http://insecure.example", label: "non-loopback HTTP" },

@@ -733,7 +733,7 @@ function isTrustedLocalHost(value: string | undefined): boolean {
       parsed.pathname === "/" &&
       parsed.search === "" &&
       parsed.hash === "" &&
-      ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname)
+      ["localhost", "127.0.0.1", "[::1]", "tauri.localhost"].includes(parsed.hostname)
     );
   } catch {
     return false;
