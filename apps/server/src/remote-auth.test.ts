@@ -574,7 +574,7 @@ test("host remote status is desktop-capability-only, secret-free, and blocks loc
       body: JSON.stringify({ token: REMOTE_TOKEN, deviceName: "Travel phone" }),
     });
     assert.equal(deviceLogin.status, 200);
-    const deviceCookie = (deviceLogin.headers.get("set-cookie") ?? "").split(";", 1)[0]!;
+    const deviceCookie = responseCookies(deviceLogin);
 
     const remoteStatus = await fetch(`${base}/api/v1/host/remote`, {
       headers: { Origin: REMOTE_ORIGIN, Cookie: deviceCookie, "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.10" },

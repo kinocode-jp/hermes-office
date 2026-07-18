@@ -96,7 +96,7 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
     // Office remote-device configuration is owned by the host environment, not
     // hardcoded or stored in the browser. Pass it through to the server child
     // only; do not forward it to the managed Hermes runtime.
-    inherit_office_remote_environment(&mut command, env::var_os);
+    inherit_office_remote_environment(&mut command, |key| env::var_os(key));
     command
         .arg(script)
         .env("HERMES_OFFICE_HOST", OFFICE_HOST)

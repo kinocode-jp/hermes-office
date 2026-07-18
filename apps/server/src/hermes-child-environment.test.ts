@@ -25,9 +25,10 @@ test("Hermes child environment inherits only runtime essentials", () => {
     HERMES_DESKTOP: "1", TERMINAL_CWD: "/safe/workspace",
   });
 
-  assert.equal(environment.HERMES_OFFICE_REMOTE_TOKEN, undefined);
-  assert.equal(environment.HERMES_OFFICE_ALLOWED_ORIGINS, undefined);
-  assert.equal(environment.HERMES_OFFICE_TRUSTED_PROXY_HOPS, undefined);
+  const record = environment as Readonly<Record<string, string | undefined>>;
+  assert.equal(record.HERMES_OFFICE_REMOTE_TOKEN, undefined);
+  assert.equal(record.HERMES_OFFICE_ALLOWED_ORIGINS, undefined);
+  assert.equal(record.HERMES_OFFICE_TRUSTED_PROXY_HOPS, undefined);
 });
 
 test("Hermes child environment rejects inherited NUL values", () => {
