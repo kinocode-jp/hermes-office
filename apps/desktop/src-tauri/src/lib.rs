@@ -13,10 +13,14 @@ use tauri::{Manager, RunEvent};
 
 const OFFICE_HOST: &str = "127.0.0.1";
 const OFFICE_PORT: u16 = 4317;
+const OFFICE_PROTOCOL_VERSION: i64 = 1;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_VERSION_OUTPUT: u64 = 4096;
+const MAX_HTTP_HEADERS: usize = 8192;
+const MAX_HEALTH_RESPONSE: u64 = 4096;
+const DESKTOP_CAPABILITY_HEADER: &str = "X-Hermes-Office-Desktop-Capability";
 const SUPPORTED_NODE_MAJOR: u64 = 22;
 const SUPPORTED_HERMES_MAJOR: u64 = 0;
 const SUPPORTED_HERMES_MINOR: u64 = 18;
@@ -39,11 +43,12 @@ pub fn run() {
             // Tauri owns exactly one Office Server process in every build mode.
             // Release spawns the bundled sidecar; debug spawns the local dev server.
             ensure_office_port_available()?;
+            let desktop_capability = app.state::<DesktopCapability>().0.clone();
             #[cfg(debug_assertions)]
             let mut child = start_office_dev_server(app)?;
             #[cfg(not(debug_assertions))]
             let mut child = start_office_server(app)?;
-            if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT) {
+            if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability) {
                 stop_office_server(&mut child);
                 return Err(error);
             }
@@ -94,9 +99,9 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(directory) = env::var_os("HOME").map(PathBuf::from) {
-        command.current_dir(directory);
-    }
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let current_dir = home.filter(|path| path.is_dir()).unwrap_or(resource_dir);
+    command.current_dir(current_dir);
     Ok(command.spawn()?)
 }
 
@@ -126,8 +131,8 @@ fn start_office_dev_server(app: &tauri::App) -> Result<Child, Box<dyn std::error
         .env("HERMES_OFFICE_DESKTOP_CAPABILITY", desktop_capability)
         .env("HERMES_OFFICE_DESKTOP_ORIGINS", "http://localhost:4173")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     Ok(command.spawn()?)
 }
 
@@ -208,6 +213,7 @@ fn ensure_office_port_available() -> Result<(), Box<dyn std::error::Error>> {
 fn wait_for_office_server(
     child: &mut Child,
     timeout: Duration,
+    desktop_capability: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + timeout;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
@@ -215,7 +221,10 @@ fn wait_for_office_server(
         if let Some(status) = child.try_wait()? {
             return Err(format!("Office Server exited during startup ({status}).").into());
         }
-        if health_check(address) {
+        if health_check(address) && desktop_capability_check(address, desktop_capability) {
+            if let Some(status) = child.try_wait()? {
+                return Err(format!("Office Server exited during startup ({status}).").into());
+            }
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -239,12 +248,90 @@ fn health_check(address: SocketAddr) -> bool {
     {
         return false;
     }
-    let mut response = [0_u8; 2048];
-    let Ok(size) = stream.read(&mut response) else {
+    let mut response = Vec::new();
+    let read_result = stream
+        .take(MAX_HEALTH_RESPONSE + 1)
+        .read_to_end(&mut response);
+    if read_result.is_err() || response.len() as u64 > MAX_HEALTH_RESPONSE {
+        return false;
+    }
+    let text = match String::from_utf8(response) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let Some((headers, body)) = text.split_once("\r\n\r\n") else {
         return false;
     };
-    let text = String::from_utf8_lossy(&response[..size]);
-    text.starts_with("HTTP/1.1 200") && text.contains("\"protocolVersion\"")
+    http_status_is_ok(headers) && health_body_is_compatible(body)
+}
+
+fn http_status_is_ok(headers: &str) -> bool {
+    let mut tokens = headers.split_whitespace();
+    let Some(version) = tokens.next() else {
+        return false;
+    };
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return false;
+    }
+    let Some(status) = tokens.next() else {
+        return false;
+    };
+    status == "200"
+}
+
+fn desktop_capability_check(address: SocketAddr, desktop_capability: &str) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+        return false;
+    };
+    let timeout = Some(Duration::from_millis(500));
+    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+        return false;
+    }
+    let request = format!(
+        "GET /api/v1/host/remote HTTP/1.1\r\nHost: {OFFICE_HOST}:{OFFICE_PORT}\r\n{DESKTOP_CAPABILITY_HEADER}: {desktop_capability}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buffer = [0_u8; 512];
+    let mut total = 0_usize;
+    let mut response = Vec::new();
+    let mut found_headers = false;
+    loop {
+        let Ok(size) = stream.read(&mut buffer) else {
+            return false;
+        };
+        if size == 0 {
+            break;
+        }
+        total += size;
+        if total > MAX_HTTP_HEADERS {
+            return false;
+        }
+        response.extend_from_slice(&buffer[..size]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            found_headers = true;
+            break;
+        }
+    }
+    if !found_headers {
+        return false;
+    }
+    let text = match String::from_utf8(response) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    http_status_is_ok(&text)
+}
+
+fn health_body_is_compatible(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value
+        .get("protocolVersion")
+        .and_then(|version| version.as_i64())
+        == Some(OFFICE_PROTOCOL_VERSION)
 }
 
 fn stop_office_server(child: &mut Child) {
@@ -542,6 +629,26 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn http_status_is_ok_only_for_exact_200() {
+        assert!(http_status_is_ok("HTTP/1.1 200 OK"));
+        assert!(http_status_is_ok("HTTP/1.0 200"));
+        assert!(!http_status_is_ok("HTTP/1.1 2000"));
+        assert!(!http_status_is_ok("HTTP/1.1 403 Forbidden"));
+        assert!(!http_status_is_ok("malformed"));
+    }
+
+    #[test]
+    fn health_body_compatibility_matches_protocol_version() {
+        assert!(health_body_is_compatible(r#"{"protocolVersion":1}"#));
+        assert!(health_body_is_compatible(
+            r#"{"status":"ok","protocolVersion":1,"details":{}}"#
+        ));
+        assert!(!health_body_is_compatible(r#"{"protocolVersion":2}"#));
+        assert!(!health_body_is_compatible(r#"{"status":"ok"}"#));
+        assert!(!health_body_is_compatible("not-json"));
     }
 
     #[test]
