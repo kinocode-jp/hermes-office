@@ -11,6 +11,7 @@ import {
   type Operation,
   type PermissionTier,
 } from "@hermes-office/protocol";
+import { isLoopbackOrigin, isTrustedLocalOrigin, normalizeOrigin } from "./origin.js";
 
 const COOKIE_NAME = "hermes_office_session";
 const DEVICE_COOKIE_NAME = "hermes_office_device";
@@ -31,6 +32,10 @@ const LAST_SEEN_WRITE_COOLDOWN_MS = 5 * 60_000;
 const DESKTOP_CAPABILITY_HEADER = "x-hermes-office-desktop-capability";
 const DESKTOP_PROTOCOL_PREFIX = "hermes-office.desktop.";
 const DEFAULT_DESKTOP_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] as const;
+// Intentional policy: the Tauri bridge origins are exactly the three portless constants above.
+// A port-bearing Tauri origin (e.g. tauri://localhost:1234) is rejected; development HTTP origins
+// are configured explicitly as an allowed localhost HTTP(S) origin, with or without a port as
+// applicable, instead of the tauri scheme.
 const TIER_RANK: Readonly<Record<PermissionTier, number>> = { viewer: 0, operator: 1, manager: 2, owner: 3 };
 
 export interface OfficePrincipal {
@@ -642,16 +647,26 @@ function forwardedClientKey(header: string | string[] | undefined, trustedHops: 
   return value.length <= 64 && isIP(value) !== 0 ? value.toLowerCase() : undefined;
 }
 function isTrustedLocalRequest(request: IncomingMessage): boolean {
-  if (!isLoopbackAddress(request.socket.remoteAddress) || !isTrustedLocalOrigin(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  const origin = request.headers.origin;
+  if (origin === undefined) return false;
+  const canonical = normalizeOrigin(origin);
+  if (!isLoopbackAddress(request.socket.remoteAddress) || canonical === "" || !isTrustedLocalOrigin(canonical) || !isTrustedLocalHost(request.headers.host)) return false;
   return request.headers.forwarded === undefined && request.headers["x-forwarded-for"] === undefined && request.headers["x-forwarded-host"] === undefined && request.headers["x-real-ip"] === undefined;
 }
 function isTrustedDesktopRequest(request: IncomingMessage, allowedOrigins: ReadonlySet<string>): boolean {
-  if (!isLoopbackAddress(request.socket.remoteAddress) || request.headers.origin === undefined || !allowedOrigins.has(request.headers.origin) || !isTrustedLocalHost(request.headers.host)) return false;
+  const origin = request.headers.origin;
+  if (origin === undefined) return false;
+  const canonical = normalizeOrigin(origin);
+  if (!isLoopbackAddress(request.socket.remoteAddress) || canonical === "" || !allowedOrigins.has(canonical) || !isTrustedLocalHost(request.headers.host)) return false;
   return request.headers.forwarded === undefined && request.headers["x-forwarded-for"] === undefined && request.headers["x-forwarded-host"] === undefined && request.headers["x-real-ip"] === undefined;
 }
 function validateDesktopOrigins(values: readonly string[]): ReadonlySet<string> {
   const origins = new Set<string>();
-  for (const value of values) { if (!isTrustedLocalOrigin(value)) throw new Error("Desktop origins must be explicit trusted local origins."); origins.add(value); }
+  for (const value of values) {
+    const canonical = normalizeOrigin(value);
+    if (canonical === "" || !isTrustedLocalOrigin(canonical)) throw new Error("Desktop origins must be explicit trusted local origins.");
+    origins.add(canonical);
+  }
   if (origins.size === 0) throw new Error("At least one desktop origin is required.");
   return origins;
 }
@@ -663,14 +678,14 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
     if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
       throw new Error(`Configured origin at index ${index} is invalid.`);
     }
-    if (isTrustedLocalOrigin(value)) {
-      if (value === "tauri://localhost") { origins.add(value); }
-      else {
-        try { origins.add(new URL(value).origin); }
-        catch { throw new Error(`Configured origin at index ${index} is not a valid local origin.`); }
-      }
+    const canonicalLocal = normalizeOrigin(value);
+    if (canonicalLocal !== "" && isTrustedLocalOrigin(canonicalLocal)) {
+      if (canonicalLocal === "tauri://localhost") { origins.add(canonicalLocal); }
+      else { origins.add(new URL(canonicalLocal).origin); }
       continue;
     }
+    // Port-bearing Tauri bridge variants are not valid remote HTTPS origins.
+    if (isSpecialTauriBridge(value)) { throw new Error(`Configured origin at index ${index} must be an exact portless Tauri bridge origin.`); }
     let url: URL;
     try { url = new URL(value); }
     catch { throw new Error(`Configured origin at index ${index} is not a valid URL.`); }
@@ -684,6 +699,18 @@ function validateAllowedOrigins(values: readonly string[] | undefined): Readonly
     origins.add(url.origin);
   }
   return origins;
+}
+function isSpecialTauriBridge(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.port === "") return false;
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol === "tauri:") return hostname === "localhost";
+    if (url.protocol === "http:" || url.protocol === "https:") return hostname === "tauri.localhost";
+    return false;
+  } catch {
+    return false;
+  }
 }
 function readDesktopCapability(request: IncomingMessage): string | undefined {
   const header = request.headers[DESKTOP_CAPABILITY_HEADER];
@@ -712,19 +739,19 @@ function isValidHostname(hostname: string): boolean {
 }
 function isTrustedLocalHost(value: string | undefined): boolean {
   if (value === undefined || value.length > 256) return false;
-  try { const parsed = new URL(`http://${value}`); return parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname); }
-  catch { return false; }
-}
-function isTrustedLocalOrigin(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
-  try { const origin = new URL(value); return (origin.protocol === "http:" || origin.protocol === "https:") && ["localhost", "127.0.0.1"].includes(origin.hostname) && origin.username === "" && origin.password === "" && origin.pathname === "/" && origin.search === "" && origin.hash === ""; }
-  catch { return false; }
-}
-function isLoopbackOrigin(value: string): boolean {
-  if (["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].includes(value)) return true;
-  try { const origin = new URL(value); return ["localhost", "127.0.0.1", "::1"].includes(origin.hostname); }
-  catch { return false; }
+  try {
+    const parsed = new URL(`http://${value}`);
+    return (
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.pathname === "/" &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      ["localhost", "127.0.0.1", "[::1]", "tauri.localhost"].includes(parsed.hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 function normalizeDeviceName(value: string): string | undefined { const name = value.trim(); return name.length >= 1 && name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(name) ? name : undefined; }
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isInteger(value) || value < min || value > max ? fallback : value; }

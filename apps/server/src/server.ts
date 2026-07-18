@@ -20,6 +20,7 @@ import {
   createDemoSnapshot,
 } from "./demo-state.js";
 import { DEFAULT_OFFICE_ORIGINS, listenerOrigins } from "./server-origins.js";
+import { normalizeOrigin } from "./origin.js";
 
 export interface OfficeServerOptions {
   host?: string;
@@ -132,13 +133,14 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     applySecurityHeaders(response);
 
     const origin = request.headers.origin;
-    if (origin !== undefined && !originAllowlist.has(normalizeOrigin(origin))) {
+    const allowedOrigin = origin !== undefined ? allowedCorsOrigin(origin, originAllowlist) : undefined;
+    if (origin !== undefined && allowedOrigin === undefined) {
       writeError(response, 403, "forbidden", "Origin is not allowed.", maxJsonBytes);
       return;
     }
 
-    if (origin !== undefined) {
-      response.setHeader("Access-Control-Allow-Origin", origin);
+    if (allowedOrigin !== undefined) {
+      response.setHeader("Access-Control-Allow-Origin", allowedOrigin);
       response.setHeader("Access-Control-Allow-Credentials", "true");
       response.setHeader("Vary", "Origin");
     }
@@ -458,7 +460,8 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     }
 
     const origin = request.headers.origin;
-    if (origin === undefined || !originAllowlist.has(normalizeOrigin(origin))) {
+    const allowedOrigin = origin !== undefined ? allowedCorsOrigin(origin, originAllowlist) : undefined;
+    if (origin === undefined || allowedOrigin === undefined) {
       rejectUpgrade(socket, 403, "Forbidden");
       return;
     }
@@ -615,28 +618,19 @@ export function makeOriginAllowlist(origins: readonly string[]): ReadonlySet<str
   return new Set(normalized);
 }
 
-export function normalizeOrigin(origin: string): string {
-  const value = origin.trim();
-  if (value === "") return value;
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      if (
-        parsed.username !== "" ||
-        parsed.password !== "" ||
-        parsed.pathname !== "/" ||
-        parsed.search !== "" ||
-        parsed.hash !== ""
-      ) {
-        return "";
-      }
-      return parsed.origin;
-    }
-  } catch {
-    return value.replace(/\/$/, "");
+export function allowedCorsOrigin(origin: string, allowlist: ReadonlySet<string>): string | undefined {
+  const normalized = normalizeOrigin(origin);
+  if (normalized === "" || normalized === "null" || normalized === "*") return undefined;
+  // Return the canonical allowlist entry itself rather than the request-derived
+  // normalized string. This keeps the CORS response header value sourced from
+  // the configured allowlist even when the strings are semantically equal.
+  for (const allowed of allowlist) {
+    if (allowed === normalized) return allowed;
   }
-  return value.replace(/\/$/, "");
+  return undefined;
 }
+
+export { normalizeOrigin };
 
 export function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
