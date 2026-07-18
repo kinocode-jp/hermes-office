@@ -32,6 +32,10 @@ const LAST_SEEN_WRITE_COOLDOWN_MS = 5 * 60_000;
 const DESKTOP_CAPABILITY_HEADER = "x-hermes-office-desktop-capability";
 const DESKTOP_PROTOCOL_PREFIX = "hermes-office.desktop.";
 const DEFAULT_DESKTOP_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] as const;
+// Intentional policy: the Tauri bridge origins are exactly the three portless constants above.
+// A port-bearing Tauri origin (e.g. tauri://localhost:1234) is rejected; development HTTP origins
+// are configured explicitly as an allowed localhost HTTP(S) origin, with or without a port as
+// applicable, instead of the tauri scheme.
 const TIER_RANK: Readonly<Record<PermissionTier, number>> = { viewer: 0, operator: 1, manager: 2, owner: 3 };
 
 export interface OfficePrincipal {
@@ -721,8 +725,19 @@ function isValidHostname(hostname: string): boolean {
 }
 function isTrustedLocalHost(value: string | undefined): boolean {
   if (value === undefined || value.length > 256) return false;
-  try { const parsed = new URL(`http://${value}`); return parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname); }
-  catch { return false; }
+  try {
+    const parsed = new URL(`http://${value}`);
+    return (
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.pathname === "/" &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      ["localhost", "127.0.0.1", "tauri.localhost"].includes(parsed.hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 function normalizeDeviceName(value: string): string | undefined { const name = value.trim(); return name.length >= 1 && name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(name) ? name : undefined; }
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isInteger(value) || value < min || value > max ? fallback : value; }

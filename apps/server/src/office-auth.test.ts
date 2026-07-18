@@ -170,6 +170,61 @@ test("local bootstrap rejects raw local origins with credentials, path, query, o
   }
 });
 
+test("local bootstrap rejects malformed Host values with query or fragment", () => {
+  const auth = new OfficeAuth();
+  const response = { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse;
+  const denied = [
+    { host: "localhost:4173?query=1", label: "query" },
+    { host: "localhost:4173#hash", label: "fragment" },
+  ];
+  for (const { host, label } of denied) {
+    const request = {
+      headers: { origin: "http://localhost:4173", host },
+      socket: { remoteAddress: "127.0.0.1" },
+    } as unknown as IncomingMessage;
+    assert.equal(auth.bootstrapLocal(request, response), undefined, label);
+  }
+});
+
+test("Tauri bridge origins must be the exact portless constants; port-bearing Tauri origins are rejected", () => {
+  const capability = "c".repeat(64);
+  const auth = new OfficeAuth({
+    desktopCapability: capability,
+    desktopOrigins: ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"],
+  });
+  const response = { appendHeader: () => undefined, setHeader: () => undefined } as unknown as ServerResponse;
+
+  // Exact portless constants are accepted.
+  for (const origin of ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]) {
+    const request = {
+      headers: { origin, host: "tauri.localhost", "x-hermes-office-desktop-capability": capability },
+      socket: { remoteAddress: "127.0.0.1" },
+    } as unknown as IncomingMessage;
+    assert.ok(auth.authenticate(request), origin);
+  }
+
+  // Port-bearing variants of the three special Tauri bridge origins are rejected.
+  const denied = [
+    { origin: "tauri://localhost:1234", label: "tauri-port" },
+    { origin: "http://tauri.localhost:4173", label: "http-tauri-port" },
+    { origin: "https://tauri.localhost:4173", label: "https-tauri-port" },
+  ];
+  for (const { origin, label } of denied) {
+    const request = {
+      headers: { origin, host: "tauri.localhost", "x-hermes-office-desktop-capability": capability },
+      socket: { remoteAddress: "127.0.0.1" },
+    } as unknown as IncomingMessage;
+    assert.equal(auth.authenticate(request), undefined, label);
+  }
+
+  // Local development can use an explicit localhost HTTP(S) origin (e.g. http://localhost:4173), not the tauri scheme.
+  const local = auth.bootstrapLocal(
+    { headers: { origin: "http://localhost:4173", host: "localhost:4173" }, socket: { remoteAddress: "127.0.0.1" } } as unknown as IncomingMessage,
+    response,
+  );
+  assert.ok(local);
+});
+
 test("OfficeAuth rejects invalid configured origins", () => {
   const invalidCases = [
     { origin: "http://insecure.example", label: "non-loopback HTTP" },

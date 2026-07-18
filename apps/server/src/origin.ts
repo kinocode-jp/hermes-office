@@ -40,7 +40,7 @@ export function isLoopbackOrigin(origin: string): boolean {
   if (origin === "tauri://localhost" || origin === "http://tauri.localhost" || origin === "https://tauri.localhost") return true;
   try {
     const parsed = new URL(origin);
-    return ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);
   } catch {
     return false;
   }
