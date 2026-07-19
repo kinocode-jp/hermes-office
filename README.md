@@ -139,6 +139,12 @@ Hermes Office is web-first: the shared web UI is the primary interface. The
 optional Tauri desktop shell is a local launcher. Remote clients need only a web
 browser and do not need the desktop app.
 
+The launcher does not create its main native window or WebView while it classifies
+port 4317. It loads the normal app bundle for the first time only after its own
+child has passed the capability-bound readiness check. Every candidate or error
+path instead creates the window directly on a fixed, self-contained `data:` notice;
+the normal app bundle and listener-supplied content are never loaded first.
+
 - **Free port:** the shell starts its own child, verifies its health and the
   shell’s ephemeral desktop capability, and stops only that owned child on exit.
 - **Compatible-looking server already running:** the protocol-v1 health and Web

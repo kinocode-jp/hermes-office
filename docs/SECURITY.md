@@ -173,6 +173,12 @@ server carries an older protocol-v1 web bundle, so the
 ephemeral desktop capability is unavailable and the host administration panel is
 not rendered. The external server is not spawned, stopped, or killed by the
 launcher. The desktop app is optional and is not needed on remote clients.
+Automatic creation of the configured `main` window is disabled. The launcher
+creates no native window, WebView, or normal app bundle until classification has
+completed. It loads the normal app URL only after an owned child passes its
+capability-bound readiness check. For every candidate or error, it creates the
+window with the fixed self-contained `data:` notice as the initial URL; there is
+no earlier bundle load or navigation that could contact the listener.
 If that listener does not serve the Web UI or a bounded probe times out, the
 desktop window displays a fixed,
 self-contained recovery notice instead of crashing. The notice contains no

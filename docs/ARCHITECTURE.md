@@ -110,6 +110,14 @@ both generate a launch-scoped random desktop capability, start an owned Office
 Server child, verify its health and capability, and stop only that child on exit.
 The capability is available to the WebView through Tauri IPC.
 
+The configured `main` window has automatic creation disabled. No native window,
+WebView, or normal app bundle exists while listener classification and owned-child
+readiness are pending. After an owned child passes its capability-bound readiness
+check, the launcher explicitly creates `main` with the configured app URL and the
+rest of its configured title and size settings. Candidate and error paths instead
+create `main` with a fixed self-contained `data:` notice as its initial URL, so
+they never briefly load or navigate through the normal bundle or listener content.
+
 If a listener has a compatible protocol response and serves the expected Hermes
 Office Web UI shape from `/`, the optional desktop launcher does not generate a
 capability or start a child. Those public shape checks do not authenticate the

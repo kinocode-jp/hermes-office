@@ -245,12 +245,24 @@ pub fn run() {
         .manage(DesktopCapability(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![desktop_capability])
         .setup(|app| {
+            // `main` has `create: false` in tauri.conf.json. Do not create a
+            // WebView, and therefore do not load the app bundle, until the
+            // loopback listener has been classified and an owned child has
+            // completed its capability-bound readiness check.
             // The desktop shell starts its own Office Server only when the port
             // is free. An existing listener is never trusted based only on its
             // public responses, navigated to, stopped, or killed automatically.
-            match setup_office(app) {
-                Ok(()) => {}
-                Err(notice) => show_startup_notice(app, notice)?,
+            let notice = setup_office(app).err();
+            if let Err(error) = build_main_window(app, notice) {
+                // Window creation happens after an owned child is ready. If the
+                // native window cannot be created, do not orphan that child
+                // while the outer application build exits gracefully.
+                if let Ok(mut process) = app.state::<OfficeServerProcess>().0.lock() {
+                    if let Some(mut child) = process.take() {
+                        stop_office_server(&mut child);
+                    }
+                }
+                return Err(error);
             }
             Ok(())
         })
@@ -310,16 +322,33 @@ fn setup_office(app: &tauri::App) -> Result<(), StartupNoticeKind> {
     }
 }
 
-fn show_startup_notice(
+fn build_main_window(
     app: &tauri::App,
-    notice: StartupNoticeKind,
+    notice: Option<StartupNoticeKind>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or("Hermes Office main window is unavailable")?;
-    let url = tauri::Url::parse(&startup_notice_data_url(notice))?;
-    window.navigate(url)?;
+    let main_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "main")
+        .ok_or("Hermes Office main window configuration is unavailable")?;
+    let mut window_config = main_config.clone();
+    window_config.url = startup_window_url(&main_config.url, notice)?;
+    tauri::WebviewWindowBuilder::from_config(app, &window_config)?.build()?;
     Ok(())
+}
+
+fn startup_window_url(
+    app_url: &tauri::WebviewUrl,
+    notice: Option<StartupNoticeKind>,
+) -> Result<tauri::WebviewUrl, Box<dyn std::error::Error>> {
+    match notice {
+        Some(notice) => Ok(tauri::WebviewUrl::CustomProtocol(tauri::Url::parse(
+            &startup_notice_data_url(notice),
+        )?)),
+        None => Ok(app_url.clone()),
+    }
 }
 
 fn startup_notice_html(notice: StartupNoticeKind) -> String {
@@ -1253,6 +1282,35 @@ mod tests {
         assert!(!url.contains('>'));
         assert!(!url.contains(' '));
         assert!(!url.contains("<script"));
+    }
+
+    #[test]
+    fn startup_window_uses_app_assets_only_after_owned_server_readiness() {
+        let app_url = tauri::WebviewUrl::App(PathBuf::from("index.html"));
+        assert_eq!(
+            startup_window_url(&app_url, None).expect("app URL should be preserved"),
+            app_url
+        );
+    }
+
+    #[test]
+    fn startup_window_uses_fixed_notice_as_its_initial_url_on_failure() {
+        let app_url = tauri::WebviewUrl::External(
+            tauri::Url::parse("http://127.0.0.1:4317/server-supplied")
+                .expect("fixture URL should parse"),
+        );
+        let url = startup_window_url(
+            &app_url,
+            Some(StartupNoticeKind::ExistingServerCandidate),
+        )
+        .expect("fixed notice URL should parse");
+
+        let tauri::WebviewUrl::CustomProtocol(url) = url else {
+            panic!("notice must be the initial custom-protocol data URL");
+        };
+        assert_eq!(url.scheme(), "data");
+        assert!(url.as_str().starts_with("data:text/html;charset=utf-8,"));
+        assert!(!url.as_str().contains("server-supplied"));
     }
 
     #[test]
