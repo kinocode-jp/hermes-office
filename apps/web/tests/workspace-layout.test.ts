@@ -41,6 +41,26 @@ test("workspace ratio respects both global limits and available pane size", () =
   assert.equal(oppositePlacement("left"), "right");
 });
 
+test("workspace ratio conflict minimizes asymmetric pane violations and remains finite", () => {
+  const width708 = workspaceRatioBounds("left", 708, 700);
+  assert.ok(Math.abs(width708.min - 279 / 708) < Number.EPSILON);
+  assert.equal(width708.max, width708.min);
+  assert.ok(Math.abs(width708.min * 708 - 279) < Number.EPSILON * 708, "chat and main each yield one pixel");
+  assert.ok(Math.abs((708 - 30 - width708.max * 708) - 399) < Number.EPSILON * 708);
+
+  const width709 = workspaceRatioBounds("right", 709, 700);
+  assert.ok(Math.abs(width709.min - 279.5 / 709) < Number.EPSILON);
+  assert.equal(width709.max, width709.min);
+  assert.deepEqual(workspaceRatioBounds("left", 710, 700), { min: 280 / 710, max: 280 / 710 });
+
+  assert.deepEqual(workspaceRatioBounds("bottom", 1000, 400), { min: 0.4625, max: 0.4625 });
+  for (const width of [1, Number.MIN_VALUE]) {
+    const extreme = workspaceRatioBounds("left", width, 700);
+    assert.deepEqual(extreme, { min: 0.18, max: 0.18 });
+    assert.equal(Number.isFinite(extreme.min), true);
+  }
+});
+
 test("workspace preferences persist, reset, and fail safely when storage is blocked", () => {
   const values = new Map<string, string>();
   const storage = {

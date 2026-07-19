@@ -121,8 +121,14 @@ export function workspaceRatioBounds(
   const boundedMinimum = Math.max(WORKSPACE_RATIO_MIN, minimum);
   const boundedMaximum = Math.min(WORKSPACE_RATIO_MAX, maximum);
   if (boundedMinimum > boundedMaximum) {
-    const balanced = Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, (available - separator) / (2 * available)));
-    return { min: balanced, max: balanced };
+    const midpoint = minimum / 2 + maximum / 2;
+    const finiteMidpoint = Number.isFinite(midpoint)
+      ? midpoint
+      : maximum < WORKSPACE_RATIO_MIN ? WORKSPACE_RATIO_MIN
+      : minimum > WORKSPACE_RATIO_MAX ? WORKSPACE_RATIO_MAX
+      : (WORKSPACE_RATIO_MIN + WORKSPACE_RATIO_MAX) / 2;
+    const compromise = Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, finiteMidpoint));
+    return { min: compromise, max: compromise };
   }
   return { min: boundedMinimum, max: boundedMaximum };
 }
