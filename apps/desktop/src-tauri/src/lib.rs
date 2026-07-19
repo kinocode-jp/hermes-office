@@ -18,7 +18,10 @@ const OFFICE_PROTOCOL_VERSION: i64 = 1;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
-const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+// Browser launchers are not uniformly short-lived: for example, xdg-open may
+// remain attached to the browser it launched. Observe only long enough to catch
+// an immediate launch failure, then detach without terminating the launcher.
+const BROWSER_LAUNCH_GRACE: Duration = Duration::from_millis(750);
 const HEALTH_RESPONSE_TIMEOUT: Duration = Duration::from_millis(750);
 const HTTP_READ_SLICE: Duration = Duration::from_millis(250);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -189,21 +192,53 @@ fn open_office_in_system_browser() -> Result<(), Box<dyn std::error::Error>> {
                 "A compatible Office Server is already running, but its Web UI could not be opened in the default browser: {error}"
             )
         })?;
-    match wait_for_bounded_child(&mut child, BROWSER_LAUNCH_TIMEOUT) {
+    match observe_browser_launcher(&mut child, BROWSER_LAUNCH_GRACE) {
         Ok(Some(status)) if status.success() => Ok(()),
         Ok(Some(status)) => Err(format!(
             "A compatible Office Server is already running, but the default browser launcher exited unsuccessfully ({status})."
         )
         .into()),
-        Ok(None) => Err(format!(
-            "A compatible Office Server is already running, but the default browser launcher did not finish within {} seconds.",
-            BROWSER_LAUNCH_TIMEOUT.as_secs()
-        )
-        .into()),
+        // A still-running launcher may be waiting for the browser process. It
+        // has accepted the request, so drop the Child handle and let the OS own
+        // its remaining lifetime. In particular, do not kill xdg-open here.
+        Ok(None) => Ok(()),
         Err(error) => Err(format!(
             "A compatible Office Server is already running, but the default browser launcher could not be monitored: {error}"
         )
         .into()),
+    }
+}
+
+/// Briefly observe a browser launcher for an immediate failure.
+///
+/// `None` means that the launcher is still running after the grace period and
+/// must be detached by dropping the `Child`; unlike a bounded command probe,
+/// that is a successful browser handoff and the process must not be killed.
+fn observe_browser_launcher(
+    child: &mut Child,
+    grace: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                // Monitoring failed, so this child is no longer safe to leave
+                // unmanaged. Best-effort cleanup avoids leaking it on the
+                // error path while preserving the original monitoring error.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(None);
+        };
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(std::cmp::min(remaining, CHILD_POLL_INTERVAL));
     }
 }
 
