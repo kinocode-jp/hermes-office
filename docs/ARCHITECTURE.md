@@ -104,24 +104,22 @@ The exact upstream research and known compatibility uncertainties are in
 ### Desktop shell
 
 `apps/desktop` is a small Tauri 2 wrapper. Production builds bundle the generated
-Office Server module and web assets. At launch, the shell generates a random
-capability, starts Office Server on loopback, and makes that capability available
-to its WebView through Tauri IPC. Development uses an explicit fixed local-only
-capability from the Tauri development command.
+Office Server module and web assets. At launch, the desktop shell probes the
+configured loopback port. If the port is free, release and development launches
+both generate a launch-scoped random desktop capability, start an owned Office
+Server child, verify its health and capability, and stop only that child on exit.
+The capability is available to the WebView through Tauri IPC.
+
+If a compatible Office Server is already listening, the shell does not generate
+a capability or start a child. It navigates the main WebView to the server origin,
+where the page operates as an ordinary same-origin Web UI using browser-cookie
+authentication. Desktop-only host administration is unavailable in this mode,
+and the external server process remains unowned and is never stopped by the
+shell. Incompatible, malformed, timing-out, or non-Hermes listeners fail closed
+with a clear error.
 
 Local builds are developer artifacts. A signed/notarized project release and
 release provenance pipeline do not exist yet; see [`RELEASING.md`](RELEASING.md).
-
-At launch, the desktop shell probes the configured loopback port. If the port is
-free, it generates a random ephemeral desktop capability, starts the Office
-Server child, verifies health and capability, and stops only that owned child
-on exit. If a compatible Office Server is already listening, it attaches without
-spawning, stopping, or killing the external server. The main WebView is
-navigated to the server origin so the page becomes a same-origin ordinary Web
-UI using browser-equivalent local-cookie authentication; the desktop-only host
-administration capability is unavailable because the external server cannot know
-this shell’s ephemeral capability. Incompatible, malformed,
-timing-out, or non-Hermes listeners fail closed with a clear error.
 
 ## Current data model
 
