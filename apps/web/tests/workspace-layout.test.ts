@@ -14,6 +14,7 @@ import {
   workspaceChatPrecedesSurface,
   workspaceSeparatorKeyShortcuts,
   workspaceResizeRatioFromDelta,
+  workspacePointerIsOwner,
   workspacePlacement,
   workspaceRatio,
 } from "../src/workspace-layout.ts";
@@ -97,6 +98,12 @@ test("workspace pointer resize uses gesture delta without separator offset jumps
   assert.equal(workspaceResizeRatioFromDelta(0.4, 100, 200, "left", 0), 0.4);
 });
 
+test("workspace pointer ownership rejects unrelated and missing owners", () => {
+  assert.equal(workspacePointerIsOwner(7, 7), true);
+  assert.equal(workspacePointerIsOwner(7, 8), false);
+  assert.equal(workspacePointerIsOwner(null, 7), false);
+});
+
 test("workspace preferences persist, reset, and fail safely when storage is blocked", () => {
   const values = new Map<string, string>();
   const storage = {
@@ -176,6 +183,10 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(component, /const finishResize = \(event\?: PointerEvent\) =>/);
   assert.match(component, /resizeGestureRef\.current = null;\s*resizingRef\.current = false;/);
   assert.match(component, /const cancelDockDrag = \(event\?: PointerEvent\) =>/);
+  assert.match(component, /const dragRef = useRef<DockDrag \| null>\(null\)/);
+  assert.match(component, /dragRef\.current = next;\s*setDrag\(next\);\s*event\.currentTarget\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(component, /event\.button !== 0 \|\| dragRef\.current\) return/);
+  assert.match(component, /workspacePointerIsOwner\(current\.pointerId, event\.pointerId\)/);
   assert.match(component, /onPointerDown=\{beginResize\}/);
   assert.match(component, /startCoordinate: resizeAxisCoordinate\(placement, event\.clientX, event\.clientY\)/);
   assert.match(component, /startRatio: effectiveRatioRef\.current/);
@@ -184,13 +195,18 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(component, /event\.pointerId !== gesture\.pointerId/);
   assert.match(component, /workspaceResizeRatioFromDelta\(/);
   assert.match(component, /onLostPointerCapture=\{\(event\) => finishResize\(event\)\}/);
-  assert.equal(component.match(/onLostPointerCapture=\{\(\) => cancelDockDrag\(\)\}/g)?.length, 2);
+  assert.equal(component.match(/onLostPointerCapture=\{\(event\) => cancelDockDrag\(event\)\}/g)?.length, 2);
   assert.match(component, /if \(hasChats && !mobile\) return;\s*finishResize\(\);\s*cancelDockDrag\(\);/);
   assert.match(component, /useEffect\(\(\) => \(\) => \{\s*const shouldPersist = resizingRef\.current \|\| resizeGestureRef\.current !== null;\s*resizeGestureRef\.current = null;[\s\S]*?persistWorkspaceLayout\(\);/);
   assert.match(component, /\{drag && hasChats && !mobile && \(/);
   const cancelStart = component.indexOf("const cancelDockDrag");
   const cancelEnd = component.indexOf("const beginDockDrag", cancelStart);
   assert.doesNotMatch(component.slice(cancelStart, cancelEnd), /commitDock/, "lost or cancelled dock capture never commits placement");
+  assert.match(component.slice(cancelStart, cancelEnd), /dragRef\.current = null;\s*setDrag\(null\);\s*if \(event\) releaseOwnedPointer\(event\)/);
+  const finishDockStart = component.indexOf("const finishDockDrag");
+  const finishDockEnd = component.indexOf("const beginResize", finishDockStart);
+  assert.match(component.slice(finishDockStart, finishDockEnd), /dragRef\.current = null;\s*setDrag\(null\);\s*releaseOwnedPointer\(event\);\s*commitDock\(current\.candidate\)/);
+  assert.match(component, /resizeGestureRef\.current = null;\s*dragRef\.current = null;\s*resizingRef\.current = false;/);
   assert.match(component, /const ratioRef = useRef/);
   assert.match(component, /new ResizeObserver\(update\)[\s\S]*?\}, \[placement\]\);/);
   assert.doesNotMatch(component, /new ResizeObserver\(update\)[\s\S]*?\}, \[placement, workspaceRatio\.value\]\);/);

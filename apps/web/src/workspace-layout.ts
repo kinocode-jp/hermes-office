@@ -176,6 +176,10 @@ export function workspaceResizeRatioFromDelta(
   return startRatio + direction * (currentCoordinate - startCoordinate) / axisSize;
 }
 
+export function workspacePointerIsOwner(ownerPointerId: number | null, eventPointerId: number): boolean {
+  return ownerPointerId !== null && ownerPointerId === eventPointerId;
+}
+
 function clampRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return defaultWorkspaceLayout.ratio;
   return Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, ratio));

@@ -12,6 +12,7 @@ import {
   workspaceChatPrecedesSurface,
   workspaceSeparatorKeyShortcuts,
   workspaceResizeRatioFromDelta,
+  workspacePointerIsOwner,
   workspaceRatioBounds,
   workspacePlacement,
   workspacePlacements,
@@ -27,6 +28,7 @@ type WorkspaceLayoutProps = {
 };
 
 type DragSource = "office" | "chat";
+type DockDrag = { source: DragSource; candidate: WorkspacePlacement; pointerId: number };
 type ResizeGesture = {
   pointerId: number;
   startCoordinate: number;
@@ -41,13 +43,14 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   const effectiveRatioRef = useRef(workspaceRatio.value);
   const resizingRef = useRef(false);
   const resizeGestureRef = useRef<ResizeGesture | null>(null);
+  const dragRef = useRef<DockDrag | null>(null);
   const [mobile, setMobile] = useState(() => matchesMobile());
   const [effectiveRatio, setEffectiveRatio] = useState(workspaceRatio.value);
   const [effectiveBounds, setEffectiveBounds] = useState<WorkspaceRatioBounds>({
     min: WORKSPACE_RATIO_MIN,
     max: WORKSPACE_RATIO_MAX,
   });
-  const [drag, setDrag] = useState<{ source: DragSource; candidate: WorkspacePlacement } | null>(null);
+  const [drag, setDrag] = useState<DockDrag | null>(null);
   const [layoutAnnouncement, setLayoutAnnouncement] = useState({ text: "", token: 0 });
   const placement = workspacePlacement.value;
   const preferredRatio = workspaceRatio.value;
@@ -136,24 +139,35 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     if (shouldPersist) persistWorkspaceLayout();
   };
   const cancelDockDrag = (event?: PointerEvent) => {
-    if (event) releaseOwnedPointer(event);
+    const current = dragRef.current;
+    if (event && !workspacePointerIsOwner(current?.pointerId ?? null, event.pointerId)) return;
+    dragRef.current = null;
     setDrag(null);
+    if (event) releaseOwnedPointer(event);
   };
   const beginDockDrag = (source: DragSource, event: PointerEvent) => {
-    if (mobile || !hasChats || event.button !== 0) return;
+    if (mobile || !hasChats || event.button !== 0 || dragRef.current) return;
     event.preventDefault();
-    event.currentTarget instanceof HTMLElement && event.currentTarget.setPointerCapture(event.pointerId);
-    setDrag({ source, candidate: placement });
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    const next = { source, candidate: placement, pointerId: event.pointerId } satisfies DockDrag;
+    dragRef.current = next;
+    setDrag(next);
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const moveDockDrag = (event: PointerEvent) => {
-    if (!drag || !host.current) return;
-    setDrag({ ...drag, candidate: chatPlacementForEdge(drag.source, closestEdge(host.current.getBoundingClientRect(), event.clientX, event.clientY)) });
+    const current = dragRef.current;
+    if (!current || !host.current || !workspacePointerIsOwner(current.pointerId, event.pointerId)) return;
+    const next = { ...current, candidate: chatPlacementForEdge(current.source, closestEdge(host.current.getBoundingClientRect(), event.clientX, event.clientY)) };
+    dragRef.current = next;
+    setDrag(next);
   };
   const finishDockDrag = (event: PointerEvent) => {
-    if (!drag) return;
-    releaseOwnedPointer(event);
-    commitDock(drag.candidate);
+    const current = dragRef.current;
+    if (!current || !workspacePointerIsOwner(current.pointerId, event.pointerId)) return;
+    dragRef.current = null;
     setDrag(null);
+    releaseOwnedPointer(event);
+    commitDock(current.candidate);
   };
   const beginResize = (event: PointerEvent) => {
     if (mobile || !hasChats || event.button !== 0 || !host.current) return;
@@ -224,6 +238,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   useEffect(() => () => {
     const shouldPersist = resizingRef.current || resizeGestureRef.current !== null;
     resizeGestureRef.current = null;
+    dragRef.current = null;
     resizingRef.current = false;
     if (shouldPersist) persistWorkspaceLayout();
   }, []);
@@ -267,7 +282,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
           onPointerMove={moveDockDrag}
           onPointerUp={finishDockDrag}
           onPointerCancel={cancelDockDrag}
-          onLostPointerCapture={() => cancelDockDrag()}
+          onLostPointerCapture={(event) => cancelDockDrag(event)}
           onKeyDown={(event) => dockWithKeyboard("office", event)}
         >O</button>
         <span aria-hidden="true" />
@@ -281,7 +296,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
           onPointerMove={moveDockDrag}
           onPointerUp={finishDockDrag}
           onPointerCancel={cancelDockDrag}
-          onLostPointerCapture={() => cancelDockDrag()}
+          onLostPointerCapture={(event) => cancelDockDrag(event)}
           onKeyDown={(event) => dockWithKeyboard("chat", event)}
         >C</button>
       </div>
