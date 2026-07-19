@@ -110,12 +110,18 @@ both generate a launch-scoped random desktop capability, start an owned Office
 Server child, verify its health and a capability-keyed proof, and stop only that child on exit.
 The capability is available to the WebView only through a fresh asynchronous
 Tauri IPC call. Its bounded TCP and process checks run on a blocking worker, not
-the IPC/UI executor. The shell repeats the nonce-bound proof and owned-child
-liveness check before each release, and the web client does not cache the
-capability in its transport module or Office session. A 250 ms native monitor
+the IPC/UI executor. Concurrent checks use a short polling gate whose wait,
+child-state checks, and TCP proof share one 750 ms absolute deadline; an expired
+queue wait fails only that check instead of blocking a worker indefinitely. The
+shell repeats the nonce-bound proof and owned-child liveness check before each
+release, and the web client does not cache the capability in its transport
+module or Office session. A 250 ms native monitor
 performs the same fresh proof. Child exit or a complete response with a wrong
 HMAC or invalid strict contract clears the native capability immediately before
-closing the main window. Timeout, connection, and I/O failures return no
+closing the main window. Invalid-state clearing runs on the worker/monitor,
+recovers a poisoned capability lock, and must complete before the asynchronous
+command closes the window; the IPC/UI executor never waits on that mutex.
+Timeout, connection, and I/O failures return no
 capability for that send but require three consecutive monitor failures before
 permanent invalidation; a valid proof resets the count. This also detects a
 development watch parent that remains alive after its actual port listener

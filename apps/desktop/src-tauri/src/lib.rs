@@ -5,7 +5,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard, TryLockError},
     thread,
     time::{Duration, Instant},
 };
@@ -251,7 +251,7 @@ async fn desktop_capability(app: tauri::AppHandle) -> Option<String> {
     match outcome {
         OwnedCapabilityOutcome::Valid(capability) => Some(capability),
         OwnedCapabilityOutcome::Invalid => {
-            invalidate_owned_desktop(&app);
+            close_owned_desktop_window(&app);
             None
         }
         OwnedCapabilityOutcome::TransientUnavailable => None,
@@ -269,7 +269,7 @@ async fn desktop_owned(app: tauri::AppHandle) -> bool {
     match outcome {
         OwnedCapabilityOutcome::Valid(_) => true,
         OwnedCapabilityOutcome::Invalid => {
-            invalidate_owned_desktop(&app);
+            close_owned_desktop_window(&app);
             false
         }
         OwnedCapabilityOutcome::TransientUnavailable => false,
@@ -377,22 +377,47 @@ enum OwnedCapabilityOutcome {
     TransientUnavailable,
 }
 
+enum BoundedLockError {
+    TimedOut,
+    Poisoned,
+}
+
+fn lock_until<T>(mutex: &Mutex<T>, deadline: Instant) -> Result<MutexGuard<'_, T>, BoundedLockError> {
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => return Err(BoundedLockError::Poisoned),
+            Err(TryLockError::WouldBlock) => {
+                let Some(delay) = remaining_timeout(deadline, CHILD_POLL_INTERVAL) else {
+                    return Err(BoundedLockError::TimedOut);
+                };
+                thread::sleep(delay);
+            }
+        }
+    }
+}
+
 fn authenticated_owned_capability(app: &tauri::AppHandle) -> OwnedCapabilityOutcome {
-    let Ok(_proof_gate) = app.state::<DesktopProofGate>().0.lock() else {
-        return OwnedCapabilityOutcome::Invalid;
+    let deadline = Instant::now() + HEALTH_RESPONSE_TIMEOUT;
+    let proof_gate_state = app.state::<DesktopProofGate>();
+    let _proof_gate = match lock_until(&proof_gate_state.0, deadline) {
+        Ok(proof_gate) => proof_gate,
+        Err(BoundedLockError::TimedOut) => return OwnedCapabilityOutcome::TransientUnavailable,
+        Err(BoundedLockError::Poisoned) => return invalid_owned_capability(app),
     };
-    let capability = match app.state::<DesktopCapability>().0.lock() {
-        Ok(capability) => match capability.clone() {
-            Some(capability) => capability,
-            None => return OwnedCapabilityOutcome::Invalid,
-        },
-        Err(_) => return OwnedCapabilityOutcome::Invalid,
+    let capability_state = app.state::<DesktopCapability>();
+    let capability = match lock_until(&capability_state.0, deadline) {
+        Ok(capability) => capability.clone(),
+        Err(BoundedLockError::TimedOut) => return OwnedCapabilityOutcome::TransientUnavailable,
+        Err(BoundedLockError::Poisoned) => return invalid_owned_capability(app),
     };
-    match owned_child_outcome(app) {
+    let Some(capability) = capability else {
+        return invalid_owned_capability(app);
+    };
+    match owned_child_outcome(app, deadline) {
         OwnedChildOutcome::Running => {}
         OwnedChildOutcome::Exited | OwnedChildOutcome::InvalidState => {
-            clear_desktop_capability(app);
-            return OwnedCapabilityOutcome::Invalid;
+            return invalid_owned_capability(app);
         }
         OwnedChildOutcome::TransientUnavailable => {
             return OwnedCapabilityOutcome::TransientUnavailable;
@@ -402,41 +427,53 @@ fn authenticated_owned_capability(app: &tauri::AppHandle) -> OwnedCapabilityOutc
     match desktop_readiness_proof_outcome(
         address,
         &capability,
-        Instant::now() + HEALTH_RESPONSE_TIMEOUT,
+        deadline,
     ) {
         DesktopProofOutcome::Valid => {}
         DesktopProofOutcome::Invalid => {
-            clear_desktop_capability(app);
-            return OwnedCapabilityOutcome::Invalid;
+            return invalid_owned_capability(app);
         }
         DesktopProofOutcome::TransientUnavailable => {
             return OwnedCapabilityOutcome::TransientUnavailable;
         }
     }
-    match owned_child_outcome(app) {
+    match owned_child_outcome(app, deadline) {
         OwnedChildOutcome::Running => {}
         OwnedChildOutcome::Exited | OwnedChildOutcome::InvalidState => {
-            clear_desktop_capability(app);
-            return OwnedCapabilityOutcome::Invalid;
+            return invalid_owned_capability(app);
         }
         OwnedChildOutcome::TransientUnavailable => {
             return OwnedCapabilityOutcome::TransientUnavailable;
         }
     }
-    let Ok(current) = app.state::<DesktopCapability>().0.lock() else {
-        return OwnedCapabilityOutcome::Invalid;
+    let current = match lock_until(&capability_state.0, deadline) {
+        Ok(current) => current,
+        Err(BoundedLockError::TimedOut) => return OwnedCapabilityOutcome::TransientUnavailable,
+        Err(BoundedLockError::Poisoned) => return invalid_owned_capability(app),
     };
     if current.as_deref() == Some(capability.as_str()) {
         OwnedCapabilityOutcome::Valid(capability)
     } else {
-        OwnedCapabilityOutcome::Invalid
+        drop(current);
+        invalid_owned_capability(app)
     }
 }
 
+fn invalid_owned_capability(app: &tauri::AppHandle) -> OwnedCapabilityOutcome {
+    clear_desktop_capability(app);
+    OwnedCapabilityOutcome::Invalid
+}
+
 fn clear_desktop_capability(app: &tauri::AppHandle) {
-    if let Ok(mut capability) = app.state::<DesktopCapability>().0.lock() {
-        *capability = None;
-    }
+    let capability_state = app.state::<DesktopCapability>();
+    clear_optional_state(&capability_state.0);
+}
+
+fn clear_optional_state<T>(state: &Mutex<Option<T>>) {
+    let mut value = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *value = None;
 }
 
 enum OwnedChildOutcome {
@@ -446,9 +483,12 @@ enum OwnedChildOutcome {
     InvalidState,
 }
 
-fn owned_child_outcome(app: &tauri::AppHandle) -> OwnedChildOutcome {
-    let Ok(mut process) = app.state::<OfficeServerProcess>().0.lock() else {
-        return OwnedChildOutcome::InvalidState;
+fn owned_child_outcome(app: &tauri::AppHandle, deadline: Instant) -> OwnedChildOutcome {
+    let process_state = app.state::<OfficeServerProcess>();
+    let mut process = match lock_until(&process_state.0, deadline) {
+        Ok(process) => process,
+        Err(BoundedLockError::TimedOut) => return OwnedChildOutcome::TransientUnavailable,
+        Err(BoundedLockError::Poisoned) => return OwnedChildOutcome::InvalidState,
     };
     let Some(child) = process.as_mut() else {
         return OwnedChildOutcome::Exited;
@@ -460,8 +500,7 @@ fn owned_child_outcome(app: &tauri::AppHandle) -> OwnedChildOutcome {
     }
 }
 
-fn invalidate_owned_desktop(app: &tauri::AppHandle) {
-    clear_desktop_capability(app);
+fn close_owned_desktop_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.close();
     }
@@ -490,21 +529,13 @@ fn start_owned_server_monitor(app: tauri::AppHandle) {
         let mut consecutive_transient_failures = 0_u8;
         loop {
             thread::sleep(OWNED_SERVER_MONITOR_INTERVAL);
-            let still_owned = app
-                .state::<DesktopCapability>()
-                .0
-                .lock()
-                .ok()
-                .is_some_and(|capability| capability.is_some());
-            if !still_owned {
-                return;
-            }
             let outcome = authenticated_owned_capability(&app);
             if monitor_outcome_requires_invalidation(
                 &outcome,
                 &mut consecutive_transient_failures,
             ) {
-                invalidate_owned_desktop(&app);
+                clear_desktop_capability(&app);
+                close_owned_desktop_window(&app);
                 return;
             }
         }
@@ -1683,6 +1714,55 @@ mod tests {
             &OwnedCapabilityOutcome::Invalid,
             &mut failures,
         ));
+    }
+
+    #[test]
+    fn proof_gate_wait_is_bounded_and_short_queue_contention_can_recover() {
+        let gate = std::sync::Arc::new(Mutex::new(()));
+        let held = gate.lock().expect("hold proof gate");
+        let started = Instant::now();
+        assert!(matches!(
+            lock_until(&gate, started + Duration::from_millis(100)),
+            Err(BoundedLockError::TimedOut),
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "proof gate wait exceeded its absolute deadline",
+        );
+        drop(held);
+
+        let queued_gate = gate.clone();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let holder = thread::spawn(move || {
+            let _held = queued_gate.lock().expect("hold queued proof gate");
+            ready_sender.send(()).expect("announce held proof gate");
+            thread::sleep(Duration::from_millis(50));
+        });
+        ready_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("queued proof gate is held");
+        let recovered = lock_until(&gate, Instant::now() + Duration::from_secs(2));
+        assert!(recovered.is_ok(), "short proof queue contention should recover");
+        drop(recovered);
+        holder.join().expect("queued proof holder exits");
+    }
+
+    #[test]
+    fn invalidation_clears_capability_even_after_state_lock_poisoning() {
+        let state = std::sync::Arc::new(Mutex::new(Some("capability".to_owned())));
+        let poisoned_state = state.clone();
+        let poisoner = thread::spawn(move || {
+            let _held = poisoned_state.lock().expect("hold capability state");
+            panic!("poison capability state");
+        });
+        assert!(poisoner.join().is_err());
+
+        clear_optional_state(&state);
+        let value = match state.lock() {
+            Ok(value) => value,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        assert!(value.is_none());
     }
 
     #[test]

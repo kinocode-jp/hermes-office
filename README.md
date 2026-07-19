@@ -151,7 +151,8 @@ the normal app bundle and listener-supplied content are never loaded first.
   nonce-bound HMAC readiness proof without transmitting the shell’s ephemeral
   desktop capability, and stops only that owned child on exit. It repeats a
   fresh proof on a blocking worker before every capability release and in a
-  250 ms native monitor. Confirmed child exit or invalid proof clears the
+  250 ms native monitor. Gate wait, child checks, and proof share a 750 ms
+  absolute deadline, so parallel sends cannot queue indefinitely. Confirmed child exit or invalid proof clears the
   capability before the desktop window closes; transient network/I/O failure
   fails that send and must repeat for three monitor checks before invalidation.
   The web client does not cache the root capability. The proof connection and subsequent

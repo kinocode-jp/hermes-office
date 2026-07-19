@@ -195,11 +195,19 @@ This endpoint does not create a session and does not authorize any mutation.
 After startup, each WebView capability request repeats a fresh proof and checks
 the owned child both before and after it. These bounded process and TCP checks
 run through an asynchronous Tauri command on a blocking worker rather than the
-IPC/UI executor. The web transport keeps no capability cache and repeats that
-IPC check immediately before every HTTP request and WebSocket connection.
+IPC/UI executor. Gate acquisition, both child-state checks, and the TCP proof
+share one 750 ms absolute deadline. The gate uses bounded `try_lock` polling, so
+parallel sends cannot wait indefinitely, starve the monitor, or accumulate
+unbounded blocking-worker occupancy; an expired queue wait is a transient
+failure for that send. The web transport keeps no capability cache and repeats
+that IPC check immediately before every HTTP request and WebSocket connection.
 Independently, a 250 ms native monitor repeats the proof. A confirmed child exit,
 wrong HMAC, oversized response, malformed response, or strict-contract failure
-clears the capability first and then closes the main window. A timeout,
+clears the capability first and then closes the main window. Permanent
+invalidation runs in the blocking worker or native monitor and recovers a
+poisoned capability-state lock; only after that clear completes may the async
+command close the window, so the IPC/UI executor never blocks on state clearing.
+A timeout,
 connection failure, or I/O error returns no capability for the affected send but
 does not permanently invalidate native state unless it occurs in three
 consecutive monitor checks; any valid proof resets that counter. An unowned
