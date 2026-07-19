@@ -127,7 +127,7 @@ pub fn run() {
                     // WebView into an untrusted, independently served document.
                     // The fixed loopback URL is never derived from external input.
                     open_office_in_system_browser()?;
-                    app.exit(0);
+                    app.handle().exit(0);
                 }
             }
             Ok(())
