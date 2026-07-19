@@ -209,6 +209,14 @@ html, body { height: 100%; }
 .font-size-choices button.is-active { color: var(--night); background: var(--paper); }
 .font-size-choices button span { font-family: Georgia, serif; font-weight: 800; }
 .font-size-choices button small { font: 600 7px/1 ui-monospace, monospace; }
+.layout-placement-choices { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); }
+.layout-placement-choices button { display: grid; place-items: center; min-height: 42px; padding: 0; border: 0; border-right: 1px solid var(--line); color: var(--muted); background: transparent; cursor: pointer; }
+.layout-placement-choices button:last-child { border-right: 0; }
+.layout-placement-choices button:hover { color: var(--aqua); }
+.layout-placement-choices button.is-active { color: var(--night); background: var(--paper); }
+.layout-placement-choices button span { font: 900 25px/1 ui-monospace, monospace; }
+.appearance-reset-layout { width: 100%; min-height: var(--target-desktop); margin-top: 9px; border: 1px solid var(--line); color: var(--muted); background: transparent; font-size: var(--text-label); cursor: pointer; }
+.appearance-reset-layout:hover { border-color: var(--aqua); color: var(--aqua); }
 
 @media (max-width: 767px) {
   .appearance-panel { inset: auto 0 0; width: 100%; max-height: min(76vh, 570px); padding: 18px max(16px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); border-width: 1px 0 0; box-shadow: 0 -18px 48px rgba(16, 29, 44, .22); }
@@ -337,6 +345,8 @@ body { font-size: var(--text-body); line-height: 1.5; }
 .kanban-unconfirmed button,
 .appearance-trigger,
 .appearance-panel > header button { min-height: var(--target-desktop); }
+.layout-placement-choices button,
+.appearance-reset-layout { min-height: var(--target-desktop); }
 
 :root[lang="ja"] .runtime-status,
 :root[lang="ja"] .quiet-button,
@@ -378,6 +388,8 @@ body { font-size: var(--text-body); line-height: 1.5; }
   .compact-inspector-button,
   .user-button,
   .device-login-language { min-height: var(--target-mobile); }
+  .layout-placement-choices button,
+  .appearance-reset-layout { min-height: var(--target-mobile); }
   .mobile-workspace-bar button,
   .mobile-workspace-bar b,
   .mobile-chat-tabs button { font-size: var(--text-utility); }

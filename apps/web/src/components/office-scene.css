@@ -104,6 +104,28 @@
 
 /* ── Responsive ─────────────────────────────────────────────────── */
 
+@media (min-width: 768px) {
+  .office-wrap { min-height: 300px; padding: 7px 9px; }
+  .office-heading { gap: 9px; margin-bottom: 5px; }
+}
+
+@container workspace-surface (max-width: 520px) {
+  .office-wrap { min-height: 280px; }
+  .office-heading { align-items: flex-start; flex-wrap: wrap; }
+  .office-toolbar { width: 100%; flex-wrap: wrap; justify-content: space-between; }
+  .office-density-note { order: 3; width: 100%; max-width: none; text-align: left; }
+  .shift-readout { flex-wrap: wrap; }
+  .office-stage { min-height: 220px; }
+}
+
+@container workspace-surface (max-width: 400px) {
+  .office-heading { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .office-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+  .shift-readout { grid-column: 1 / -1; }
+  .office-density-note { grid-column: 1 / -1; }
+  .office-seg { justify-self: end; }
+}
+
 @media (max-width: 767px) {
   .office-wrap { height: auto; min-height: 100%; padding: 12px; overflow: visible; }
   .office-heading { flex-wrap: wrap; }
