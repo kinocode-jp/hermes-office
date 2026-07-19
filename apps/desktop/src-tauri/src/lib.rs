@@ -480,6 +480,25 @@ fn classify_health_body(body: &str) -> HealthCompatibility {
         Ok(value) => value,
         Err(_) => return HealthCompatibility::Malformed,
     };
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        return HealthCompatibility::Malformed;
+    }
+    let runtime_is_valid = matches!(
+        value.get("runtime").and_then(|runtime| runtime.as_str()),
+        Some(
+            "unconfigured"
+                | "starting"
+                | "ready"
+                | "stopping"
+                | "stopped"
+                | "unreachable"
+                | "incompatible"
+                | "error"
+        )
+    );
+    if !runtime_is_valid {
+        return HealthCompatibility::Malformed;
+    }
     let version = match value.get("protocolVersion") {
         Some(version) => version,
         None => return HealthCompatibility::Malformed,
@@ -798,25 +817,62 @@ mod tests {
     }
 
     #[test]
-    fn health_body_compatibility_matches_protocol_version() {
-        assert!(health_body_is_compatible(r#"{"protocolVersion":1}"#));
+    fn health_body_compatibility_requires_the_office_health_contract() {
         assert!(health_body_is_compatible(
-            r#"{"status":"ok","protocolVersion":1,"details":{}}"#
+            r#"{"ok":true,"protocolVersion":1,"runtime":"ready"}"#
         ));
-        assert!(!health_body_is_compatible(r#"{"protocolVersion":2}"#));
-        assert!(!health_body_is_compatible(r#"{"status":"ok"}"#));
+        assert!(health_body_is_compatible(
+            r#"{"ok":true,"protocolVersion":1,"runtime":"unconfigured","details":{}}"#
+        ));
+        assert!(!health_body_is_compatible(
+            r#"{"ok":true,"protocolVersion":2,"runtime":"ready"}"#
+        ));
+        assert!(!health_body_is_compatible(r#"{"protocolVersion":1}"#));
         assert!(!health_body_is_compatible("not-json"));
     }
 
     #[test]
-    fn health_body_classifies_malformed_missing_and_nonnumeric_version() {
-        assert_eq!(classify_health_body("not-json"), HealthCompatibility::Malformed);
-        assert_eq!(classify_health_body(r#"{"status":"ok"}"#), HealthCompatibility::Malformed);
-        assert_eq!(classify_health_body(r#"{"protocolVersion":"1"}"#), HealthCompatibility::Malformed);
-        assert_eq!(classify_health_body(r#"{"protocolVersion":null}"#), HealthCompatibility::Malformed);
-        assert_eq!(classify_health_body(r#"{"protocolVersion":1.1}"#), HealthCompatibility::Malformed);
-        assert_eq!(classify_health_body(r#"{"protocolVersion":1}"#), HealthCompatibility::Compatible);
-        assert_eq!(classify_health_body(r#"{"protocolVersion":2}"#), HealthCompatibility::Incompatible);
+    fn health_body_classifies_malformed_contract_and_nonnumeric_version() {
+        assert_eq!(
+            classify_health_body("not-json"),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"protocolVersion":1}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":false,"protocolVersion":1,"runtime":"ready"}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":1}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":1,"runtime":"other"}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":"1","runtime":"ready"}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":null,"runtime":"ready"}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":1.1,"runtime":"ready"}"#),
+            HealthCompatibility::Malformed
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":1,"runtime":"ready"}"#),
+            HealthCompatibility::Compatible
+        );
+        assert_eq!(
+            classify_health_body(r#"{"ok":true,"protocolVersion":2,"runtime":"ready"}"#),
+            HealthCompatibility::Incompatible
+        );
     }
 
     #[test]
@@ -835,7 +891,7 @@ mod tests {
     #[test]
     fn classify_compatible_existing_server_attaches() {
         let address = bind_health_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":1}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
         );
         assert_eq!(
             classify_office_startup(address).expect("compatible server should classify"),
@@ -844,9 +900,19 @@ mod tests {
     }
 
     #[test]
+    fn classify_listener_with_only_protocol_version_rejects() {
+        let address = bind_health_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":1}",
+        );
+        let error = classify_office_startup(address)
+            .expect_err("an incomplete health contract must not be treated as Office Server");
+        assert!(error.to_string().contains("malformed"));
+    }
+
+    #[test]
     fn classify_incompatible_existing_server_rejects() {
         let address = bind_health_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":2}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":2,\"runtime\":\"ready\"}",
         );
         let error = classify_office_startup(address).expect_err("incompatible server should error");
         assert!(error.to_string().contains("incompatible protocol version"));
@@ -863,7 +929,7 @@ mod tests {
     #[test]
     fn classify_nonnumeric_protocol_version_rejects_malformed() {
         let address = bind_health_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":\"1\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":\"1\",\"runtime\":\"ready\"}",
         );
         let error = classify_office_startup(address).expect_err("nonnumeric version should error");
         assert!(error.to_string().contains("malformed"));

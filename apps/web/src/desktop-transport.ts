@@ -15,21 +15,31 @@ let capabilityCache: { bridge: TauriInternals | undefined; request: Promise<stri
 
 // The desktop shell returns a capability only when it started and owns the
 // Office Server child. When it attaches to an existing compatible server, the
-// shell normally navigates the WebView to the server origin, so the page has no
-// Tauri bridge and uses ordinary browser cookie auth. The null fallback here is
-// a defense-in-depth case: if the bridge is still invoked on an attached remote
-// page, null means no capability. A non-null invalid value is rejected rather
-// than silently falling back, because that would mask owned-child security
-// failures.
+// shell navigates the WebView to the exact server origin, where the page uses
+// ordinary browser cookie auth even if Tauri internals remain visible. A null
+// result is retained for owned-shell compatibility. A non-null invalid value is
+// rejected rather than silently falling back, because that would mask
+// owned-child security failures.
 
 export function isTauriAssetLocation(value: Pick<Location, "protocol" | "hostname">): boolean {
   return value.protocol === "tauri:" || value.hostname === "tauri.localhost";
 }
 
+export function isAttachedOfficeServerLocation(
+  value: Pick<Location, "protocol" | "hostname" | "port">,
+): boolean {
+  return value.protocol === "http:" && value.hostname === "127.0.0.1" && value.port === "4317";
+}
+
 export function shouldUseDesktopCapability(
-  value: Pick<Location, "protocol" | "hostname">,
+  value: Pick<Location, "protocol" | "hostname" | "port">,
   bridgeAvailable: boolean,
 ): boolean {
+  // An attached WebView is an ordinary same-origin browser client. Tauri may
+  // still expose its internal object at this remote origin, but the external
+  // Office Server cannot know this shell's launch-scoped capability and its
+  // remote-origin ACL rejects IPC before the command runs.
+  if (isAttachedOfficeServerLocation(value)) return false;
   return bridgeAvailable || isTauriAssetLocation(value);
 }
 

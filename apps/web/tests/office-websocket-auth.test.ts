@@ -560,8 +560,18 @@ test("desktop capability recovery remains cookie-free and does not call HTTP aut
   });
 });
 
-test("null desktop capability falls back to local cookie auth without capability header or subprotocol", async () => {
-  await withBrowserEnvironment({ protocol: "tauri:", hostname: "tauri.localhost", origin: "tauri://localhost", desktopCapability: null }, async () => {
+test("attached desktop origin bypasses exposed IPC and uses local cookie auth", async () => {
+  let desktopInvocations = 0;
+  await withBrowserEnvironment({
+    protocol: "http:",
+    hostname: "127.0.0.1",
+    port: "4317",
+    origin: "http://127.0.0.1:4317",
+    desktopInvoke: async () => {
+      desktopInvocations += 1;
+      throw new Error("Remote capability ACL rejected IPC.");
+    },
+  }, async () => {
     const originalFetch = globalThis.fetch;
     let localBootstraps = 0;
     let deviceRenewals = 0;
@@ -579,12 +589,39 @@ test("null desktop capability falls back to local cookie auth without capability
       await recoverOfficeWebSocketAuthentication(serverUrl, lease.authRevision);
       const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
       assert.notEqual(recovered.authRevision, lease.authRevision);
+      assert.equal(desktopInvocations, 0);
       assert.equal(localBootstraps, 2);
       assert.equal(deviceRenewals, 0);
       const sockets = BareWebSocket.byPath("/api/v1/events");
       assert.ok(sockets.length >= 1);
       const protocols = sockets.at(-1)?.protocols;
       assert.equal(protocols, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("rejected desktop IPC outside the attach origin fails closed", async () => {
+  await withBrowserEnvironment({
+    protocol: "tauri:",
+    hostname: "tauri.localhost",
+    origin: "tauri://localhost",
+    desktopInvoke: async () => { throw new Error("IPC rejected"); },
+  }, async () => {
+    const originalFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      throw new Error("Desktop auth must not fall back to HTTP auth.");
+    }) as typeof fetch;
+    try {
+      await assert.rejects(
+        openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", "http://127.0.0.1:4317/rejected-ipc"),
+        /IPC rejected/,
+      );
+      assert.equal(fetches, 0);
+      assert.equal(BareWebSocket.byPath("/api/v1/events").length, 0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -606,17 +643,28 @@ test("authenticated WebSocket leases reject cross-origin and non-Office targets 
   await assert.rejects(openOfficeWebSocket("wss://office.example/api/v1/chat?leak=1", "https://office.example"), /target is invalid/);
 });
 
-type BrowserLocation = { protocol: string; hostname: string; origin: string; desktopCapability?: string | null; fastTimers?: boolean; timerDelays?: number[] };
+type BrowserLocation = {
+  protocol: string;
+  hostname: string;
+  port?: string;
+  origin: string;
+  desktopCapability?: string | null;
+  desktopInvoke?: () => Promise<string | null>;
+  fastTimers?: boolean;
+  timerDelays?: number[];
+};
 
 async function withBrowserEnvironment(locationValue: BrowserLocation, run: () => Promise<void>): Promise<void> {
   const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
   const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
   const webSocketDescriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
-  const bridge = locationValue.desktopCapability === undefined
-    ? undefined
-    : {
-        invoke: async () => locationValue.desktopCapability!,
-      };
+  const bridge = locationValue.desktopInvoke !== undefined
+    ? { invoke: locationValue.desktopInvoke }
+    : locationValue.desktopCapability === undefined
+      ? undefined
+      : {
+          invoke: async () => locationValue.desktopCapability!,
+        };
   Object.defineProperty(globalThis, "location", { configurable: true, value: locationValue });
   const browserWindow = {
     __TAURI_INTERNALS__: bridge,
