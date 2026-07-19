@@ -173,6 +173,16 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(auditStyles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.access-audit__rail li \{ grid-template-columns/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.workspace-layout-host\[data-workspace-placement\][^{]*\{ display: block/);
   assert.match(styles, /\.workspace-drawer \{ position: fixed; inset: calc\(52px/);
+  const emptyDrawerRule = styles.match(/\.workspace-layout-host\.is-empty \.workspace-drawer \{([^}]*)\}/)?.[1] ?? "";
+  assert.match(emptyDrawerRule, /border-top: 1px solid var\(--line\)/);
+  assert.match(emptyDrawerRule, /border-right: 0/);
+  assert.match(emptyDrawerRule, /border-left: 0/);
+  const emptyDrawerRuleIndex = styles.indexOf(".workspace-layout-host.is-empty .workspace-drawer");
+  for (const placement of ["top", "right", "bottom", "left"] as const) {
+    assert.match(styles, new RegExp(`data-workspace-placement="${placement}"`), `${placement} placement remains supported`);
+    const placementDrawerIndex = styles.lastIndexOf(`[data-workspace-placement="${placement}"] .workspace-drawer`, emptyDrawerRuleIndex);
+    if (placementDrawerIndex >= 0) assert.ok(emptyDrawerRuleIndex > placementDrawerIndex, `${placement} empty drawer normalization follows placement borders`);
+  }
   assert.match(settings, /aria-live="polite"/);
   assert.match(settings, /resetWorkspaceLayout\(\)/);
 });
