@@ -195,8 +195,9 @@ impl StartupNoticeKind {
                 "Restart Hermes Office; if it still fails, reinstall the application and its managed runtime.",
             ],
             Self::OwnedServerReadinessFailed => &[
-                "Review the Hermes Office server logs for an early exit or readiness failure.",
-                "Confirm port 4317 is free, then restart Hermes Office. Reinstall the runtime or application if the failure continues.",
+                "Close Hermes Office normally, then start it again.",
+                "If the failure continues, check which application owns loopback port 4317 and confirm the port is free before retrying.",
+                "Repair or reinstall the managed runtime or Hermes Office application bundle if the server still does not become ready.",
             ],
             Self::InternalStateUnavailable => &[
                 "Close Hermes Office normally and start it again.",
@@ -1430,8 +1431,10 @@ mod tests {
         assert!(launch.contains("reinstall the application and its managed runtime"));
 
         let readiness = startup_notice_html(StartupNoticeKind::OwnedServerReadinessFailed);
-        assert!(readiness.contains("server logs for an early exit or readiness failure"));
-        assert!(readiness.contains("Confirm port 4317 is free"));
+        assert!(readiness.contains("Close Hermes Office normally"));
+        assert!(readiness.contains("which application owns loopback port 4317"));
+        assert!(readiness.contains("Repair or reinstall the managed runtime"));
+        assert!(!readiness.contains("server logs"));
 
         let state = startup_notice_html(StartupNoticeKind::InternalStateUnavailable);
         assert!(state.contains("Close Hermes Office normally"));
