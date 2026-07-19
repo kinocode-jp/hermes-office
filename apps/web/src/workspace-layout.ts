@@ -164,6 +164,18 @@ export function workspaceSeparatorKeyShortcuts(placement: WorkspacePlacement): s
     : "ArrowUp ArrowDown Home End";
 }
 
+export function workspaceResizeRatioFromDelta(
+  startRatio: number,
+  startCoordinate: number,
+  currentCoordinate: number,
+  placement: WorkspacePlacement,
+  axisSize: number,
+): number {
+  if (!Number.isFinite(axisSize) || axisSize <= 0) return startRatio;
+  const direction = placement === "left" || placement === "top" ? 1 : -1;
+  return startRatio + direction * (currentCoordinate - startCoordinate) / axisSize;
+}
+
 function clampRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return defaultWorkspaceLayout.ratio;
   return Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, ratio));

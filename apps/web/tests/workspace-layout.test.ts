@@ -13,6 +13,7 @@ import {
   workspaceRatioBounds,
   workspaceChatPrecedesSurface,
   workspaceSeparatorKeyShortcuts,
+  workspaceResizeRatioFromDelta,
   workspacePlacement,
   workspaceRatio,
 } from "../src/workspace-layout.ts";
@@ -79,6 +80,21 @@ test("workspace separator advertises only resize keys for its current axis", () 
   assert.equal(workspaceSeparatorKeyShortcuts("right"), "ArrowLeft ArrowRight Home End");
   assert.equal(workspaceSeparatorKeyShortcuts("top"), "ArrowUp ArrowDown Home End");
   assert.equal(workspaceSeparatorKeyShortcuts("bottom"), "ArrowUp ArrowDown Home End");
+});
+
+test("workspace pointer resize uses gesture delta without separator offset jumps", () => {
+  const approximately = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < Number.EPSILON);
+  approximately(workspaceResizeRatioFromDelta(0.4, 100, 110, "left", 1000), 0.41);
+  approximately(workspaceResizeRatioFromDelta(0.4, 100, 110, "right", 1000), 0.39);
+  approximately(workspaceResizeRatioFromDelta(0.4, 100, 110, "top", 500), 0.42);
+  approximately(workspaceResizeRatioFromDelta(0.4, 100, 110, "bottom", 500), 0.38);
+  assert.equal(
+    workspaceResizeRatioFromDelta(0.4, 10, 30, "left", 1000),
+    workspaceResizeRatioFromDelta(0.4, 200, 220, "left", 1000),
+    "only pointer delta affects the result",
+  );
+  assert.equal(workspaceResizeRatioFromDelta(0.4, 100, 100, "left", 1000), 0.4);
+  assert.equal(workspaceResizeRatioFromDelta(0.4, 100, 200, "left", 0), 0.4);
 });
 
 test("workspace preferences persist, reset, and fail safely when storage is blocked", () => {
@@ -155,12 +171,22 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(component, /copy\.dropZone\(drag\.source, labelForPlacement\(edge, isJapanese\)\)/);
   assert.equal(component.match(/hasPointerCapture\(event\.pointerId\)/g)?.length, 2, "capture ownership is checked by resize and the shared release helper");
   assert.equal(component.match(/releasePointerCapture\(event\.pointerId\)/g)?.length, 1, "pointer release is centralized");
-  assert.match(component, /const finishResize = \(\) => \{\s*if \(!resizingRef\.current\) return;/);
+  assert.match(component, /const resizeGestureRef = useRef<ResizeGesture \| null>\(null\)/);
+  assert.match(component, /const effectiveRatioRef = useRef/);
+  assert.match(component, /const finishResize = \(event\?: PointerEvent\) =>/);
+  assert.match(component, /resizeGestureRef\.current = null;\s*resizingRef\.current = false;/);
   assert.match(component, /const cancelDockDrag = \(event\?: PointerEvent\) =>/);
-  assert.match(component, /onLostPointerCapture=\{finishResize\}/);
+  assert.match(component, /onPointerDown=\{beginResize\}/);
+  assert.match(component, /startCoordinate: resizeAxisCoordinate\(placement, event\.clientX, event\.clientY\)/);
+  assert.match(component, /startRatio: effectiveRatioRef\.current/);
+  assert.match(component, /pointerId: event\.pointerId/);
+  assert.match(component, /axisSize: placement === "left" \|\| placement === "right" \? rect\.width : rect\.height/);
+  assert.match(component, /event\.pointerId !== gesture\.pointerId/);
+  assert.match(component, /workspaceResizeRatioFromDelta\(/);
+  assert.match(component, /onLostPointerCapture=\{\(event\) => finishResize\(event\)\}/);
   assert.equal(component.match(/onLostPointerCapture=\{\(\) => cancelDockDrag\(\)\}/g)?.length, 2);
   assert.match(component, /if \(hasChats && !mobile\) return;\s*finishResize\(\);\s*cancelDockDrag\(\);/);
-  assert.match(component, /useEffect\(\(\) => \(\) => \{\s*if \(!resizingRef\.current\) return;[\s\S]*?persistWorkspaceLayout\(\);/);
+  assert.match(component, /useEffect\(\(\) => \(\) => \{\s*const shouldPersist = resizingRef\.current \|\| resizeGestureRef\.current !== null;\s*resizeGestureRef\.current = null;[\s\S]*?persistWorkspaceLayout\(\);/);
   assert.match(component, /\{drag && hasChats && !mobile && \(/);
   const cancelStart = component.indexOf("const cancelDockDrag");
   const cancelEnd = component.indexOf("const beginDockDrag", cancelStart);

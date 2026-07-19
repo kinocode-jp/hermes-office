@@ -11,6 +11,7 @@ import {
   setWorkspaceRatio,
   workspaceChatPrecedesSurface,
   workspaceSeparatorKeyShortcuts,
+  workspaceResizeRatioFromDelta,
   workspaceRatioBounds,
   workspacePlacement,
   workspacePlacements,
@@ -26,11 +27,20 @@ type WorkspaceLayoutProps = {
 };
 
 type DragSource = "office" | "chat";
+type ResizeGesture = {
+  pointerId: number;
+  startCoordinate: number;
+  startRatio: number;
+  placement: WorkspacePlacement;
+  axisSize: number;
+};
 
 export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutProps) {
   const host = useRef<HTMLDivElement>(null);
   const ratioRef = useRef(workspaceRatio.value);
+  const effectiveRatioRef = useRef(workspaceRatio.value);
   const resizingRef = useRef(false);
+  const resizeGestureRef = useRef<ResizeGesture | null>(null);
   const [mobile, setMobile] = useState(() => matchesMobile());
   const [effectiveRatio, setEffectiveRatio] = useState(workspaceRatio.value);
   const [effectiveBounds, setEffectiveBounds] = useState<WorkspaceRatioBounds>({
@@ -70,6 +80,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   }, []);
 
   ratioRef.current = preferredRatio;
+  effectiveRatioRef.current = effectiveRatio;
 
   useEffect(() => {
     const element = host.current;
@@ -116,10 +127,13 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
   };
-  const finishResize = () => {
-    if (!resizingRef.current) return;
+  const finishResize = (event?: PointerEvent) => {
+    const gesture = resizeGestureRef.current;
+    if (event && gesture && event.pointerId !== gesture.pointerId) return;
+    const shouldPersist = resizingRef.current || gesture !== null;
+    resizeGestureRef.current = null;
     resizingRef.current = false;
-    persistWorkspaceLayout();
+    if (shouldPersist) persistWorkspaceLayout();
   };
   const cancelDockDrag = (event?: PointerEvent) => {
     if (event) releaseOwnedPointer(event);
@@ -141,16 +155,33 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     commitDock(drag.candidate);
     setDrag(null);
   };
-  const resize = (event: PointerEvent) => {
-    if (mobile || !hasChats || !host.current) return;
+  const beginResize = (event: PointerEvent) => {
+    if (mobile || !hasChats || event.button !== 0 || !host.current) return;
+    if (!(event.currentTarget instanceof HTMLElement)) return;
     const rect = host.current.getBoundingClientRect();
-    const raw = placement === "left" ? (event.clientX - rect.left) / rect.width
-      : placement === "right" ? (rect.right - event.clientX) / rect.width
-      : placement === "top" ? (event.clientY - rect.top) / rect.height
-      : (rect.bottom - event.clientY) / rect.height;
-    const next = clampWorkspaceRatio(raw, placement, rect.width, rect.height);
-    setEffectiveBounds(workspaceRatioBounds(placement, rect.width, rect.height));
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeGestureRef.current = {
+      pointerId: event.pointerId,
+      startCoordinate: resizeAxisCoordinate(placement, event.clientX, event.clientY),
+      startRatio: effectiveRatioRef.current,
+      placement,
+      axisSize: placement === "left" || placement === "right" ? rect.width : rect.height,
+    };
     resizingRef.current = true;
+  };
+  const resize = (event: PointerEvent) => {
+    const gesture = resizeGestureRef.current;
+    if (mobile || !hasChats || !host.current || !gesture || event.pointerId !== gesture.pointerId) return;
+    const rect = host.current.getBoundingClientRect();
+    const raw = workspaceResizeRatioFromDelta(
+      gesture.startRatio,
+      gesture.startCoordinate,
+      resizeAxisCoordinate(gesture.placement, event.clientX, event.clientY),
+      gesture.placement,
+      gesture.axisSize,
+    );
+    const next = clampWorkspaceRatio(raw, gesture.placement, rect.width, rect.height);
+    setEffectiveBounds(workspaceRatioBounds(gesture.placement, rect.width, rect.height));
     setEffectiveRatio(next);
     workspaceRatio.value = next;
   };
@@ -191,9 +222,10 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   }, [hasChats, mobile]);
 
   useEffect(() => () => {
-    if (!resizingRef.current) return;
+    const shouldPersist = resizingRef.current || resizeGestureRef.current !== null;
+    resizeGestureRef.current = null;
     resizingRef.current = false;
-    persistWorkspaceLayout();
+    if (shouldPersist) persistWorkspaceLayout();
   }, []);
 
   const surfacePane = <div key="surface-pane" class="workspace-layout-surface">{main}</div>;
@@ -211,17 +243,17 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
         aria-valuemax={Math.round(effectiveBounds.max * 100)}
         aria-valuenow={Math.round(effectiveRatio * 100)}
         aria-keyshortcuts={workspaceSeparatorKeyShortcuts(placement)}
-        onPointerDown={(event) => { if (event.button === 0) event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerDown={beginResize}
         onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event); }}
         onPointerUp={(event) => {
           releaseOwnedPointer(event);
-          finishResize();
+          finishResize(event);
         }}
         onPointerCancel={(event) => {
           releaseOwnedPointer(event);
-          finishResize();
+          finishResize(event);
         }}
-        onLostPointerCapture={finishResize}
+        onLostPointerCapture={(event) => finishResize(event)}
         onKeyDown={resizeWithKeyboard}
       />
       <div class="workspace-dock-controls" role="group" aria-label={copy.dockGroup}>
@@ -296,6 +328,10 @@ function closestEdge(rect: DOMRect, x: number, y: number): WorkspacePlacement {
     ["left", Math.abs(x - rect.left)],
   ];
   return distances.reduce((closest, candidate) => candidate[1] < closest[1] ? candidate : closest)[0];
+}
+
+function resizeAxisCoordinate(placement: WorkspacePlacement, x: number, y: number): number {
+  return placement === "left" || placement === "right" ? x : y;
 }
 
 function labelForPlacement(placement: WorkspacePlacement, japanese: boolean): string {
