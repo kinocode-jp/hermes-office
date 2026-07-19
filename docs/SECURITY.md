@@ -172,9 +172,13 @@ If that listener does not serve the Web UI, a bounded probe times out, or the
 system browser cannot be launched, the desktop window displays a fixed,
 self-contained recovery notice instead of crashing. The notice contains no
 server-supplied content, scripts, external resources, or secrets and does not
-stop or replace the existing process. Recovery is to use the combined
-development surface or serve built web assets from `/` on that listener, then
-open `http://127.0.0.1:4317/` in a browser.
+stop or replace the existing process. Recovery instructions are fixed per
+failure kind: port owner and normal-close checks for an unrelated listener;
+update or normal restart and log checks for compatibility and probe failures;
+combined development or built web assets only when the Web UI is unavailable;
+and the fixed loopback URL when automatic browser launch fails. Owned-server
+runtime, resource, child-launch, readiness, and internal-state failures also
+have separate fixed instructions.
 
 Changing remote access requires editing `HERMES_OFFICE_REMOTE_TOKEN`,
 `HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`, and

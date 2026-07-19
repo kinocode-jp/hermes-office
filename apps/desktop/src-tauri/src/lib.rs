@@ -89,7 +89,11 @@ enum StartupNoticeKind {
     ExistingWebUiUnavailable,
     ExistingWebUiTimeout,
     BrowserLaunchFailed,
-    OwnedServerStartupFailed,
+    OwnedManagedRuntimeUnavailable,
+    OwnedBundledResourceUnavailable,
+    OwnedChildLaunchFailed,
+    OwnedServerReadinessFailed,
+    InternalStateUnavailable,
 }
 
 impl From<StartupProbeError> for StartupNoticeKind {
@@ -129,9 +133,96 @@ impl StartupNoticeKind {
             Self::BrowserLaunchFailed => {
                 "A compatible Hermes Office Web UI is running, but the default browser could not be opened automatically."
             }
-            Self::OwnedServerStartupFailed => {
-                "The desktop launcher could not start its bundled Hermes Office server."
+            Self::OwnedManagedRuntimeUnavailable => {
+                "The desktop launcher could not find or validate the managed Node.js and Hermes Agent runtimes required to start its Office server."
             }
+            Self::OwnedBundledResourceUnavailable => {
+                "The desktop launcher could not locate the bundled Office server resources required to start its own server."
+            }
+            Self::OwnedChildLaunchFailed => {
+                "The desktop launcher found its runtime and resources, but could not launch its Office server process."
+            }
+            Self::OwnedServerReadinessFailed => {
+                "The desktop launcher started its Office server process, but the server exited early or did not become ready in time."
+            }
+            Self::InternalStateUnavailable => {
+                "The desktop launcher could not safely update its internal ownership state."
+            }
+        }
+    }
+
+    fn recovery_steps(self) -> &'static [&'static str] {
+        match self {
+            Self::PortUsedByOtherService => &[
+                "Check which application owns loopback port 4317.",
+                "If that application is not needed, close it normally, then start Hermes Office again. Do not force-kill an unknown process.",
+            ],
+            Self::ExistingServerIncompatible => &[
+                "Update the existing Hermes Office server to a version compatible with this desktop launcher, or close that server normally.",
+                "Start the desktop launcher again after the compatible server is ready or port 4317 is free.",
+            ],
+            Self::ExistingServerMalformed => &[
+                "Inspect the existing listener and its logs because its Hermes Office health response is invalid.",
+                "Restart that service normally, or close it and start a compatible Hermes Office server before retrying.",
+            ],
+            Self::ExistingServerTimeout => &[
+                "Inspect the existing listener and its logs because its Hermes Office health check timed out.",
+                "Restart that service normally, then retry after it responds on port 4317.",
+            ],
+            Self::ExistingWebUiUnavailable => &[
+                "For development, run the normal combined development surface so the server and Web UI start together.",
+                "For a packaged or local production setup, build the web assets and serve them from / on the same port 4317 listener.",
+                "After the Web UI is available, open http://127.0.0.1:4317/ in your browser.",
+            ],
+            Self::ExistingWebUiTimeout => &[
+                "Inspect the existing listener and its logs because its Web UI response timed out.",
+                "Restart that service normally, then retry after the Web UI responds on port 4317.",
+            ],
+            Self::BrowserLaunchFailed => &[
+                "Open http://127.0.0.1:4317/ manually in your browser.",
+                "If it does not open, confirm the compatible Hermes Office server is still running on port 4317.",
+            ],
+            Self::OwnedManagedRuntimeUnavailable => &[
+                "Confirm that the supported managed Node.js and Hermes Agent runtimes are installed and available to Hermes Office.",
+                "Repair or reinstall the managed runtime, then start Hermes Office again.",
+            ],
+            Self::OwnedBundledResourceUnavailable => &[
+                "Reinstall Hermes Office from a complete application bundle so its server resources are restored.",
+                "If this is a development checkout, restore its required development files and dependencies before retrying.",
+            ],
+            Self::OwnedChildLaunchFailed => &[
+                "Confirm the managed runtime and installed Hermes Office bundle are readable and allowed to launch processes.",
+                "Restart Hermes Office; if it still fails, reinstall the application and its managed runtime.",
+            ],
+            Self::OwnedServerReadinessFailed => &[
+                "Review the Hermes Office server logs for an early exit or readiness failure.",
+                "Confirm port 4317 is free, then restart Hermes Office. Reinstall the runtime or application if the failure continues.",
+            ],
+            Self::InternalStateUnavailable => &[
+                "Close Hermes Office normally and start it again.",
+                "If the problem continues, reinstall the application; do not manually stop unrelated processes.",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedServerLaunchError {
+    ManagedRuntimeUnavailable,
+    BundledResourceUnavailable,
+    ChildLaunchFailed,
+}
+
+impl From<OwnedServerLaunchError> for StartupNoticeKind {
+    fn from(error: OwnedServerLaunchError) -> Self {
+        match error {
+            OwnedServerLaunchError::ManagedRuntimeUnavailable => {
+                Self::OwnedManagedRuntimeUnavailable
+            }
+            OwnedServerLaunchError::BundledResourceUnavailable => {
+                Self::OwnedBundledResourceUnavailable
+            }
+            OwnedServerLaunchError::ChildLaunchFailed => Self::OwnedChildLaunchFailed,
         }
     }
 }
@@ -197,24 +288,24 @@ fn setup_office(app: &tauri::App) -> Result<SetupOutcome, StartupNoticeKind> {
             *app.state::<DesktopCapability>()
                 .0
                 .lock()
-                .map_err(|_| StartupNoticeKind::OwnedServerStartupFailed)? =
+                .map_err(|_| StartupNoticeKind::InternalStateUnavailable)? =
                 Some(desktop_capability.clone());
             #[cfg(debug_assertions)]
             let mut child = start_office_dev_server(app, &desktop_capability)
-                .map_err(|_| StartupNoticeKind::OwnedServerStartupFailed)?;
+                .map_err(StartupNoticeKind::from)?;
             #[cfg(not(debug_assertions))]
             let mut child = start_office_server(app, &desktop_capability)
-                .map_err(|_| StartupNoticeKind::OwnedServerStartupFailed)?;
+                .map_err(StartupNoticeKind::from)?;
             if wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability).is_err() {
                 stop_office_server(&mut child);
-                return Err(StartupNoticeKind::OwnedServerStartupFailed);
+                return Err(StartupNoticeKind::OwnedServerReadinessFailed);
             }
             let process_state = app.state::<OfficeServerProcess>();
             let mut process = match process_state.0.lock() {
                 Ok(process) => process,
                 Err(_) => {
                     stop_office_server(&mut child);
-                    return Err(StartupNoticeKind::OwnedServerStartupFailed);
+                    return Err(StartupNoticeKind::InternalStateUnavailable);
                 }
             };
             *process = Some(child);
@@ -246,9 +337,13 @@ fn show_startup_notice(
 fn startup_notice_html(notice: StartupNoticeKind) -> String {
     let title = html_escape("Hermes Office needs attention");
     let explanation = html_escape(notice.explanation());
-    let office_url = html_escape(OFFICE_URL);
+    let recovery_steps = notice
+        .recovery_steps()
+        .iter()
+        .map(|step| format!("<li>{}</li>", html_escape(step)))
+        .collect::<String>();
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title><style>html{{color-scheme:light dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.55 system-ui,-apple-system,sans-serif;background:#111827;color:#f8fafc}}main{{box-sizing:border-box;width:min(680px,calc(100% - 40px));padding:32px;border:1px solid #374151;border-radius:16px;background:#1f2937}}h1{{margin:0 0 16px;font-size:26px}}p,ol{{margin:12px 0}}code{{overflow-wrap:anywhere;color:#bae6fd}}li+li{{margin-top:8px}}</style></head><body><main><h1>{title}</h1><p>{explanation}</p><p>No external server or process was stopped.</p><ol><li>For development, run the normal combined development surface so the server and Web UI start together.</li><li>For a packaged or local production setup, build the web assets and serve them from <code>/</code> on the same port 4317 listener.</li><li>After the Web UI is available, open <code>{office_url}</code> in your browser.</li></ol></main></body></html>"
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title><style>html{{color-scheme:light dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.55 system-ui,-apple-system,sans-serif;background:#111827;color:#f8fafc}}main{{box-sizing:border-box;width:min(680px,calc(100% - 40px));padding:32px;border:1px solid #374151;border-radius:16px;background:#1f2937}}h1{{margin:0 0 16px;font-size:26px}}p,ol{{margin:12px 0}}li+li{{margin-top:8px}}</style></head><body><main><h1>{title}</h1><p>{explanation}</p><p>No external server or process was stopped or replaced.</p><ol>{recovery_steps}</ol></main></body></html>"
     )
 }
 
@@ -386,14 +481,18 @@ fn observe_browser_launcher(
 fn start_office_server(
     app: &tauri::App,
     desktop_capability: &str,
-) -> Result<Child, Box<dyn std::error::Error>> {
-    let resource_dir = app.path().resource_dir()?;
+) -> Result<Child, OwnedServerLaunchError> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|_| OwnedServerLaunchError::BundledResourceUnavailable)?;
     let script = resource_dir.join("resources/server/hermes-office-server.mjs");
     if !script.is_file() {
-        return Err(format!("Office Server resource is missing: {}", script.display()).into());
+        return Err(OwnedServerLaunchError::BundledResourceUnavailable);
     }
 
-    let (node, hermes) = resolve_managed_runtime()?;
+    let (node, hermes) = resolve_managed_runtime()
+        .map_err(|_| OwnedServerLaunchError::ManagedRuntimeUnavailable)?;
 
     let mut command = Command::new(node);
     command.env_clear();
@@ -415,17 +514,22 @@ fn start_office_server(
     let home = env::var_os("HOME").map(PathBuf::from);
     let current_dir = home.filter(|path| path.is_dir()).unwrap_or(resource_dir);
     command.current_dir(current_dir);
-    Ok(command.spawn()?)
+    command
+        .spawn()
+        .map_err(|_| OwnedServerLaunchError::ChildLaunchFailed)
 }
 
 #[cfg(debug_assertions)]
 fn start_office_dev_server(
     app: &tauri::App,
     desktop_capability: &str,
-) -> Result<Child, Box<dyn std::error::Error>> {
-    let repo_root = resolve_repo_root()?;
-    let (node, hermes) = resolve_managed_runtime()?;
-    let tsx = resolve_tsx_cli(&repo_root)?;
+) -> Result<Child, OwnedServerLaunchError> {
+    let repo_root = resolve_repo_root()
+        .map_err(|_| OwnedServerLaunchError::BundledResourceUnavailable)?;
+    let (node, hermes) = resolve_managed_runtime()
+        .map_err(|_| OwnedServerLaunchError::ManagedRuntimeUnavailable)?;
+    let tsx = resolve_tsx_cli(&repo_root)
+        .map_err(|_| OwnedServerLaunchError::BundledResourceUnavailable)?;
 
     let mut command = Command::new(node);
     command.env_clear();
@@ -448,7 +552,9 @@ fn start_office_dev_server(
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    Ok(command.spawn()?)
+    command
+        .spawn()
+        .map_err(|_| OwnedServerLaunchError::ChildLaunchFailed)
 }
 
 #[cfg(debug_assertions)]
@@ -1278,16 +1384,118 @@ mod tests {
     }
 
     #[test]
-    fn startup_notice_contains_fixed_url_and_complete_recovery_instructions() {
-        let html = startup_notice_html(StartupNoticeKind::BrowserLaunchFailed);
-        assert!(html.contains(OFFICE_URL));
-        assert!(html.contains("normal combined development surface"));
-        assert!(html.contains("build the web assets"));
-        assert!(html.contains("serve them from <code>/</code>"));
-        assert!(html.contains("No external server or process was stopped"));
-        assert!(!html.contains("<script"));
-        assert!(!html.contains("src="));
-        assert!(!html.contains("href="));
+    fn startup_notices_use_cause_specific_fixed_recovery_instructions() {
+        let port_used = startup_notice_html(StartupNoticeKind::PortUsedByOtherService);
+        assert!(port_used.contains("which application owns loopback port 4317"));
+        assert!(port_used.contains("close it normally"));
+        assert!(port_used.contains("Do not force-kill"));
+        assert!(!port_used.contains("build the web assets"));
+        assert!(!port_used.contains("combined development surface"));
+
+        let incompatible = startup_notice_html(StartupNoticeKind::ExistingServerIncompatible);
+        assert!(incompatible.contains("Update the existing Hermes Office server"));
+        assert!(incompatible.contains("compatible server"));
+
+        let malformed = startup_notice_html(StartupNoticeKind::ExistingServerMalformed);
+        assert!(malformed.contains("listener and its logs"));
+        assert!(malformed.contains("health response is invalid"));
+
+        let timeout = startup_notice_html(StartupNoticeKind::ExistingServerTimeout);
+        assert!(timeout.contains("health check timed out"));
+        assert!(timeout.contains("Restart that service normally"));
+
+        let web_timeout = startup_notice_html(StartupNoticeKind::ExistingWebUiTimeout);
+        assert!(web_timeout.contains("Web UI response timed out"));
+        assert!(web_timeout.contains("listener and its logs"));
+
+        let web_ui = startup_notice_html(StartupNoticeKind::ExistingWebUiUnavailable);
+        assert!(web_ui.contains("normal combined development surface"));
+        assert!(web_ui.contains("build the web assets"));
+        assert!(web_ui.contains(OFFICE_URL));
+
+        let browser = startup_notice_html(StartupNoticeKind::BrowserLaunchFailed);
+        assert!(browser.contains("Open http://127.0.0.1:4317/ manually"));
+        assert!(!browser.contains("build the web assets"));
+
+        let runtime = startup_notice_html(StartupNoticeKind::OwnedManagedRuntimeUnavailable);
+        assert!(runtime.contains("managed Node.js and Hermes Agent runtimes"));
+        assert!(runtime.contains("Repair or reinstall the managed runtime"));
+
+        let resource = startup_notice_html(StartupNoticeKind::OwnedBundledResourceUnavailable);
+        assert!(resource.contains("Reinstall Hermes Office from a complete application bundle"));
+        assert!(resource.contains("server resources are restored"));
+
+        let launch = startup_notice_html(StartupNoticeKind::OwnedChildLaunchFailed);
+        assert!(launch.contains("allowed to launch processes"));
+        assert!(launch.contains("reinstall the application and its managed runtime"));
+
+        let readiness = startup_notice_html(StartupNoticeKind::OwnedServerReadinessFailed);
+        assert!(readiness.contains("server logs for an early exit or readiness failure"));
+        assert!(readiness.contains("Confirm port 4317 is free"));
+
+        let state = startup_notice_html(StartupNoticeKind::InternalStateUnavailable);
+        assert!(state.contains("Close Hermes Office normally"));
+        assert!(state.contains("do not manually stop unrelated processes"));
+
+        for notice in [
+            StartupNoticeKind::ExistingServerIncompatible,
+            StartupNoticeKind::ExistingServerMalformed,
+            StartupNoticeKind::ExistingServerTimeout,
+            StartupNoticeKind::PortUsedByOtherService,
+            StartupNoticeKind::ExistingWebUiTimeout,
+            StartupNoticeKind::BrowserLaunchFailed,
+            StartupNoticeKind::OwnedManagedRuntimeUnavailable,
+            StartupNoticeKind::OwnedBundledResourceUnavailable,
+            StartupNoticeKind::OwnedChildLaunchFailed,
+            StartupNoticeKind::OwnedServerReadinessFailed,
+            StartupNoticeKind::InternalStateUnavailable,
+        ] {
+            let html = startup_notice_html(notice);
+            assert!(!html.contains("build the web assets"));
+            assert!(!html.contains("combined development surface"));
+        }
+    }
+
+    #[test]
+    fn owned_launch_failures_map_to_safe_specific_notices() {
+        assert_eq!(
+            StartupNoticeKind::from(OwnedServerLaunchError::ManagedRuntimeUnavailable),
+            StartupNoticeKind::OwnedManagedRuntimeUnavailable
+        );
+        assert_eq!(
+            StartupNoticeKind::from(OwnedServerLaunchError::BundledResourceUnavailable),
+            StartupNoticeKind::OwnedBundledResourceUnavailable
+        );
+        assert_eq!(
+            StartupNoticeKind::from(OwnedServerLaunchError::ChildLaunchFailed),
+            StartupNoticeKind::OwnedChildLaunchFailed
+        );
+    }
+
+    #[test]
+    fn every_startup_notice_is_self_contained_and_has_no_active_resource() {
+        let notices = [
+            StartupNoticeKind::ExistingServerIncompatible,
+            StartupNoticeKind::ExistingServerMalformed,
+            StartupNoticeKind::ExistingServerTimeout,
+            StartupNoticeKind::PortUsedByOtherService,
+            StartupNoticeKind::ExistingWebUiUnavailable,
+            StartupNoticeKind::ExistingWebUiTimeout,
+            StartupNoticeKind::BrowserLaunchFailed,
+            StartupNoticeKind::OwnedManagedRuntimeUnavailable,
+            StartupNoticeKind::OwnedBundledResourceUnavailable,
+            StartupNoticeKind::OwnedChildLaunchFailed,
+            StartupNoticeKind::OwnedServerReadinessFailed,
+            StartupNoticeKind::InternalStateUnavailable,
+        ];
+        for notice in notices {
+            let html = startup_notice_html(notice);
+            assert!(html.contains("No external server or process was stopped or replaced"));
+            assert!(html.contains("<ol><li>"));
+            assert!(!html.contains("<script"));
+            assert!(!html.contains("src="));
+            assert!(!html.contains("href="));
+        }
     }
 
     #[test]

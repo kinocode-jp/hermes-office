@@ -121,10 +121,12 @@ launcher. Remote clients require only a browser, not the desktop app.
 Incompatible, malformed, timing-out, or non-Hermes listeners fail closed. A
 self-contained startup notice remains in the desktop window when the existing
 server has no Web UI, a probe times out, or the fixed Web UI URL cannot be
-opened in the system browser. It directs the operator to use the combined
-development surface or build and serve the web assets from `/` on the same
-listener, then open `http://127.0.0.1:4317/`. These paths do not crash the shell
-and never stop, replace, or take ownership of the existing listener.
+opened in the system browser. Its fixed recovery steps are cause-specific:
+listener ownership, compatibility/update, response/log/restart, Web UI assets,
+or manual browser opening as appropriate. Failures while starting an owned
+server distinguish managed runtime, bundled resources, child launch, readiness,
+and internal state. These paths do not crash the shell and never stop, replace,
+or take ownership of an existing listener.
 The health-only `npm run dev:server` process is therefore not attachable unless
 the Web UI is also served from the same listener.
 
