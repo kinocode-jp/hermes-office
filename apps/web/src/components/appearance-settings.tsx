@@ -11,6 +11,7 @@ import {
 import { locale } from "../i18n";
 import { InfoTip } from "./info-tip";
 import { canRestoreModalFocus, hasOpenModal, isTopmostModal, registerModal } from "../modal-layer";
+import { resetWorkspaceLayout, setWorkspacePlacement, workspacePlacement, workspacePlacements, type WorkspacePlacement } from "../workspace-layout";
 
 const themeDetails: Record<Theme, { name: string; ja: string; en: string }> = {
   paper: { name: "Paper", ja: "白", en: "Pure white" },
@@ -20,6 +21,7 @@ const themeDetails: Record<Theme, { name: string; ja: string; en: string }> = {
 
 export function AppearanceSettings() {
   const [open, setOpen] = useState(false);
+  const [layoutAnnouncement, setLayoutAnnouncement] = useState("");
   const panel = useRef<HTMLElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const restoreFocusTimer = useRef<number | undefined>(undefined);
@@ -30,14 +32,20 @@ export function AppearanceSettings() {
     title: "表示",
     theme: "テーマ",
     textSize: "文字サイズ",
-    hint: "文字の大きさをこの端末向けに保存します。オフィスの配置は変わりません。",
+    hint: "文字の大きさとペイン配置をこの端末向けに保存します。",
+    layout: "チャット欄の配置",
+    reset: "デフォルトに戻す",
+    resetDone: "表示レイアウトをデフォルトに戻しました。",
   } : {
     trigger: "Appearance settings",
     close: "Close",
     title: "Appearance",
     theme: "Theme",
     textSize: "Text size",
-    hint: "Text size is saved on this device without changing the office layout.",
+    hint: "Text size and pane layout are saved on this device.",
+    layout: "Chat placement",
+    reset: "Restore defaults",
+    resetDone: "The display layout was restored to its defaults.",
   };
 
   useEffect(() => {
@@ -140,9 +148,46 @@ export function AppearanceSettings() {
                 ))}
               </div>
             </section>
+
+            <section aria-labelledby="layout-heading">
+              <div class="appearance-section-title">
+                <h3 id="layout-heading">{copy.layout}</h3>
+                <small>{placementLabel(workspacePlacement.value, isJapanese)}</small>
+              </div>
+              <div class="layout-placement-choices" role="group" aria-label={copy.layout}>
+                {workspacePlacements.map((placement) => (
+                  <button
+                    key={placement}
+                    type="button"
+                    class={workspacePlacement.value === placement ? "is-active" : ""}
+                    aria-pressed={workspacePlacement.value === placement}
+                    aria-label={placementLabel(placement, isJapanese)}
+                    title={placementLabel(placement, isJapanese)}
+                    onClick={() => { setLayoutAnnouncement(""); setWorkspacePlacement(placement); }}
+                  ><span aria-hidden="true">{placementGlyph(placement)}</span></button>
+                ))}
+              </div>
+              <button
+                class="appearance-reset-layout"
+                type="button"
+                onClick={() => { resetWorkspaceLayout(); setLayoutAnnouncement(copy.resetDone); }}
+              >{copy.reset}</button>
+              <p class="visually-hidden" aria-live="polite" aria-atomic="true">{layoutAnnouncement}</p>
+            </section>
           </aside>
         </>
       )}
     </div>
   );
+}
+
+function placementLabel(placement: WorkspacePlacement, japanese: boolean): string {
+  const labels = japanese
+    ? { top: "上", right: "右", bottom: "下", left: "左" }
+    : { top: "Top", right: "Right", bottom: "Bottom", left: "Left" };
+  return labels[placement];
+}
+
+function placementGlyph(placement: WorkspacePlacement): string {
+  return placement === "top" ? "▔" : placement === "right" ? "▕" : placement === "bottom" ? "▁" : "▏";
 }

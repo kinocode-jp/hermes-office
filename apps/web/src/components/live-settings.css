@@ -139,6 +139,12 @@
 
 @keyframes settings-scan { to { background-position: -200% 0; } }
 
+@media (min-width: 821px) {
+  .live-settings { padding: clamp(12px, 2vw, 24px); }
+  .live-settings__mast { gap: 18px; margin-bottom: 14px; padding-bottom: 9px; }
+  .live-settings__tabs { margin-bottom: 12px; }
+}
+
 @media (max-width: 820px) {
   .live-settings { padding: 16px; }
   .live-settings__mast { align-items: start; }

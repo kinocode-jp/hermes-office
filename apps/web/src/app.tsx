@@ -6,6 +6,7 @@ import { ProfilePanel } from "./components/profile-panel";
 import { DeviceLogin } from "./components/device-login";
 import { AppearanceSettings } from "./components/appearance-settings";
 import { ProfileCommand } from "./components/profile-command";
+import { WorkspaceLayout } from "./components/workspace-layout";
 import { isLocalOfficeClient } from "./auth-state";
 import { logoutRemoteDevice } from "./office-api";
 import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
@@ -84,49 +85,53 @@ export function App() {
         ))}
       </nav>
 
-      <main
-        ref={mainStageRef}
-        class="main-stage"
-        onScroll={(event) => rememberSurfaceScroll(surfaceScrollPositions.current, activeSurface.value, event.currentTarget)}
-      >
-        {connection.state === "error" && (
-          <div class="runtime-error-banner" role="alert">
-            <span>{localizeRuntimeMessage(connection.message)}</span>
-            <button type="button" onClick={retryOfficeServer}>{t("connection.retry")}</button>
-          </div>
+      <WorkspaceLayout
+        hasChats={openSessionIds.value.length > 0}
+        main={(
+          <main
+            ref={mainStageRef}
+            class="main-stage"
+            onScroll={(event) => rememberSurfaceScroll(surfaceScrollPositions.current, activeSurface.value, event.currentTarget)}
+          >
+            {connection.state === "error" && (
+              <div class="runtime-error-banner" role="alert">
+                <span>{localizeRuntimeMessage(connection.message)}</span>
+                <button type="button" onClick={retryOfficeServer}>{t("connection.retry")}</button>
+              </div>
+            )}
+            {activeSurface.value === "office" && <OfficeScene profiles={profileList.value} />}
+            {activeSurface.value === "kanban" && <KanbanBoard />}
+            {activeSurface.value === "library" && <LiveSettings key="global-library" profileId={null} initialTab="global" />}
+            {activeSurface.value === "settings" && (
+              // Host admin is host-scoped and intentionally survives profile selection; "open live settings" switches to the profile tab.
+              settingsTab.value === "host" ? (
+                <LiveSettings
+                  key="settings-host"
+                  profileId={null}
+                  initialTab="host"
+                  activeTab="host"
+                  showAccessAudit
+                  showHostAdmin
+                  onTabChange={(tab) => { settingsTab.value = tab; }}
+                />
+              ) : (
+                <LiveSettings
+                  key={`settings-${selectedProfile.value?.id ?? "global"}`}
+                  profileId={selectedProfile.value?.id ?? null}
+                  {...(selectedProfile.value?.name === undefined ? {} : { profileLabel: selectedProfile.value.name })}
+                  initialTab={selectedProfile.value ? settingsTab.value : "global"}
+                  activeTab={selectedProfile.value ? settingsTab.value : "global"}
+                  showAccessAudit
+                  showHostAdmin
+                  onTabChange={(tab) => { settingsTab.value = tab; }}
+                />
+              )
+            )}
+          </main>
         )}
-        {activeSurface.value === "office" && <OfficeScene profiles={profileList.value} />}
-        {activeSurface.value === "kanban" && <KanbanBoard />}
-        {activeSurface.value === "library" && <LiveSettings key="global-library" profileId={null} initialTab="global" />}
-        {activeSurface.value === "settings" && (
-          // Host admin is host-scoped and intentionally survives profile selection; "open live settings" switches to the profile tab.
-          settingsTab.value === "host" ? (
-            <LiveSettings
-              key="settings-host"
-              profileId={null}
-              initialTab="host"
-              activeTab="host"
-              showAccessAudit
-              showHostAdmin
-              onTabChange={(tab) => { settingsTab.value = tab; }}
-            />
-          ) : (
-            <LiveSettings
-              key={`settings-${selectedProfile.value?.id ?? "global"}`}
-              profileId={selectedProfile.value?.id ?? null}
-              {...(selectedProfile.value?.name === undefined ? {} : { profileLabel: selectedProfile.value.name })}
-              initialTab={selectedProfile.value ? settingsTab.value : "global"}
-              activeTab={selectedProfile.value ? settingsTab.value : "global"}
-              showAccessAudit
-              showHostAdmin
-              onTabChange={(tab) => { settingsTab.value = tab; }}
-            />
-          )
-        )}
-      </main>
-
+        workspace={<div class={`workspace-drawer ${openSessionIds.value.length === 0 ? "is-empty" : ""} ${mobileWorkspaceOpen.value ? "is-mobile-open" : ""}`}><ChatWorkspace /></div>}
+      />
       <ProfilePanel />
-      <div class={`workspace-drawer ${openSessionIds.value.length === 0 ? "is-empty" : ""} ${mobileWorkspaceOpen.value ? "is-mobile-open" : ""}`}><ChatWorkspace /></div>
     </div>
   );
 }

@@ -104,6 +104,11 @@
 
 /* ── Responsive ─────────────────────────────────────────────────── */
 
+@media (min-width: 768px) {
+  .office-wrap { min-height: 300px; padding: 7px 9px; }
+  .office-heading { gap: 9px; margin-bottom: 5px; }
+}
+
 @media (max-width: 767px) {
   .office-wrap { height: auto; min-height: 100%; padding: 12px; overflow: visible; }
   .office-heading { flex-wrap: wrap; }
