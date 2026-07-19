@@ -149,7 +149,12 @@ the normal app bundle and listener-supplied content are never loaded first.
 
 - **Free port:** the shell starts its own child, verifies its health and a
   nonce-bound HMAC readiness proof without transmitting the shell’s ephemeral
-  desktop capability, and stops only that owned child on exit.
+  desktop capability, and stops only that owned child on exit. It repeats a
+  fresh proof before every capability release and in a 250 ms native monitor;
+  loss clears the capability before the desktop window closes. The web client
+  does not cache the root capability. The proof connection and subsequent
+  browser request are not atomically channel-bound, so the residual local
+  rebind race and trust boundary are documented in `docs/SECURITY.md`.
 - **Compatible-looking server already running:** the protocol-v1 health and Web
   UI shape checks identify only a candidate; public responses do not authenticate
   the listener as the operator's Hermes Office. The launcher keeps its window

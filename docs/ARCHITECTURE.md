@@ -108,7 +108,13 @@ Office Server module and web assets. At launch, the desktop shell probes the
 configured loopback port. If the port is free, release and development launches
 both generate a launch-scoped random desktop capability, start an owned Office
 Server child, verify its health and a capability-keyed proof, and stop only that child on exit.
-The capability is available to the WebView through Tauri IPC.
+The capability is available to the WebView only through a fresh Tauri IPC call.
+The shell repeats the nonce-bound proof and owned-child liveness check before
+each release, and the web client does not cache the capability in its transport
+module or Office session. A 250 ms native monitor performs the same fresh proof;
+proof or child-liveness loss clears the native capability before closing the
+main window. This also detects a development watch parent that remains alive
+after its actual port listener exits. Replacement listeners are never killed.
 
 Owned-child readiness never sends that capability to the listener. For each
 probe the launcher creates a new 32-byte OS-random nonce and sends only its
@@ -118,6 +124,15 @@ capability. The launcher checks the bounded response and proof in constant time,
 then confirms that the owned child is still alive. This authenticates the child
 across the unavoidable port-bind/startup race without revealing the WebView
 authentication credential to a process that wins that race.
+
+The HMAC proof connection and a subsequent WebView HTTP or WebSocket connection
+cannot be made atomic by the browser networking boundary. A process that
+rebinds the fixed port in the very small interval after the immediate proof but
+before the browser send could still observe that one capability use. The
+per-send proof, absence of a long-lived web cache, and independent monitor bound
+this residual local-host race; they do not provide TCP channel binding. Deployments
+whose local users or processes are outside the trust boundary should use the web
+surface without the optional desktop capability bridge.
 
 The configured `main` window has automatic creation disabled. No native window,
 WebView, or normal app bundle exists while listener classification and owned-child

@@ -21,6 +21,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_RESPONSE_TIMEOUT: Duration = Duration::from_millis(750);
+const OWNED_SERVER_MONITOR_INTERVAL: Duration = Duration::from_millis(250);
 const HTTP_READ_SLICE: Duration = Duration::from_millis(250);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_VERSION_OUTPUT: u64 = 4096;
@@ -236,10 +237,24 @@ impl From<OwnedServerLaunchError> for StartupNoticeKind {
 
 struct OfficeServerProcess(Mutex<Option<Child>>);
 struct DesktopCapability(Mutex<Option<String>>);
+struct DesktopProofGate(Mutex<()>);
 
 #[tauri::command]
-fn desktop_capability(state: tauri::State<'_, DesktopCapability>) -> Option<String> {
-    state.0.lock().expect("desktop capability lock").clone()
+fn desktop_capability(app: tauri::AppHandle) -> Option<String> {
+    let capability = authenticated_owned_capability(&app);
+    if capability.is_none() {
+        invalidate_owned_desktop(&app);
+    }
+    capability
+}
+
+#[tauri::command]
+fn desktop_owned(app: tauri::AppHandle) -> bool {
+    let owned = authenticated_owned_capability(&app).is_some();
+    if !owned {
+        invalidate_owned_desktop(&app);
+    }
+    owned
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -247,7 +262,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(OfficeServerProcess(Mutex::new(None)))
         .manage(DesktopCapability(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![desktop_capability])
+        .manage(DesktopProofGate(Mutex::new(())))
+        .invoke_handler(tauri::generate_handler![desktop_capability, desktop_owned])
         .setup(|app| {
             // `main` has `create: false` in tauri.conf.json. Do not create a
             // WebView, and therefore do not load the app bundle, until the
@@ -268,6 +284,9 @@ pub fn run() {
                 }
                 return Err(error);
             }
+            if notice.is_none() {
+                start_owned_server_monitor(app.handle().clone());
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -282,6 +301,9 @@ pub fn run() {
 
     app.run(|handle, event| {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+            if let Ok(mut capability) = handle.state::<DesktopCapability>().0.lock() {
+                *capability = None;
+            }
             if let Ok(mut process) = handle.state::<OfficeServerProcess>().0.lock() {
                 if let Some(mut child) = process.take() {
                     stop_office_server(&mut child);
@@ -296,11 +318,6 @@ fn setup_office(app: &tauri::App) -> Result<(), StartupNoticeKind> {
     match classify_office_startup(address).map_err(StartupNoticeKind::from)? {
         OfficeStartup::PortFree => {
             let desktop_capability = generate_desktop_capability();
-            *app.state::<DesktopCapability>()
-                .0
-                .lock()
-                .map_err(|_| StartupNoticeKind::InternalStateUnavailable)? =
-                Some(desktop_capability.clone());
             #[cfg(debug_assertions)]
             let mut child = start_office_dev_server(app, &desktop_capability)
                 .map_err(StartupNoticeKind::from)?;
@@ -312,6 +329,14 @@ fn setup_office(app: &tauri::App) -> Result<(), StartupNoticeKind> {
                 return Err(StartupNoticeKind::OwnedServerReadinessFailed);
             }
             let process_state = app.state::<OfficeServerProcess>();
+            let capability_state = app.state::<DesktopCapability>();
+            let mut capability = match capability_state.0.lock() {
+                Ok(capability) => capability,
+                Err(_) => {
+                    stop_office_server(&mut child);
+                    return Err(StartupNoticeKind::InternalStateUnavailable);
+                }
+            };
             let mut process = match process_state.0.lock() {
                 Ok(process) => process,
                 Err(_) => {
@@ -320,10 +345,73 @@ fn setup_office(app: &tauri::App) -> Result<(), StartupNoticeKind> {
                 }
             };
             *process = Some(child);
+            *capability = Some(desktop_capability);
             Ok(())
         }
         OfficeStartup::CompatibleCandidate => Err(StartupNoticeKind::ExistingServerCandidate),
     }
+}
+
+fn authenticated_owned_capability(app: &tauri::AppHandle) -> Option<String> {
+    let _proof_gate = app.state::<DesktopProofGate>().0.lock().ok()?;
+    let capability = app.state::<DesktopCapability>().0.lock().ok()?.clone()?;
+    if !owned_child_is_running(app) {
+        clear_desktop_capability(app);
+        return None;
+    }
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
+    if !desktop_readiness_proof_check(
+        address,
+        &capability,
+        Instant::now() + HEALTH_RESPONSE_TIMEOUT,
+    ) || !owned_child_is_running(app)
+    {
+        clear_desktop_capability(app);
+        return None;
+    }
+    let current = app.state::<DesktopCapability>().0.lock().ok()?;
+    (current.as_deref() == Some(capability.as_str())).then_some(capability)
+}
+
+fn clear_desktop_capability(app: &tauri::AppHandle) {
+    if let Ok(mut capability) = app.state::<DesktopCapability>().0.lock() {
+        *capability = None;
+    }
+}
+
+fn owned_child_is_running(app: &tauri::AppHandle) -> bool {
+    let Ok(mut process) = app.state::<OfficeServerProcess>().0.lock() else {
+        return false;
+    };
+    process
+        .as_mut()
+        .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+}
+
+fn invalidate_owned_desktop(app: &tauri::AppHandle) {
+    clear_desktop_capability(app);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.close();
+    }
+}
+
+fn start_owned_server_monitor(app: tauri::AppHandle) {
+    thread::spawn(move || loop {
+        thread::sleep(OWNED_SERVER_MONITOR_INTERVAL);
+        let still_owned = app
+            .state::<DesktopCapability>()
+            .0
+            .lock()
+            .ok()
+            .is_some_and(|capability| capability.is_some());
+        if !still_owned {
+            return;
+        }
+        if authenticated_owned_capability(&app).is_none() {
+            invalidate_owned_desktop(&app);
+            return;
+        }
+    });
 }
 
 fn build_main_window(
@@ -1426,6 +1514,69 @@ mod tests {
         let nonce = request.split("nonce=").nth(1).and_then(|value| value.split('&').next()).expect("nonce");
         assert_eq!(nonce.len(), DESKTOP_PROOF_NONCE_BYTES * 2);
         assert!(nonce.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+
+    #[test]
+    fn fresh_readiness_proof_rejects_an_exited_or_rebound_listener() {
+        let capability = "owned-listener-capability".to_owned();
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind owned temporary listener");
+        let address = listener.local_addr().expect("temporary listener address");
+        let owned_capability = capability.clone();
+        let owned = thread::spawn(move || {
+            serve_readiness_proof(listener, &owned_capability);
+        });
+        assert!(desktop_readiness_proof_check(
+            address,
+            &capability,
+            Instant::now() + Duration::from_secs(2),
+        ));
+        owned.join().expect("owned listener exits");
+        assert!(!desktop_readiness_proof_check(
+            address,
+            &capability,
+            Instant::now() + Duration::from_millis(200),
+        ));
+
+        let replacement = TcpListener::bind(address).expect("rebind replacement listener");
+        let attacker = thread::spawn(move || {
+            serve_readiness_proof(replacement, "attacker-does-not-have-capability");
+        });
+        assert!(!desktop_readiness_proof_check(
+            address,
+            &capability,
+            Instant::now() + Duration::from_secs(2),
+        ));
+        attacker.join().expect("replacement listener exits");
+    }
+
+    fn serve_readiness_proof(listener: TcpListener, capability: &str) {
+        let (mut stream, _) = listener.accept().expect("accept readiness challenge");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bound readiness request read");
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut buffer = [0_u8; 512];
+            let read = stream.read(&mut buffer).expect("read readiness challenge");
+            assert!(read > 0 && request.len() + read <= 2048, "bounded readiness request");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let request = String::from_utf8(request).expect("ASCII request");
+        let nonce = request
+            .split("nonce=")
+            .nth(1)
+            .and_then(|value| value.split('&').next())
+            .expect("readiness nonce");
+        let mut mac = Hmac::<Sha256>::new_from_slice(capability.as_bytes()).expect("HMAC key");
+        mac.update(desktop_proof_message(nonce).as_bytes());
+        let proof = encode_lower_hex(&mac.finalize().into_bytes());
+        let body = format!("{{\"proof\":\"{proof}\"}}");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        stream.write_all(response.as_bytes()).expect("write readiness proof");
     }
 
     #[test]

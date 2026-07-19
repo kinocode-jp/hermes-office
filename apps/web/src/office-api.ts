@@ -2,7 +2,7 @@ import { OPERATION_POLICIES } from "@hermes-office/protocol";
 import type { RemoteConfigStatus } from "@hermes-office/protocol";
 import type { OfficeRuntimeState, OfficeSnapshot, OfficeSnapshotRequestIdentity } from "./domain";
 import { classifyDeviceLoginFailure, isLocalOfficeClient, normalizeDeviceName, type DeviceLoginFailure } from "./auth-state";
-import { createAuthenticatedOfficeWebSocket, desktopCapability, desktopCapabilityHeader } from "./desktop-transport";
+import { createAuthenticatedOfficeWebSocket, desktopCapability, desktopCapabilityHeader, desktopOwnershipIsAuthenticated } from "./desktop-transport";
 import {
   beginOfficeSynchronization as beginSynchronizationBarrier,
   rejectOfficeSynchronization as rejectSynchronizationBarrier,
@@ -100,7 +100,7 @@ const RECONNECT_DELAY_MS = 3_000;
 const RECONNECT_MAX_DELAY_MS = 8_000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const MAX_PREOPEN_WEBSOCKET_FAILURES = 3;
-type OfficeClientSession = { csrfToken: string; authRevision: number; desktopCapability?: string };
+type OfficeClientSession = { csrfToken: string; authRevision: number; desktop: boolean };
 export type OfficeWebSocketLease = { socket: WebSocket; authRevision: number };
 const officeSessions = new Map<string, Promise<OfficeClientSession>>();
 const officeSessionRefreshes = new Map<string, Promise<OfficeClientSession>>();
@@ -139,7 +139,7 @@ export async function openOfficeWebSocket(url: string, serverUrl: string, signal
     if (new URL(url).pathname === "/api/v1/chat") await waitForOfficeSynchronization(serverUrl, session.authRevision, signal);
     if (signal?.aborted) throw new DOMException("Chat recovery was cancelled.", "AbortError");
     return {
-      socket: await createAuthenticatedOfficeWebSocket(url),
+      socket: await createAuthenticatedOfficeWebSocket(url, session.desktop),
       authRevision: session.authRevision,
     };
   } catch (error) {
@@ -580,15 +580,19 @@ async function requestOfficeJson<T>(url: URL, options: OfficeApiRequestOptions, 
   const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS);
   const method = options.method ?? "GET";
   try {
+    const capability = session.desktop ? await desktopCapability() : undefined;
+    if (session.desktop && capability === undefined) {
+      throw new OfficeSessionUnavailableError("Hermes Office lost its authenticated desktop server.", 0, false);
+    }
     const response = await fetch(url, {
       method,
       credentials: "include",
       signal: controller.signal,
       headers: {
         Accept: "application/json",
-        ...desktopCapabilityHeader(session.desktopCapability),
+        ...desktopCapabilityHeader(capability),
         ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(method === "GET" || session.desktopCapability !== undefined ? {} : { "X-CSRF-Token": session.csrfToken })
+        ...(method === "GET" || session.desktop ? {} : { "X-CSRF-Token": session.csrfToken })
       },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
     });
@@ -645,8 +649,7 @@ async function recoverOfficeSession(serverUrl: string, rejectedAuthRevision: num
 }
 
 async function bootstrapLocalSession(serverUrl: string): Promise<OfficeClientSession> {
-  const capability = await desktopCapability();
-  if (capability !== undefined) return issueOfficeClientSession("desktop-capability", capability);
+  if (await desktopOwnershipIsAuthenticated()) return issueOfficeClientSession("desktop-capability", true);
   let response: Response;
   try {
     response = await boundedAuthFetch(`${serverUrl}/api/v1/auth/local`, {
@@ -686,11 +689,11 @@ async function bootstrapLocalSession(serverUrl: string): Promise<OfficeClientSes
   return issueOfficeClientSession(session.csrfToken);
 }
 
-function issueOfficeClientSession(csrfToken: string, desktopCapabilityValue?: string): OfficeClientSession {
+function issueOfficeClientSession(csrfToken: string, desktop = false): OfficeClientSession {
   return {
     csrfToken,
     authRevision: ++nextOfficeAuthRevision,
-    ...(desktopCapabilityValue === undefined ? {} : { desktopCapability: desktopCapabilityValue }),
+    desktop,
   };
 }
 

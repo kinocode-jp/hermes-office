@@ -192,6 +192,23 @@ schema, lowercase proof encoding, domain-separated HMAC, and the still-running
 owned child before creating its WebView. A listener that races to acquire the
 port can observe a nonce but cannot forge the proof or obtain the capability.
 This endpoint does not create a session and does not authorize any mutation.
+After startup, each WebView capability request repeats a fresh proof and checks
+the owned child both before and after it. The web transport keeps no capability
+cache and repeats that IPC check immediately before every HTTP request and
+WebSocket connection. Independently, a 250 ms native monitor repeats the proof;
+on proof or child-liveness loss it clears the capability first and then closes
+the main window. An unowned replacement listener is never stopped or killed.
+
+The proof TCP connection and the following browser-managed request are distinct:
+there is no atomic channel binding across Tauri IPC and WebView networking. A
+malicious local process that rebinds port 4317 in the narrow interval after a
+successful per-send proof and before that browser request could observe that
+single capability use. The repeated proof, cache removal, and monitor sharply
+bound exposure after listener replacement but do not eliminate this residual
+local-host scheduling race. Treat mutually untrusted local processes as outside
+the optional desktop bridge's threat model and use normal browser/device
+authentication for that environment.
+
 If that listener does not serve the Web UI or a bounded probe times out, the
 desktop window displays a fixed,
 self-contained recovery notice instead of crashing. The notice contains no

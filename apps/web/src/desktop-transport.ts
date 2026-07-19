@@ -11,15 +11,15 @@ declare global {
   }
 }
 
-let capabilityCache: { bridge: TauriInternals | undefined; request: Promise<string | undefined> } | undefined;
-
 // The desktop shell returns a capability only when it started and owns the
 // Office Server child. An existing listener with compatible response shapes is
 // only an unauthenticated candidate: the shell keeps its fixed notice visible,
 // and the user may open the Web UI manually after verifying the port owner. A
-// null fallback is retained for defense in depth. A non-null invalid value is
-// rejected rather than silently falling back, because that would mask
-// owned-child security failures.
+// fresh IPC call revalidates the owned listener before each HTTP or WebSocket
+// send; the root capability is never cached in this module or an Office
+// session. A null fallback is retained for non-owned browser sessions. A
+// non-null invalid value is rejected rather than silently falling back, because
+// that would mask owned-child security failures.
 
 export function isTauriAssetLocation(value: Pick<Location, "protocol" | "hostname">): boolean {
   return value.protocol === "tauri:" || value.hostname === "tauri.localhost";
@@ -34,15 +34,24 @@ export function shouldUseDesktopCapability(
 
 export function desktopCapability(): Promise<string | undefined> {
   if (!shouldUseDesktopCapability(location, window.__TAURI_INTERNALS__ !== undefined)) return Promise.resolve(undefined);
-  const currentBridge = window.__TAURI_INTERNALS__;
-  if (capabilityCache === undefined || capabilityCache.bridge !== currentBridge) {
-    capabilityCache = { bridge: currentBridge, request: loadDesktopCapability() };
-  }
-  return capabilityCache.request;
+  return loadDesktopCapability();
 }
 
-export async function createAuthenticatedOfficeWebSocket(url: string): Promise<WebSocket> {
+export async function desktopOwnershipIsAuthenticated(): Promise<boolean> {
+  if (!shouldUseDesktopCapability(location, window.__TAURI_INTERNALS__ !== undefined)) return false;
+  const invoke = window.__TAURI_INTERNALS__?.invoke;
+  if (typeof invoke !== "function") throw new Error("Hermes Office desktop bridge is unavailable.");
+  const value = await invoke<boolean>("desktop_owned");
+  if (typeof value !== "boolean") throw new Error("Hermes Office desktop ownership response is invalid.");
+  if (!value) throw new Error("Hermes Office lost its authenticated desktop server.");
+  return true;
+}
+
+export async function createAuthenticatedOfficeWebSocket(url: string, desktopRequired = false): Promise<WebSocket> {
   const capability = await desktopCapability();
+  if (desktopRequired && capability === undefined) {
+    throw new Error("Hermes Office lost its authenticated desktop server.");
+  }
   return capability === undefined
     ? new WebSocket(url)
     : new WebSocket(url, [OFFICE_PROTOCOL, `${DESKTOP_PROTOCOL_PREFIX}${capability}`]);
