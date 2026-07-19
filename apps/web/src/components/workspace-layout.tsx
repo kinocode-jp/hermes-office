@@ -9,10 +9,12 @@ import {
   persistWorkspaceLayout,
   setWorkspacePlacement,
   setWorkspaceRatio,
+  workspaceRatioBounds,
   workspacePlacement,
   workspacePlacements,
   workspaceRatio,
   type WorkspacePlacement,
+  type WorkspaceRatioBounds,
 } from "../workspace-layout";
 
 type WorkspaceLayoutProps = {
@@ -29,6 +31,10 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   const resizingRef = useRef(false);
   const [mobile, setMobile] = useState(() => matchesMobile());
   const [effectiveRatio, setEffectiveRatio] = useState(workspaceRatio.value);
+  const [effectiveBounds, setEffectiveBounds] = useState<WorkspaceRatioBounds>({
+    min: WORKSPACE_RATIO_MIN,
+    max: WORKSPACE_RATIO_MAX,
+  });
   const [drag, setDrag] = useState<{ source: DragSource; candidate: WorkspacePlacement } | null>(null);
   const [layoutAnnouncement, setLayoutAnnouncement] = useState({ text: "", token: 0 });
   const placement = workspacePlacement.value;
@@ -41,6 +47,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     chatHandle: "チャット欄をドラッグして配置を変更",
     handleTitle: "端へドラッグ、またはAlt＋矢印キーで配置",
     placed: (position: string) => `チャットを${position}へ配置しました。`,
+    dropZone: (source: DragSource, edge: string) => `${source === "office" ? "オフィス" : "チャット"}: ${edge}`,
   } : {
     separator: (position: string) => `Resize office and chat (chat is ${position})`,
     dockGroup: "Change pane placement",
@@ -48,6 +55,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     chatHandle: "Drag the chat pane to change placement",
     handleTitle: "Drag to an edge, or use Alt+Arrow keys",
     placed: (position: string) => `Chat placed on the ${position}.`,
+    dropZone: (source: DragSource, edge: string) => `${source === "office" ? "Office" : "Chat"}: ${edge}`,
   };
 
   useEffect(() => {
@@ -70,6 +78,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     const update = () => {
       if (resizingRef.current) return;
       const rect = element.getBoundingClientRect();
+      setEffectiveBounds(workspaceRatioBounds(placement, rect.width, rect.height));
       setEffectiveRatio(clampWorkspaceRatio(ratioRef.current, placement, rect.width, rect.height));
     };
     update();
@@ -81,6 +90,9 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   useEffect(() => {
     if (resizingRef.current) return;
     const rect = host.current?.getBoundingClientRect();
+    setEffectiveBounds(rect
+      ? workspaceRatioBounds(placement, rect.width, rect.height)
+      : { min: WORKSPACE_RATIO_MIN, max: WORKSPACE_RATIO_MAX });
     setEffectiveRatio(rect
       ? clampWorkspaceRatio(preferredRatio, placement, rect.width, rect.height)
       : preferredRatio);
@@ -123,6 +135,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
       : placement === "top" ? (event.clientY - rect.top) / rect.height
       : (rect.bottom - event.clientY) / rect.height;
     const next = clampWorkspaceRatio(raw, placement, rect.width, rect.height);
+    setEffectiveBounds(workspaceRatioBounds(placement, rect.width, rect.height));
     resizingRef.current = true;
     setEffectiveRatio(next);
     workspaceRatio.value = next;
@@ -130,8 +143,8 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   const resizeWithKeyboard = (event: KeyboardEvent) => {
     if (mobile || !hasChats) return;
     let next: number | undefined;
-    if (event.key === "Home") next = WORKSPACE_RATIO_MIN;
-    if (event.key === "End") next = WORKSPACE_RATIO_MAX;
+    if (event.key === "Home") next = effectiveBounds.min;
+    if (event.key === "End") next = effectiveBounds.max;
     const growsWithKey = placement === "left" ? "ArrowRight"
       : placement === "right" ? "ArrowLeft"
       : placement === "top" ? "ArrowDown" : "ArrowUp";
@@ -143,7 +156,9 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     if (next === undefined) return;
     event.preventDefault();
     const rect = host.current?.getBoundingClientRect();
-    const clamped = rect ? clampWorkspaceRatio(next, placement, rect.width, rect.height) : next;
+    const clamped = rect
+      ? clampWorkspaceRatio(next, placement, rect.width, rect.height)
+      : Math.min(effectiveBounds.max, Math.max(effectiveBounds.min, next));
     setEffectiveRatio(clamped);
     setWorkspaceRatio(clamped);
   };
@@ -170,8 +185,8 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
           tabIndex={0}
           aria-label={copy.separator(placementName)}
           aria-orientation={placement === "left" || placement === "right" ? "vertical" : "horizontal"}
-          aria-valuemin={Math.round(WORKSPACE_RATIO_MIN * 100)}
-          aria-valuemax={Math.round(WORKSPACE_RATIO_MAX * 100)}
+          aria-valuemin={Math.round(effectiveBounds.min * 100)}
+          aria-valuemax={Math.round(effectiveBounds.max * 100)}
           aria-valuenow={Math.round(effectiveRatio * 100)}
           aria-keyshortcuts="ArrowUp ArrowRight ArrowDown ArrowLeft Home End"
           onPointerDown={(event) => { if (event.button === 0) event.currentTarget.setPointerCapture(event.pointerId); }}
@@ -226,7 +241,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
         <div class="workspace-drop-zones" aria-hidden="true">
           {workspacePlacements.map((edge) => (
             <span key={edge} data-edge={edge} class={drag.candidate === chatPlacementForEdge(drag.source, edge) ? "is-target" : ""}>
-              {labelForPlacement(chatPlacementForEdge(drag.source, edge), isJapanese)}
+              {copy.dropZone(drag.source, labelForPlacement(edge, isJapanese))}
             </span>
           ))}
         </div>

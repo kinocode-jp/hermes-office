@@ -4,6 +4,7 @@ export const WORKSPACE_LAYOUT_STORAGE_KEY = "hermes-office:workspace-layout:v1";
 export const WORKSPACE_LAYOUT_VERSION = 1;
 export const WORKSPACE_RATIO_MIN = 0.18;
 export const WORKSPACE_RATIO_MAX = 0.72;
+export const WORKSPACE_SEPARATOR_SIZE = 30;
 
 export const workspacePlacements = ["top", "right", "bottom", "left"] as const;
 export type WorkspacePlacement = (typeof workspacePlacements)[number];
@@ -13,6 +14,8 @@ export type WorkspaceLayoutPreferences = {
   placement: WorkspacePlacement;
   ratio: number;
 };
+
+export type WorkspaceRatioBounds = { min: number; max: number };
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -90,10 +93,32 @@ export function clampWorkspaceRatio(
   height: number,
   minimumPaneSize = 240,
 ): number {
+  const bounds = workspaceRatioBounds(placement, width, height, minimumPaneSize);
+  return Math.min(bounds.max, Math.max(bounds.min, clampRatio(ratio)));
+}
+
+export function workspaceRatioBounds(
+  placement: WorkspacePlacement,
+  width: number,
+  height: number,
+  minimumPaneSize = 240,
+  separatorSize = WORKSPACE_SEPARATOR_SIZE,
+): WorkspaceRatioBounds {
   const available = placement === "left" || placement === "right" ? width : height;
-  if (!Number.isFinite(available) || available <= 0) return clampRatio(ratio);
-  const minimum = Math.min(0.5, minimumPaneSize / available);
-  return Math.min(Math.max(clampRatio(ratio), Math.max(WORKSPACE_RATIO_MIN, minimum)), Math.min(WORKSPACE_RATIO_MAX, 1 - minimum));
+  if (!Number.isFinite(available) || available <= 0) {
+    return { min: WORKSPACE_RATIO_MIN, max: WORKSPACE_RATIO_MAX };
+  }
+  const paneMinimum = Number.isFinite(minimumPaneSize) && minimumPaneSize >= 0 ? minimumPaneSize : 240;
+  const separator = Number.isFinite(separatorSize) && separatorSize >= 0 ? separatorSize : WORKSPACE_SEPARATOR_SIZE;
+  const minimum = paneMinimum / available;
+  const maximum = (available - separator - paneMinimum) / available;
+  const boundedMinimum = Math.max(WORKSPACE_RATIO_MIN, minimum);
+  const boundedMaximum = Math.min(WORKSPACE_RATIO_MAX, maximum);
+  if (boundedMinimum > boundedMaximum) {
+    const balanced = Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, (available - separator) / (2 * available)));
+    return { min: balanced, max: balanced };
+  }
+  return { min: boundedMinimum, max: boundedMaximum };
 }
 
 export function oppositePlacement(placement: WorkspacePlacement): WorkspacePlacement {

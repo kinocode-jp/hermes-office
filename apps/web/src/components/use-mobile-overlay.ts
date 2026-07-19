@@ -19,6 +19,8 @@ type MobileOverlayOptions = {
   viewport?: string;
 };
 
+type MobileOverlayKind = MobileOverlayOptions["kind"];
+
 export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, viewport = PHONE_OVERLAY_VIEWPORT }: MobileOverlayOptions) {
   const [overlayElement, setOverlayElement] = useState<T | null>(null);
   const ref = useCallback((element: T | null) => setOverlayElement(element), []);
@@ -43,13 +45,7 @@ export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, v
     const unregisterModal = kind === "modal" ? registerModal(overlay) : undefined;
     const overlayRoot = overlay.closest<HTMLElement>(".profile-panel, .workspace-drawer") ?? overlay;
     const appShell = overlayRoot.closest<HTMLElement>(".app-shell");
-    const background = kind === "route" && appShell
-      ? [...appShell.children].filter((element): element is HTMLElement => (
-        element instanceof HTMLElement
-        && element !== overlayRoot
-        && (kind !== "route" || !element.hasAttribute("data-mobile-route-chrome"))
-      ))
-      : [];
+    const background = appShell ? mobileOverlayBackgroundElements(overlayRoot, appShell, kind) : [];
     const releaseBackground = lockBackgroundElements(background);
 
     let disposed = false;
@@ -102,6 +98,26 @@ export function useMobileOverlay<T extends HTMLElement>({ kind, open, onClose, v
   }, [active, kind, overlayElement]);
 
   return { ref, active };
+}
+
+export function mobileOverlayBackgroundElements(
+  overlayRoot: HTMLElement,
+  appShell: HTMLElement,
+  kind: MobileOverlayKind,
+): HTMLElement[] {
+  const background: HTMLElement[] = [];
+  let overlayBranch = overlayRoot;
+  while (overlayBranch !== appShell) {
+    const parent = overlayBranch.parentElement;
+    if (!parent) return [];
+    for (const sibling of parent.children) {
+      if (!(sibling instanceof HTMLElement) || sibling === overlayBranch) continue;
+      if (parent === appShell && kind === "route" && sibling.hasAttribute("data-mobile-route-chrome")) continue;
+      background.push(sibling);
+    }
+    overlayBranch = parent;
+  }
+  return background;
 }
 
 function matchesViewport(viewport: string): boolean {

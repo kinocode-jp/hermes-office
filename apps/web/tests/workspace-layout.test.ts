@@ -10,6 +10,7 @@ import {
   persistWorkspaceLayout,
   readWorkspaceLayout,
   resetWorkspaceLayout,
+  workspaceRatioBounds,
   workspacePlacement,
   workspaceRatio,
 } from "../src/workspace-layout.ts";
@@ -29,6 +30,9 @@ test("workspace layout accepts only its exact versioned schema", () => {
 });
 
 test("workspace ratio respects both global limits and available pane size", () => {
+  assert.deepEqual(workspaceRatioBounds("left", 1000, 700), { min: 0.24, max: 0.72 });
+  assert.deepEqual(workspaceRatioBounds("bottom", 1000, 600), { min: 0.4, max: 0.55 });
+  assert.deepEqual(workspaceRatioBounds("bottom", 1000, 400), { min: 0.4625, max: 0.4625 });
   assert.equal(clampWorkspaceRatio(0.1, "left", 1000, 700), 0.24);
   assert.equal(clampWorkspaceRatio(0.9, "right", 1000, 700), 0.72);
   assert.equal(clampWorkspaceRatio(0.2, "bottom", 1000, 600), 0.4);
@@ -84,6 +88,11 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(component, /onPointerMove=/);
   assert.match(component, /event\.key === "Home"/);
   assert.match(component, /event\.key === "End"/);
+  assert.match(component, /event\.key === "Home"\) next = effectiveBounds\.min/);
+  assert.match(component, /event\.key === "End"\) next = effectiveBounds\.max/);
+  assert.match(component, /aria-valuemin=\{Math\.round\(effectiveBounds\.min \* 100\)\}/);
+  assert.match(component, /aria-valuemax=\{Math\.round\(effectiveBounds\.max \* 100\)\}/);
+  assert.match(component, /setEffectiveBounds\(workspaceRatioBounds\(placement, rect\.width, rect\.height\)\)/);
   assert.match(component, /event\.altKey.*event\.ctrlKey/);
   assert.match(component, /locale\.value === "ja"/);
   assert.match(component, /Chat placed on the/);
@@ -91,6 +100,8 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(component, /aria-live="polite"/);
   assert.match(component, /workspace-drop-zones/);
   assert.match(component, /source === "chat" \? edge : oppositePlacement\(edge\)/);
+  assert.match(component, /dropZone: \(source: DragSource, edge: string\).*オフィス.*チャット/);
+  assert.match(component, /copy\.dropZone\(drag\.source, labelForPlacement\(edge, isJapanese\)\)/);
   assert.equal(component.match(/hasPointerCapture\(event\.pointerId\)/g)?.length, 4, "release and resize paths check capture state");
   assert.equal(component.match(/releasePointerCapture\(event\.pointerId\)/g)?.length, 3, "release is used only in guarded completion paths");
   assert.match(component, /const ratioRef = useRef/);
@@ -98,6 +109,8 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.doesNotMatch(component, /new ResizeObserver\(update\)[\s\S]*?\}, \[placement, workspaceRatio\.value\]\);/);
   assert.match(styles, /\.workspace-dock-controls \{[^}]*grid-area: separator[^}]*pointer-events: none/);
   assert.match(styles, /\.workspace-dock-controls > button \{ pointer-events: auto; \}/);
+  assert.match(styles, /"separator" 30px/);
+  assert.match(styles, /\.workspace-dock-handle \{[^}]*width: 28px[^}]*height: 28px/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.workspace-layout-host\[data-workspace-placement\][^{]*\{ display: block/);
   assert.match(styles, /\.workspace-drawer \{ position: fixed; inset: calc\(52px/);
   assert.match(settings, /aria-live="polite"/);

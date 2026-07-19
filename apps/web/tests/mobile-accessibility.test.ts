@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ChatSession } from "../src/domain.ts";
 import { createProfileSession } from "../src/components/profile-panel.tsx";
 import { mobileChatTabPresentation } from "../src/components/chat-workspace.tsx";
+import { mobileOverlayBackgroundElements } from "../src/components/use-mobile-overlay.ts";
 import { locale, preferredBrowserLocale, setLocale } from "../src/i18n.ts";
 import {
   activeSurface,
@@ -217,11 +218,61 @@ test("mobile route and modal overlays expose consistent focus, inert, and naviga
   assert.match(profile, /role=\{mobileOverlay\.active \? "dialog" : undefined\}/);
   assert.match(profile, /aria-modal=\{mobileOverlay\.active \? "true" : undefined\}/);
   for (const source of [workspace, profile]) assert.match(source, /data-mobile-overlay-initial-focus/);
-  assert.match(overlay, /kind !== "route" \|\| !element\.hasAttribute\("data-mobile-route-chrome"\)/);
+  assert.match(overlay, /mobileOverlayBackgroundElements\(overlayRoot, appShell, kind\)/);
+  assert.match(overlay, /while \(overlayBranch !== appShell\)/);
+  assert.match(overlay, /parent === appShell && kind === "route"/);
   assert.match(overlay, /lockBackgroundElements\(background\)/);
   assert.match(overlay, /event\.key === "Escape"/);
   assert.match(overlay, /kind !== "modal" \|\| event\.key !== "Tab"/);
   assert.match(overlay, /canRestoreModalFocus\(previousFocus\)/);
+});
+
+test("nested mobile workspace locks every sibling branch without inerting its own ancestors", () => {
+  const previousHTMLElement = globalThis.HTMLElement;
+  class FakeElement {
+    parentElement: FakeElement | null;
+    children: FakeElement[] = [];
+    private attributes = new Set<string>();
+    constructor(readonly name: string, parent: FakeElement | null = null) {
+      this.parentElement = parent;
+      parent?.children.push(this);
+    }
+    hasAttribute(name: string): boolean { return this.attributes.has(name); }
+    mark(name: string): this { this.attributes.add(name); return this; }
+  }
+  Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: FakeElement });
+  try {
+    const shell = new FakeElement("shell");
+    const topbar = new FakeElement("topbar", shell).mark("data-mobile-route-chrome");
+    const rail = new FakeElement("rail", shell).mark("data-mobile-route-chrome");
+    const host = new FakeElement("workspace-host", shell);
+    const profile = new FakeElement("profile", shell);
+    new FakeElement("surface", host);
+    new FakeElement("separator", host);
+    new FakeElement("dock-controls", host);
+    const chatBranch = new FakeElement("chat-branch", host);
+    new FakeElement("live-region", host);
+    const drawer = new FakeElement("drawer", chatBranch);
+
+    const routeBackground = mobileOverlayBackgroundElements(
+      drawer as unknown as HTMLElement,
+      shell as unknown as HTMLElement,
+      "route",
+    ) as unknown as FakeElement[];
+    assert.deepEqual(routeBackground.map(({ name }) => name), ["surface", "separator", "dock-controls", "live-region", "profile"]);
+    for (const activeBranch of [drawer, chatBranch, host, topbar, rail]) {
+      assert.equal(routeBackground.includes(activeBranch), false, `${activeBranch.name} must remain outside the inert set`);
+    }
+
+    const modalBackground = mobileOverlayBackgroundElements(
+      profile as unknown as HTMLElement,
+      shell as unknown as HTMLElement,
+      "modal",
+    ) as unknown as FakeElement[];
+    assert.deepEqual(modalBackground.map(({ name }) => name), ["topbar", "rail", "workspace-host"]);
+  } finally {
+    Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: previousHTMLElement });
+  }
 });
 
 test("first-run locale follows the browser and login exposes an unauthenticated language switch", async () => {
