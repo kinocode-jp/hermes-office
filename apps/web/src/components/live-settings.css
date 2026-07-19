@@ -193,3 +193,38 @@
 .settings-sync-notice { grid-column: 1 / -1; }
 .settings-sync-failures { grid-column: 1 / -1; display: grid; gap: 5px; }
 .settings-sync-failures small { overflow-wrap: anywhere; color: var(--ls-muted); font: 600 var(--ls-text-sm)/1.3 ui-monospace, monospace; }
+
+@container workspace-surface (max-width: 620px) {
+  .live-settings { padding: 12px; }
+  .live-settings__mast { display: grid; align-items: start; gap: 10px; }
+  .live-settings__mast h1 { font-size: clamp(calc(25px * var(--font-scale)), 10cqi, calc(34px * var(--font-scale))); }
+  .live-settings__target { min-width: 0; text-align: left; }
+  .live-settings__tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-settings__tabs button:nth-child(2) { border-right: 0; }
+  .live-settings__tabs button:nth-child(-n + 2) { border-bottom: 1px solid var(--ls-line); }
+  .live-settings__notice { grid-template-columns: minmax(0, 1fr) auto; }
+  .live-settings__notice > span { grid-column: 1 / -1; }
+  .live-settings__grid { grid-template-columns: minmax(0, 1fr); }
+  .inheritance-bus { display: none; }
+  .settings-ledger,
+  .settings-ledger--wide { grid-column: 1; }
+  .settings-toolbar { grid-template-columns: minmax(0, 1fr); }
+  .skill-switchboard { grid-template-columns: minmax(0, 1fr); }
+  .live-settings__memory { grid-template-columns: minmax(0, 1fr); }
+  .live-settings__memory .settings-ledger--wide { grid-column: 1; }
+  .settings-actions { align-items: stretch; flex-wrap: wrap; }
+}
+
+@container workspace-surface (max-width: 440px) {
+  .live-settings__tabs { grid-template-columns: minmax(0, 1fr); }
+  .live-settings__tabs button { border-right: 0; border-bottom: 1px solid var(--ls-line); }
+  .live-settings__tabs button:last-child { border-bottom: 0; }
+  .live-settings__notice { grid-template-columns: minmax(0, 1fr); }
+  .live-settings__notice button { justify-self: start; }
+  .settings-ledger { padding: 12px; }
+  .settings-section-head { grid-template-columns: minmax(0, 1fr) auto; }
+  .settings-section-head > span { grid-column: 1 / -1; }
+  .provider-fields { grid-template-columns: minmax(0, 1fr); }
+  .skill-line { grid-template-columns: 8px minmax(0, 1fr) 46px; }
+  .skill-line small { display: none; }
+}

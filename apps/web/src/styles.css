@@ -212,7 +212,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-layout-host[data-workspace-placement="left"] { grid-template: "workspace separator surface" minmax(0, 1fr) / minmax(0, var(--workspace-ratio)) 30px minmax(0, 1fr); }
 .workspace-layout-host[data-workspace-placement="right"] { grid-template: "surface separator workspace" minmax(0, 1fr) / minmax(0, 1fr) 30px minmax(0, var(--workspace-ratio)); }
 .workspace-layout-host.is-empty { grid-template: "surface" minmax(0, 1fr) "workspace" 44px / minmax(0, 1fr); }
-.workspace-layout-surface { grid-area: surface; min-width: 0; min-height: 0; overflow: hidden; }
+.workspace-layout-surface { grid-area: surface; min-width: 0; min-height: 0; overflow: hidden; container-type: inline-size; container-name: workspace-surface; }
 .workspace-layout-chat { grid-area: workspace; min-width: 0; min-height: 0; overflow: hidden; }
 .workspace-drawer { width: 100%; height: 100%; min-width: 0; min-height: 0; border-top: 1px solid var(--line); background: #0c1421; }
 .workspace-layout-host[data-workspace-placement="left"] .workspace-drawer,
@@ -390,6 +390,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .control-card { min-height: 220px; padding: 18px; border: 1px solid var(--line); background: rgba(27,43,67,.58); box-shadow: 0 12px 34px rgba(0,0,0,.16); }
 .control-card.wide-card { grid-column: span 2; min-height: 180px; }
 .control-card h2 { margin: 7px 0 16px; font-size: 18px; }
+
+@container workspace-surface (max-width: 620px) {
+  .control-grid { grid-template-columns: minmax(0, 1fr); }
+  .control-card.wide-card { grid-column: span 1; }
+  .page-title-row { align-items: flex-start; flex-wrap: wrap; }
+  .kanban-page { overflow-x: auto; }
+}
 .card-kicker { color: var(--aqua); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .12em; }
 .editable-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
 .editable-tags button, .tag-list.editable button { padding: 7px 9px; border: 1px solid rgba(85,214,190,.25); color: var(--paper); background: rgba(85,214,190,.08); cursor: pointer; }

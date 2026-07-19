@@ -173,3 +173,20 @@
   .access-audit__current { grid-row: 2; }
   .access-audit__gate > button { grid-column: 1 / -1; width: 100%; min-height: var(--target-mobile); }
 }
+
+@container workspace-surface (max-width: 620px) {
+  .access-audit { margin: 12px 0 18px; border-radius: 14px; }
+  .access-audit__gate { grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; padding: 14px; }
+  .access-audit__current { grid-column: 1 / -1; grid-row: 2; padding: 10px 0 0; border-top: 1px solid rgba(255, 255, 255, 0.08); border-left: 0; }
+  .access-audit__rail-head { display: none; }
+  .access-audit__rail li { grid-template-columns: minmax(115px, 1fr) auto; gap: 5px 10px; padding: 10px 14px; }
+  .access-audit__rail li > :nth-child(3) { color: var(--ls-muted); font-size: calc(0.72rem * var(--font-scale)); }
+  .access-audit__outcome { justify-self: end; }
+  .access-audit__message { flex-direction: column; gap: 5px; }
+}
+
+@container workspace-surface (max-width: 440px) {
+  .access-audit__gate { grid-template-columns: auto minmax(0, 1fr); }
+  .access-audit__current { grid-row: 2; }
+  .access-audit__gate > button { grid-column: 1 / -1; width: 100%; min-height: var(--target-mobile); }
+}

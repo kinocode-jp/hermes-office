@@ -30,11 +30,12 @@ test("workspace layout accepts only its exact versioned schema", () => {
 });
 
 test("workspace ratio respects both global limits and available pane size", () => {
-  assert.deepEqual(workspaceRatioBounds("left", 1000, 700), { min: 0.24, max: 0.72 });
+  assert.deepEqual(workspaceRatioBounds("left", 1000, 700), { min: 0.28, max: 0.57 });
+  assert.deepEqual(workspaceRatioBounds("right", 1000, 700, { main: 420, chat: 300 }), { min: 0.3, max: 0.55 });
   assert.deepEqual(workspaceRatioBounds("bottom", 1000, 600), { min: 0.4, max: 0.55 });
   assert.deepEqual(workspaceRatioBounds("bottom", 1000, 400), { min: 0.4625, max: 0.4625 });
-  assert.equal(clampWorkspaceRatio(0.1, "left", 1000, 700), 0.24);
-  assert.equal(clampWorkspaceRatio(0.9, "right", 1000, 700), 0.72);
+  assert.equal(clampWorkspaceRatio(0.1, "left", 1000, 700), 0.28);
+  assert.equal(clampWorkspaceRatio(0.9, "right", 1000, 700), 0.57);
   assert.equal(clampWorkspaceRatio(0.2, "bottom", 1000, 600), 0.4);
   assert.equal(oppositePlacement("top"), "bottom");
   assert.equal(oppositePlacement("left"), "right");
@@ -70,10 +71,13 @@ test("workspace preferences persist, reset, and fail safely when storage is bloc
 });
 
 test("workspace interaction contract keeps mobile fixed and exposes pointer plus keyboard controls", async () => {
-  const [component, styles, settings] = await Promise.all([
+  const [component, styles, settings, officeStyles, liveSettingsStyles, auditStyles] = await Promise.all([
     readFile(new URL("../src/components/workspace-layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
     readFile(new URL("../src/components/appearance-settings.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/office-scene.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/live-settings.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8"),
   ]);
   assert.match(component, /role="separator"/);
   const separatorStart = component.indexOf('class="workspace-separator"');
@@ -121,6 +125,14 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(styles, /\.workspace-dock-controls > button \{ pointer-events: auto; \}/);
   assert.match(styles, /"separator" 30px/);
   assert.match(styles, /\.workspace-dock-handle \{[^}]*width: 28px[^}]*height: 28px/);
+  assert.match(styles, /\.workspace-layout-surface \{[^}]*container-type: inline-size[^}]*container-name: workspace-surface/);
+  assert.match(styles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.control-grid \{ grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(officeStyles, /@container workspace-surface \(max-width: 520px\)[\s\S]*\.office-heading \{[^}]*flex-wrap: wrap/);
+  assert.match(officeStyles, /@container workspace-surface \(max-width: 400px\)[\s\S]*\.office-toolbar \{[^}]*grid-template-columns/);
+  assert.match(officeStyles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-list \{ display: grid; \}/);
+  assert.match(liveSettingsStyles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.live-settings__grid \{ grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(liveSettingsStyles, /@container workspace-surface \(max-width: 440px\)[\s\S]*\.provider-fields \{ grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(auditStyles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.access-audit__rail li \{ grid-template-columns/);
   assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.workspace-layout-host\[data-workspace-placement\][^{]*\{ display: block/);
   assert.match(styles, /\.workspace-drawer \{ position: fixed; inset: calc\(52px/);
   assert.match(settings, /aria-live="polite"/);

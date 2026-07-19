@@ -16,6 +16,10 @@ export type WorkspaceLayoutPreferences = {
 };
 
 export type WorkspaceRatioBounds = { min: number; max: number };
+export type WorkspacePaneMinimums = { main: number; chat: number };
+
+export const WORKSPACE_HORIZONTAL_MINIMUMS: WorkspacePaneMinimums = { main: 400, chat: 280 };
+export const WORKSPACE_VERTICAL_MINIMUMS: WorkspacePaneMinimums = { main: 240, chat: 240 };
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -91,9 +95,9 @@ export function clampWorkspaceRatio(
   placement: WorkspacePlacement,
   width: number,
   height: number,
-  minimumPaneSize = 240,
+  minimums: WorkspacePaneMinimums = defaultPaneMinimums(placement),
 ): number {
-  const bounds = workspaceRatioBounds(placement, width, height, minimumPaneSize);
+  const bounds = workspaceRatioBounds(placement, width, height, minimums);
   return Math.min(bounds.max, Math.max(bounds.min, clampRatio(ratio)));
 }
 
@@ -101,17 +105,19 @@ export function workspaceRatioBounds(
   placement: WorkspacePlacement,
   width: number,
   height: number,
-  minimumPaneSize = 240,
+  minimums: WorkspacePaneMinimums = defaultPaneMinimums(placement),
   separatorSize = WORKSPACE_SEPARATOR_SIZE,
 ): WorkspaceRatioBounds {
   const available = placement === "left" || placement === "right" ? width : height;
   if (!Number.isFinite(available) || available <= 0) {
     return { min: WORKSPACE_RATIO_MIN, max: WORKSPACE_RATIO_MAX };
   }
-  const paneMinimum = Number.isFinite(minimumPaneSize) && minimumPaneSize >= 0 ? minimumPaneSize : 240;
+  const defaults = defaultPaneMinimums(placement);
+  const mainMinimum = validMinimum(minimums.main, defaults.main);
+  const chatMinimum = validMinimum(minimums.chat, defaults.chat);
   const separator = Number.isFinite(separatorSize) && separatorSize >= 0 ? separatorSize : WORKSPACE_SEPARATOR_SIZE;
-  const minimum = paneMinimum / available;
-  const maximum = (available - separator - paneMinimum) / available;
+  const minimum = chatMinimum / available;
+  const maximum = (available - separator - mainMinimum) / available;
   const boundedMinimum = Math.max(WORKSPACE_RATIO_MIN, minimum);
   const boundedMaximum = Math.min(WORKSPACE_RATIO_MAX, maximum);
   if (boundedMinimum > boundedMaximum) {
@@ -119,6 +125,16 @@ export function workspaceRatioBounds(
     return { min: balanced, max: balanced };
   }
   return { min: boundedMinimum, max: boundedMaximum };
+}
+
+function defaultPaneMinimums(placement: WorkspacePlacement): WorkspacePaneMinimums {
+  return placement === "left" || placement === "right"
+    ? WORKSPACE_HORIZONTAL_MINIMUMS
+    : WORKSPACE_VERTICAL_MINIMUMS;
+}
+
+function validMinimum(value: number, fallback: number): number {
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 export function oppositePlacement(placement: WorkspacePlacement): WorkspacePlacement {
