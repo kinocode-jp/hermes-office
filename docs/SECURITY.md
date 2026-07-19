@@ -160,6 +160,81 @@ list of registered devices, and it lets the owner revoke a device.
 The panel never displays the enrollment token, device credential digests, or
 cookies.
 
+When the desktop shell finds an existing listener with the compatible health
+contract and expected Hermes Office HTML shape, those public checks establish
+only a candidate and do not authenticate its identity. The shell keeps its
+window open on a fixed notice; it neither navigates to the listener nor opens a
+system browser. The operator must first verify that the process owning port 4317
+is their Hermes Office and only then manually open the fixed loopback URL in a
+normal browser. If the owner is unknown, the URL must not be opened; the process
+should be inspected or stopped through its normal management procedure. A
+manually opened browser page does not use Tauri IPC, including when the existing
+server carries an older protocol-v1 web bundle, so the
+ephemeral desktop capability is unavailable and the host administration panel is
+not rendered. The external server is not spawned, stopped, or killed by the
+launcher. The desktop app is optional and is not needed on remote clients.
+Automatic creation of the configured `main` window is disabled. The launcher
+creates no native window, WebView, or normal app bundle until classification has
+completed. It loads the normal app URL only after an owned child passes its
+capability-keyed HMAC readiness check. For every candidate or error, it creates the
+window with the fixed self-contained `data:` notice as the initial URL; there is
+no earlier bundle load or navigation that could contact the listener.
+
+The owned-child readiness check is a challenge-response protocol; it is not an
+authenticated request that transmits the desktop capability. Every probe uses a
+fresh OS-CSPRNG 32-byte nonce. The request contains only the nonce and fixed
+domain/version fields. `/api/v1/health/desktop-proof` exists only when a desktop
+capability was configured, accepts only strict bodyless GET requests from a
+direct loopback peer with no Origin or forwarding headers, and returns a bounded,
+`no-store` JSON HMAC-SHA256 proof. The capability is the HMAC key and is never
+included in the request or response. The launcher validates status, content type,
+schema, lowercase proof encoding, domain-separated HMAC, and the still-running
+owned child before creating its WebView. A listener that races to acquire the
+port can observe a nonce but cannot forge the proof or obtain the capability.
+This endpoint does not create a session and does not authorize any mutation.
+After startup, each WebView capability request repeats a fresh proof and checks
+the owned child both before and after it. These bounded process and TCP checks
+run through an asynchronous Tauri command on a blocking worker rather than the
+IPC/UI executor. Gate acquisition, both child-state checks, and the TCP proof
+share one 750 ms absolute deadline. The gate uses bounded `try_lock` polling, so
+parallel sends cannot wait indefinitely, starve the monitor, or accumulate
+unbounded blocking-worker occupancy; an expired queue wait is a transient
+failure for that send. The web transport keeps no capability cache and repeats
+that IPC check immediately before every HTTP request and WebSocket connection.
+Independently, a 250 ms native monitor repeats the proof. A confirmed child exit,
+wrong HMAC, oversized response, malformed response, or strict-contract failure
+clears the capability first and then closes the main window. Permanent
+invalidation runs in the blocking worker or native monitor and recovers a
+poisoned capability-state lock; only after that clear completes may the async
+command close the window, so the IPC/UI executor never blocks on state clearing.
+A timeout,
+connection failure, or I/O error returns no capability for the affected send but
+does not permanently invalidate native state unless it occurs in three
+consecutive monitor checks; any valid proof resets that counter. An unowned
+replacement listener is never stopped or killed.
+
+The proof TCP connection and the following browser-managed request are distinct:
+there is no atomic channel binding across Tauri IPC and WebView networking. A
+malicious local process that rebinds port 4317 in the narrow interval after a
+successful per-send proof and before that browser request could observe that
+single capability use. The repeated proof, cache removal, and monitor sharply
+bound exposure after listener replacement but do not eliminate this residual
+local-host scheduling race. Treat mutually untrusted local processes as outside
+the optional desktop bridge's threat model and use normal browser/device
+authentication for that environment.
+
+If that listener does not serve the Web UI or a bounded probe times out, the
+desktop window displays a fixed,
+self-contained recovery notice instead of crashing. The notice contains no
+server-supplied content, scripts, external resources, or secrets and does not
+stop or replace the existing process. Recovery instructions are fixed per
+failure kind: port owner and normal-close checks for an unrelated listener;
+update or normal restart and log checks for compatibility and probe failures;
+combined development or built web assets only when the Web UI is unavailable;
+and identity/owner verification before manual loopback opening for a candidate.
+Owned-server runtime, resource, child-launch, readiness, and internal-state
+failures also have separate fixed instructions.
+
 Changing remote access requires editing `HERMES_OFFICE_REMOTE_TOKEN`,
 `HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`, and
 restarting Office; no in-browser toggle, scheduler, or Tailscale automation

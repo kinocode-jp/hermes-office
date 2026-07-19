@@ -104,10 +104,79 @@ The exact upstream research and known compatibility uncertainties are in
 ### Desktop shell
 
 `apps/desktop` is a small Tauri 2 wrapper. Production builds bundle the generated
-Office Server module and web assets. At launch, the shell generates a random
-capability, starts Office Server on loopback, and makes that capability available
-to its WebView through Tauri IPC. Development uses an explicit fixed local-only
-capability from the Tauri development command.
+Office Server module and web assets. At launch, the desktop shell probes the
+configured loopback port. If the port is free, release and development launches
+both generate a launch-scoped random desktop capability, start an owned Office
+Server child, verify its health and a capability-keyed proof, and stop only that child on exit.
+The capability is available to the WebView only through a fresh asynchronous
+Tauri IPC call. Its bounded TCP and process checks run on a blocking worker, not
+the IPC/UI executor. Concurrent checks use a short polling gate whose wait,
+child-state checks, and TCP proof share one 750 ms absolute deadline; an expired
+queue wait fails only that check instead of blocking a worker indefinitely. The
+shell repeats the nonce-bound proof and owned-child liveness check before each
+release, and the web client does not cache the capability in its transport
+module or Office session. A 250 ms native monitor
+performs the same fresh proof. Child exit or a complete response with a wrong
+HMAC or invalid strict contract clears the native capability immediately before
+closing the main window. Invalid-state clearing runs on the worker/monitor,
+recovers a poisoned capability lock, and must complete before the asynchronous
+command closes the window; the IPC/UI executor never waits on that mutex.
+Timeout, connection, and I/O failures return no
+capability for that send but require three consecutive monitor failures before
+permanent invalidation; a valid proof resets the count. This also detects a
+development watch parent that remains alive after its actual port listener
+exits, while tolerating one short event-loop stall. Replacement listeners are
+never killed.
+
+Owned-child readiness never sends that capability to the listener. For each
+probe the launcher creates a new 32-byte OS-random nonce and sends only its
+lowercase hexadecimal encoding plus a fixed readiness domain and protocol
+version. The child returns an HMAC-SHA256 proof keyed by the launch-scoped
+capability. The launcher checks the bounded response and proof in constant time,
+then confirms that the owned child is still alive. This authenticates the child
+across the unavoidable port-bind/startup race without revealing the WebView
+authentication credential to a process that wins that race.
+
+The HMAC proof connection and a subsequent WebView HTTP or WebSocket connection
+cannot be made atomic by the browser networking boundary. A process that
+rebinds the fixed port in the very small interval after the immediate proof but
+before the browser send could still observe that one capability use. The
+per-send proof, absence of a long-lived web cache, and independent monitor bound
+this residual local-host race; they do not provide TCP channel binding. Deployments
+whose local users or processes are outside the trust boundary should use the web
+surface without the optional desktop capability bridge.
+
+The configured `main` window has automatic creation disabled. No native window,
+WebView, or normal app bundle exists while listener classification and owned-child
+readiness are pending. After an owned child passes its capability-bound HMAC readiness
+check, the launcher explicitly creates `main` with the configured app URL and the
+rest of its configured title and size settings. Candidate and error paths instead
+create `main` with a fixed self-contained `data:` notice as its initial URL, so
+they never briefly load or navigate through the normal bundle or listener content.
+
+If a listener has a compatible protocol response and serves the expected Hermes
+Office Web UI shape from `/`, the optional desktop launcher does not generate a
+capability or start a child. Those public shape checks do not authenticate the
+listener. The launcher keeps its window open on a fixed notice and never
+automatically navigates to or opens the listener. The operator must first verify
+that the process owning port 4317 is their Hermes Office and only then manually
+open the fixed loopback URL in a normal browser. An unknown listener must not be
+opened and should be inspected or stopped through its normal management procedure.
+The launcher never stops or kills it. A manually opened older protocol-v1 web
+bundle remains usable without Tauri IPC; desktop-only host administration is
+unavailable. Remote clients require only a browser, not the desktop app.
+Incompatible, malformed, timing-out, or non-Hermes listeners fail closed. A
+self-contained startup notice remains in the desktop window when the existing
+server has no Web UI or a probe times out. Its fixed recovery steps are
+cause-specific:
+listener ownership, compatibility/update, response/log/restart, Web UI assets,
+or owner verification and manual browser opening as appropriate. Failures while
+starting an owned
+server distinguish managed runtime, bundled resources, child launch, readiness,
+and internal state. These paths do not crash the shell and never stop, replace,
+or take ownership of an existing listener.
+The health-only `npm run dev:server` process is therefore not attachable unless
+the Web UI is also served from the same listener.
 
 Local builds are developer artifacts. A signed/notarized project release and
 release provenance pipeline do not exist yet; see [`RELEASING.md`](RELEASING.md).

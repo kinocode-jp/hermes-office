@@ -6,6 +6,7 @@ import {
   REMOTE_PROXY_CONFIGURATION_MESSAGE,
   authenticateRemoteDevice,
   connectOfficeApi,
+  officeFetchJson,
   openOfficeWebSocket,
   recoverOfficeWebSocketAuthentication,
   shouldRecoverOfficeWebSocket,
@@ -539,7 +540,13 @@ test("local bootstrap 5xx remains unavailable instead of requesting device login
 });
 
 test("desktop capability recovery remains cookie-free and does not call HTTP auth", async () => {
-  await withBrowserEnvironment({ protocol: "tauri:", hostname: "tauri.localhost", origin: "tauri://localhost", desktopCapability: "d".repeat(48) }, async () => {
+  let capabilityProofs = 0;
+  await withBrowserEnvironment({
+    protocol: "tauri:",
+    hostname: "tauri.localhost",
+    origin: "tauri://localhost",
+    desktopInvoke: async (command) => { capabilityProofs += 1; return command === "desktop_owned" ? true : "d".repeat(48); },
+  }, async () => {
     const originalFetch = globalThis.fetch;
     let fetches = 0;
     globalThis.fetch = (async () => { fetches += 1; throw new Error("Desktop auth must not use fetch"); }) as typeof fetch;
@@ -550,6 +557,133 @@ test("desktop capability recovery remains cookie-free and does not call HTTP aut
       const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
       assert.notEqual(recovered.authRevision, lease.authRevision);
       assert.equal(fetches, 0);
+      assert.equal(capabilityProofs, 4, "session bootstrap and each WebSocket send require fresh IPC proof");
+      const sockets = BareWebSocket.byPath("/api/v1/events");
+      assert.ok(sockets.length >= 1);
+      const protocols = sockets.at(-1)?.protocols;
+      assert.deepEqual(protocols, ["hermes-office.v1", `hermes-office.desktop.${"d".repeat(48)}`]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("desktop HTTP requests reacquire capability through IPC immediately before every send", async () => {
+  let capabilityProofs = 0;
+  await withBrowserEnvironment({
+    protocol: "tauri:",
+    hostname: "tauri.localhost",
+    origin: "tauri://localhost",
+    desktopInvoke: async (command) => { capabilityProofs += 1; return command === "desktop_owned" ? true : "h".repeat(48); },
+  }, async () => {
+    const originalFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = (async (_input, init) => {
+      fetches += 1;
+      assert.equal(new Headers(init?.headers).get("X-Hermes-Office-Desktop-Capability"), "h".repeat(48));
+      return jsonResponse({ ok: true });
+    }) as typeof fetch;
+    try {
+      const serverUrl = "http://127.0.0.1:4317/desktop-fresh-proof";
+      await officeFetchJson("/api/v1/health", {}, serverUrl);
+      await officeFetchJson("/api/v1/health", {}, serverUrl);
+      assert.equal(fetches, 2);
+      assert.equal(capabilityProofs, 3, "bootstrap probes once and neither HTTP send reuses its result");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("desktop HTTP send fails closed when the fresh IPC proof loses ownership", async () => {
+  let capabilityProofs = 0;
+  await withBrowserEnvironment({
+    protocol: "tauri:",
+    hostname: "tauri.localhost",
+    origin: "tauri://localhost",
+    desktopInvoke: async (command) => {
+      capabilityProofs += 1;
+      return command === "desktop_owned" ? true : null;
+    },
+  }, async () => {
+    const originalFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = (async () => { fetches += 1; return jsonResponse({ ok: true }); }) as typeof fetch;
+    try {
+      await assert.rejects(
+        officeFetchJson("/api/v1/health", {}, "http://127.0.0.1:4317/desktop-lost-owner"),
+        /lost its authenticated desktop server/,
+      );
+      assert.equal(capabilityProofs, 2);
+      assert.equal(fetches, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("desktop WebSocket send fails closed when the fresh IPC proof loses ownership", async () => {
+  let capabilityProofs = 0;
+  await withBrowserEnvironment({
+    protocol: "tauri:",
+    hostname: "tauri.localhost",
+    origin: "tauri://localhost",
+    desktopInvoke: async (command) => {
+      capabilityProofs += 1;
+      return command === "desktop_owned" ? true : null;
+    },
+  }, async () => {
+    await assert.rejects(
+      openOfficeWebSocket(
+        "ws://127.0.0.1:4317/api/v1/events",
+        "http://127.0.0.1:4317/desktop-lost-owner-websocket",
+      ),
+      /lost its authenticated desktop server/,
+    );
+    assert.equal(capabilityProofs, 2);
+    assert.equal(BareWebSocket.byPath("/api/v1/events").length, 0);
+  });
+});
+
+test("null desktop ownership in Tauri fails closed before HTTP auth or WebSocket creation", async () => {
+  await withBrowserEnvironment({ protocol: "tauri:", hostname: "tauri.localhost", origin: "tauri://localhost", desktopCapability: null }, async () => {
+    const originalFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = (async () => { fetches += 1; throw new Error("Tauri ownership loss must not use HTTP auth."); }) as typeof fetch;
+    try {
+      const serverUrl = "http://127.0.0.1:4317/attached-desktop";
+      await assert.rejects(
+        openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl),
+        /lost its authenticated desktop server/,
+      );
+      assert.equal(fetches, 0);
+      assert.equal(BareWebSocket.byPath("/api/v1/events").length, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("rejected desktop IPC outside the attach origin fails closed", async () => {
+  await withBrowserEnvironment({
+    protocol: "tauri:",
+    hostname: "tauri.localhost",
+    origin: "tauri://localhost",
+    desktopInvoke: async () => { throw new Error("IPC rejected"); },
+  }, async () => {
+    const originalFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      throw new Error("Desktop auth must not fall back to HTTP auth.");
+    }) as typeof fetch;
+    try {
+      await assert.rejects(
+        openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", "http://127.0.0.1:4317/rejected-ipc"),
+        /IPC rejected/,
+      );
+      assert.equal(fetches, 0);
+      assert.equal(BareWebSocket.byPath("/api/v1/events").length, 0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -571,15 +705,29 @@ test("authenticated WebSocket leases reject cross-origin and non-Office targets 
   await assert.rejects(openOfficeWebSocket("wss://office.example/api/v1/chat?leak=1", "https://office.example"), /target is invalid/);
 });
 
-type BrowserLocation = { protocol: string; hostname: string; origin: string; desktopCapability?: string; fastTimers?: boolean; timerDelays?: number[] };
+type BrowserLocation = {
+  protocol: string;
+  hostname: string;
+  origin: string;
+  desktopCapability?: string | null;
+  desktopInvoke?: (command: string) => Promise<string | boolean | null>;
+  fastTimers?: boolean;
+  timerDelays?: number[];
+};
 
 async function withBrowserEnvironment(locationValue: BrowserLocation, run: () => Promise<void>): Promise<void> {
   const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
   const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
   const webSocketDescriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
-  const bridge = locationValue.desktopCapability === undefined ? undefined : {
-    invoke: async () => locationValue.desktopCapability!,
-  };
+  const bridge = locationValue.desktopInvoke !== undefined
+    ? { invoke: locationValue.desktopInvoke }
+    : locationValue.desktopCapability === undefined
+      ? undefined
+      : {
+          invoke: async (command: string) => command === "desktop_owned"
+            ? locationValue.desktopCapability !== null
+            : locationValue.desktopCapability!,
+        };
   Object.defineProperty(globalThis, "location", { configurable: true, value: locationValue });
   const browserWindow = {
     __TAURI_INTERNALS__: bridge,

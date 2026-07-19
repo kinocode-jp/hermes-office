@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { desktopCapabilityHeader, isTauriAssetLocation, shouldUseDesktopCapability } from "../src/desktop-transport.ts";
+import {
+  desktopCapabilityHeader,
+  isTauriAssetLocation,
+  shouldUseDesktopCapability,
+} from "../src/desktop-transport.ts";
 
 test("desktop transport is limited to Tauri asset origins", () => {
   assert.equal(isTauriAssetLocation({ protocol: "tauri:", hostname: "localhost" } as Location), true);

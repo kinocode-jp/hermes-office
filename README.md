@@ -133,6 +133,58 @@ This is a developer build, not an official signed release. No project binary is
 currently published. The release requirements are tracked in
 [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## Desktop shell behavior
+
+Hermes Office is web-first: the shared web UI is the primary interface. The
+optional Tauri desktop shell is a local launcher. Remote clients need only a web
+browser and do not need the desktop app.
+
+The launcher does not create its main native window or WebView while it classifies
+port 4317. It loads the normal app bundle for the first time only after its own
+child has passed the capability-bound readiness proof. The launcher sends only a
+fresh random nonce and fixed protocol domain/version; the launch-scoped desktop
+capability remains local and is used as the HMAC key on both sides. Every candidate or error
+path instead creates the window directly on a fixed, self-contained `data:` notice;
+the normal app bundle and listener-supplied content are never loaded first.
+
+- **Free port:** the shell starts its own child, verifies its health and a
+  nonce-bound HMAC readiness proof without transmitting the shell’s ephemeral
+  desktop capability, and stops only that owned child on exit. It repeats a
+  fresh proof on a blocking worker before every capability release and in a
+  250 ms native monitor. Gate wait, child checks, and proof share a 750 ms
+  absolute deadline, so parallel sends cannot queue indefinitely. Confirmed child exit or invalid proof clears the
+  capability before the desktop window closes; transient network/I/O failure
+  fails that send and must repeat for three monitor checks before invalidation.
+  The web client does not cache the root capability. The proof connection and subsequent
+  browser request are not atomically channel-bound, so the residual local
+  rebind race and trust boundary are documented in `docs/SECURITY.md`.
+- **Compatible-looking server already running:** the protocol-v1 health and Web
+  UI shape checks identify only a candidate; public responses do not authenticate
+  the listener as the operator's Hermes Office. The launcher keeps its window
+  open on a fixed notice and does not navigate to or automatically open the
+  listener. First confirm that the process owning port 4317 is your Hermes Office.
+  Only then manually open `http://127.0.0.1:4317/` in a normal browser. If the
+  owner is unknown, do not open it; inspect or stop the process through its normal
+  management procedure. The launcher never stops or kills that external process.
+  A manually opened ordinary browser page—including an older protocol-v1 web
+  bundle—does not use Tauri IPC, so desktop-only host administration is unavailable.
+  Running `npm run dev:server` alone does not provide that Web UI; run the normal
+  combined development surface or otherwise serve built web assets from `/`.
+- **Incompatible, malformed, timing-out, or non-Hermes listener:** the shell fails
+  closed without taking over the port. If the existing server has no Web UI, a
+  probe times out, the desktop window
+  stays open on a self-contained, cause-specific recovery notice instead of
+  crashing. Port conflicts identify port-owner checks; compatibility and probe
+  failures identify update, log, and normal restart steps; only a missing Web UI
+  identifies the combined development or built-web-assets steps. Owned-server
+  failures
+  separately identify managed-runtime, bundled-resource, child-launch, readiness,
+  and internal-state recovery. The notice never stops or replaces the process
+  that owns the port.
+
+Remote access is implemented by the Office Server and the web UI; the desktop
+shell is not a relay and is not required on remote client devices.
+
 ## Security status
 
 The supported trust model is one trusted operator on one machine. The safest

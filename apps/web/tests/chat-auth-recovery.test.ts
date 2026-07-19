@@ -388,7 +388,7 @@ class FakeWebSocket {
   }
 }
 
-async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
+async function flush(): Promise<void> { await new Promise<void>((resolve) => setTimeout(resolve, 0)); }
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     if (predicate()) return;
