@@ -107,12 +107,21 @@ The exact upstream research and known compatibility uncertainties are in
 Office Server module and web assets. At launch, the desktop shell probes the
 configured loopback port. If the port is free, release and development launches
 both generate a launch-scoped random desktop capability, start an owned Office
-Server child, verify its health and capability, and stop only that child on exit.
+Server child, verify its health and a capability-keyed proof, and stop only that child on exit.
 The capability is available to the WebView through Tauri IPC.
+
+Owned-child readiness never sends that capability to the listener. For each
+probe the launcher creates a new 32-byte OS-random nonce and sends only its
+lowercase hexadecimal encoding plus a fixed readiness domain and protocol
+version. The child returns an HMAC-SHA256 proof keyed by the launch-scoped
+capability. The launcher checks the bounded response and proof in constant time,
+then confirms that the owned child is still alive. This authenticates the child
+across the unavoidable port-bind/startup race without revealing the WebView
+authentication credential to a process that wins that race.
 
 The configured `main` window has automatic creation disabled. No native window,
 WebView, or normal app bundle exists while listener classification and owned-child
-readiness are pending. After an owned child passes its capability-bound readiness
+readiness are pending. After an owned child passes its capability-bound HMAC readiness
 check, the launcher explicitly creates `main` with the configured app URL and the
 rest of its configured title and size settings. Candidate and error paths instead
 create `main` with a fixed self-contained `data:` notice as its initial URL, so

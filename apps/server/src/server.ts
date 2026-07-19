@@ -1,4 +1,5 @@
 import { createServer as createHttpServer } from "node:http";
+import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { EventEnvelope, EventTopic, Operation, ProtocolError } from "@hermes-office/protocol";
 import { WebSocket, WebSocketServer } from "ws";
@@ -21,6 +22,11 @@ import {
 } from "./demo-state.js";
 import { DEFAULT_OFFICE_ORIGINS, listenerOrigins } from "./server-origins.js";
 import { normalizeOrigin } from "./origin.js";
+
+const DESKTOP_PROOF_PATH = "/api/v1/health/desktop-proof";
+const DESKTOP_PROOF_DOMAIN = "hermes-office-desktop-readiness";
+const DESKTOP_PROOF_VERSION = "1";
+const DESKTOP_PROOF_NONCE_PATTERN = /^[0-9a-f]{64}$/;
 
 export interface OfficeServerOptions {
   host?: string;
@@ -57,13 +63,14 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   const maxEventBytes = boundedInteger(options.maxEventBytes, 64 * 1024, 1_024, 1024 * 1024);
   const maxWebSocketClients = boundedInteger(options.maxWebSocketClients, 32, 1, 256);
   const effectiveDesktopOrigins = options.desktopOrigins ?? DEFAULT_OFFICE_ORIGINS;
+  const desktopCapability = options.desktopCapability;
   const originAllowlist = new Set(makeOriginAllowlist([...(options.allowedOrigins ?? DEFAULT_OFFICE_ORIGINS), ...effectiveDesktopOrigins]));
   const runtimeSource = options.runtimeSource;
   const staticWeb = options.staticWebRoot === undefined ? undefined : new StaticWebAssets(options.staticWebRoot);
   let publishAudit = (_record: OfficeAuditRecord): void => {};
   const auth = new OfficeAuth({
     ...(options.remoteToken === undefined ? {} : { remoteToken: options.remoteToken }),
-    ...(options.desktopCapability === undefined ? {} : { desktopCapability: options.desktopCapability }),
+    ...(desktopCapability === undefined ? {} : { desktopCapability }),
     desktopOrigins: effectiveDesktopOrigins,
     ...(options.allowedOrigins === undefined ? {} : { allowedOrigins: options.allowedOrigins }),
     ...(options.trustedProxyHops === undefined ? {} : { trustedProxyHops: options.trustedProxyHops }),
@@ -148,6 +155,18 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     const requestUrl = parseRequestUrl(request.url);
     if (requestUrl === undefined) {
       writeError(response, 400, "bad_request", "Malformed request URL.", maxJsonBytes);
+      return;
+    }
+
+    if (requestUrl.pathname === DESKTOP_PROOF_PATH) {
+      if (desktopCapability === undefined || !isDesktopProofRequest(request, requestUrl)) {
+        if (requestHasBody(request)) request.resume();
+        writeError(response, 404, "not_found", "Route not found.", maxJsonBytes, { "Cache-Control": "no-store" });
+        return;
+      }
+      const nonce = requestUrl.searchParams.get("nonce")!;
+      const proof = createDesktopReadinessProof(desktopCapability, nonce);
+      writeJson(response, 200, { proof }, maxJsonBytes, { "Cache-Control": "no-store" });
       return;
     }
 
@@ -635,6 +654,54 @@ export { normalizeOrigin };
 export function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
   return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
+}
+
+export function createDesktopReadinessProof(capability: string, nonce: string): string {
+  return createHmac("sha256", capability)
+    .update(`${DESKTOP_PROOF_DOMAIN}\n${DESKTOP_PROOF_VERSION}\n${nonce}`, "utf8")
+    .digest("hex");
+}
+
+function isDesktopProofRequest(request: import("node:http").IncomingMessage, requestUrl: URL): boolean {
+  if (
+    request.method !== "GET"
+    || requestHasBody(request)
+    || request.headers.origin !== undefined
+    || request.headers["x-hermes-office-desktop-capability"] !== undefined
+  ) return false;
+  if (!isLoopbackPeer(request.socket.remoteAddress) || !isTrustedProofHost(request.headers.host)) return false;
+  if (
+    request.headers.forwarded !== undefined
+    || request.headers["x-forwarded-for"] !== undefined
+    || request.headers["x-forwarded-host"] !== undefined
+    || request.headers["x-forwarded-proto"] !== undefined
+    || request.headers["x-real-ip"] !== undefined
+  ) return false;
+  const entries = [...requestUrl.searchParams.entries()];
+  if (entries.length !== 3) return false;
+  const nonce = requestUrl.searchParams.get("nonce");
+  return requestUrl.searchParams.getAll("nonce").length === 1
+    && requestUrl.searchParams.getAll("domain").length === 1
+    && requestUrl.searchParams.getAll("version").length === 1
+    && nonce !== null
+    && DESKTOP_PROOF_NONCE_PATTERN.test(nonce)
+    && requestUrl.searchParams.get("domain") === DESKTOP_PROOF_DOMAIN
+    && requestUrl.searchParams.get("version") === DESKTOP_PROOF_VERSION
+    && request.url === `${DESKTOP_PROOF_PATH}?nonce=${nonce}&domain=${DESKTOP_PROOF_DOMAIN}&version=${DESKTOP_PROOF_VERSION}`;
+}
+
+function isLoopbackPeer(value: string | undefined): boolean {
+  const normalized = value?.toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "::ffff:127.0.0.1";
+}
+
+function isTrustedProofHost(value: string | undefined): boolean {
+  if (value === undefined || value.length > 255 || /[\s,@\\]/.test(value)) return false;
+  const normalized = value.toLowerCase();
+  const match = /^(?:(?:127\.0\.0\.1|localhost)|\[::1\]):(\d{1,5})$/.exec(normalized);
+  if (match === null) return false;
+  const port = Number(match[1]);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
 function makeEvent<T>(

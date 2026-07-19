@@ -141,12 +141,15 @@ browser and do not need the desktop app.
 
 The launcher does not create its main native window or WebView while it classifies
 port 4317. It loads the normal app bundle for the first time only after its own
-child has passed the capability-bound readiness check. Every candidate or error
+child has passed the capability-bound readiness proof. The launcher sends only a
+fresh random nonce and fixed protocol domain/version; the launch-scoped desktop
+capability remains local and is used as the HMAC key on both sides. Every candidate or error
 path instead creates the window directly on a fixed, self-contained `data:` notice;
 the normal app bundle and listener-supplied content are never loaded first.
 
-- **Free port:** the shell starts its own child, verifies its health and the
-  shell’s ephemeral desktop capability, and stops only that owned child on exit.
+- **Free port:** the shell starts its own child, verifies its health and a
+  nonce-bound HMAC readiness proof without transmitting the shell’s ephemeral
+  desktop capability, and stops only that owned child on exit.
 - **Compatible-looking server already running:** the protocol-v1 health and Web
   UI shape checks identify only a candidate; public responses do not authenticate
   the listener as the operator's Hermes Office. The launcher keeps its window

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import test from "node:test";
 import { WebSocket } from "ws";
@@ -7,7 +8,7 @@ import type { HermesRuntimeSource } from "./hermes-backend.js";
 import type { HermesChatRequest } from "./hermes-chat.js";
 import { createDemoRuntimeStatus, createDemoSnapshot } from "./demo-state.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
-import { allowedCorsOrigin, createOfficeServer, isLoopbackHost, makeOriginAllowlist } from "./server.js";
+import { allowedCorsOrigin, createDesktopReadinessProof, createOfficeServer, isLoopbackHost, makeOriginAllowlist } from "./server.js";
 
 test("direct non-loopback listeners are always refused", () => {
   assert.throws(() => createOfficeServer({ host: "0.0.0.0" }), /direct non-loopback bind/);
@@ -208,6 +209,71 @@ test("launch-scoped desktop capability authenticates Tauri HTTP and WebSocket re
   } finally {
     await server.close();
   }
+});
+
+test("desktop readiness proof is loopback-only, strict, secret-free, and unavailable without a capability", async () => {
+  const desktopCapability = "readiness-secret-".repeat(4);
+  const nonce = "ab".repeat(32);
+  const query = `nonce=${nonce}&domain=hermes-office-desktop-readiness&version=1`;
+  const server = createOfficeServer({ port: 0, desktopCapability });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const response = await fetch(`${base}/api/v1/health/desktop-proof?${query}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "application/json; charset=utf-8");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const responseText = await response.text();
+    assert.equal(responseText.includes(desktopCapability), false);
+    const body = JSON.parse(responseText) as { proof: string };
+    assert.deepEqual(Object.keys(body), ["proof"]);
+    assert.equal(body.proof, createHmac("sha256", desktopCapability)
+      .update(`hermes-office-desktop-readiness\n1\n${nonce}`, "utf8").digest("hex"));
+
+    const rejectedUrls = [
+      `${base}/api/v1/health/desktop-proof?nonce=${"AB".repeat(32)}&domain=hermes-office-desktop-readiness&version=1`,
+      `${base}/api/v1/health/desktop-proof?nonce=${"ab".repeat(31)}&domain=hermes-office-desktop-readiness&version=1`,
+      `${base}/api/v1/health/desktop-proof?${query}&extra=1`,
+      `${base}/api/v1/health/desktop-proof?domain=hermes-office-desktop-readiness&version=1&nonce=${nonce}`,
+      `${base}/api/v1/health/desktop-proof?nonce=%61${nonce.slice(1)}&domain=hermes-office-desktop-readiness&version=1`,
+      `${base}/api/v1/health/desktop-proof?nonce=${nonce}&domain=wrong&version=1`,
+      `${base}/api/v1/health/desktop-proof?nonce=${nonce}&domain=hermes-office-desktop-readiness&version=2`,
+    ];
+    for (const url of rejectedUrls) assert.equal((await fetch(url)).status, 404);
+    assert.equal((await fetch(`${base}/api/v1/health/desktop-proof?${query}`, {
+      headers: { Origin: "tauri://localhost" },
+    })).status, 404);
+    assert.equal((await fetch(`${base}/api/v1/health/desktop-proof?${query}`, {
+      headers: { "X-Forwarded-For": "203.0.113.9" },
+    })).status, 404);
+    assert.equal((await fetch(`${base}/api/v1/health/desktop-proof?${query}`, {
+      headers: { "X-Hermes-Office-Desktop-Capability": desktopCapability },
+    })).status, 404);
+    assert.equal((await fetch(`${base}/api/v1/health/desktop-proof?${query}`, { method: "POST" })).status, 404);
+  } finally {
+    await server.close();
+  }
+
+  const publicServer = createOfficeServer({ port: 0 });
+  const publicAddress = await publicServer.listen();
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${publicAddress.port}/api/v1/health/desktop-proof?${query}`)).status, 404);
+  } finally {
+    await publicServer.close();
+  }
+});
+
+test("desktop readiness proof is deterministic, nonce-bound, domain-separated, and never returns the key", () => {
+  const capability = "capability-that-must-not-appear".repeat(2);
+  const nonce = "01".repeat(32);
+  const proof = createDesktopReadinessProof(capability, nonce);
+  assert.equal(proof, createDesktopReadinessProof(capability, nonce));
+  assert.notEqual(proof, createDesktopReadinessProof(capability, "02".repeat(32)));
+  assert.notEqual(proof, createDesktopReadinessProof("wrong-capability-key", nonce));
+  assert.notEqual(proof, createHmac("sha256", capability).update(nonce).digest("hex"));
+  assert.equal(proof.includes(capability), false);
+  assert.match(proof, /^[0-9a-f]{64}$/);
 });
 
 test("desktop capability chat socket accepts its first client frame after a delay", async () => {

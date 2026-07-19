@@ -176,9 +176,22 @@ launcher. The desktop app is optional and is not needed on remote clients.
 Automatic creation of the configured `main` window is disabled. The launcher
 creates no native window, WebView, or normal app bundle until classification has
 completed. It loads the normal app URL only after an owned child passes its
-capability-bound readiness check. For every candidate or error, it creates the
+capability-keyed HMAC readiness check. For every candidate or error, it creates the
 window with the fixed self-contained `data:` notice as the initial URL; there is
 no earlier bundle load or navigation that could contact the listener.
+
+The owned-child readiness check is a challenge-response protocol; it is not an
+authenticated request that transmits the desktop capability. Every probe uses a
+fresh OS-CSPRNG 32-byte nonce. The request contains only the nonce and fixed
+domain/version fields. `/api/v1/health/desktop-proof` exists only when a desktop
+capability was configured, accepts only strict bodyless GET requests from a
+direct loopback peer with no Origin or forwarding headers, and returns a bounded,
+`no-store` JSON HMAC-SHA256 proof. The capability is the HMAC key and is never
+included in the request or response. The launcher validates status, content type,
+schema, lowercase proof encoding, domain-separated HMAC, and the still-running
+owned child before creating its WebView. A listener that races to acquire the
+port can observe a nonce but cannot forge the proof or obtain the capability.
+This endpoint does not create a session and does not authorize any mutation.
 If that listener does not serve the Web UI or a bounded probe times out, the
 desktop window displays a fixed,
 self-contained recovery notice instead of crashing. The notice contains no

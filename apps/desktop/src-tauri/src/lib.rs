@@ -9,6 +9,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tauri::{Manager, RunEvent};
 
 const OFFICE_HOST: &str = "127.0.0.1";
@@ -25,7 +27,9 @@ const MAX_VERSION_OUTPUT: u64 = 4096;
 const MAX_HTTP_HEADERS: usize = 8192;
 const MAX_HEALTH_RESPONSE: u64 = 4096;
 const MAX_WEB_UI_RESPONSE: usize = 128 * 1024;
-const DESKTOP_CAPABILITY_HEADER: &str = "X-Hermes-Office-Desktop-Capability";
+const DESKTOP_PROOF_DOMAIN: &str = "hermes-office-desktop-readiness";
+const DESKTOP_PROOF_VERSION: &str = "1";
+const DESKTOP_PROOF_NONCE_BYTES: usize = 32;
 const SUPPORTED_NODE_MAJOR: u64 = 22;
 const SUPPORTED_HERMES_MAJOR: u64 = 0;
 const SUPPORTED_HERMES_MINOR: u64 = 18;
@@ -248,7 +252,7 @@ pub fn run() {
             // `main` has `create: false` in tauri.conf.json. Do not create a
             // WebView, and therefore do not load the app bundle, until the
             // loopback listener has been classified and an owned child has
-            // completed its capability-bound readiness check.
+            // completed its capability-keyed HMAC readiness proof.
             // The desktop shell starts its own Office Server only when the port
             // is free. An existing listener is never trusted based only on its
             // public responses, navigated to, stopped, or killed automatically.
@@ -533,8 +537,16 @@ fn generate_desktop_capability() -> String {
 }
 
 fn random_desktop_capability() -> String {
-    let mut bytes = [0_u8; 32];
+    random_hex::<32>()
+}
+
+fn random_hex<const N: usize>() -> String {
+    let mut bytes = [0_u8; N];
     getrandom::fill(&mut bytes).expect("operating system random source is unavailable");
+    encode_lower_hex(&bytes)
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;
@@ -726,7 +738,7 @@ fn wait_for_office_server(
             return Err(format!("Office Server exited during startup ({status}).").into());
         }
         if health_check(address, deadline)
-            && desktop_capability_check(address, desktop_capability, deadline)
+            && desktop_readiness_proof_check(address, desktop_capability, deadline)
         {
             if let Some(status) = child.try_wait()? {
                 return Err(format!("Office Server exited during startup ({status}).").into());
@@ -789,11 +801,12 @@ fn http_status_is_ok(headers: &str) -> bool {
     status == "200"
 }
 
-fn desktop_capability_check(
+fn desktop_readiness_proof_check(
     address: SocketAddr,
     desktop_capability: &str,
     startup_deadline: Instant,
 ) -> bool {
+    let nonce = random_hex::<DESKTOP_PROOF_NONCE_BYTES>();
     let deadline = response_deadline(startup_deadline);
     let Some(connect_timeout) = remaining_timeout(deadline, Duration::from_millis(200)) else {
         return false;
@@ -805,22 +818,97 @@ fn desktop_capability_check(
         return false;
     }
     let request = format!(
-        "GET /api/v1/host/remote HTTP/1.1\r\nHost: {OFFICE_HOST}:{OFFICE_PORT}\r\n{DESKTOP_CAPABILITY_HEADER}: {desktop_capability}\r\nConnection: close\r\n\r\n"
+        "GET /api/v1/health/desktop-proof?nonce={nonce}&domain={DESKTOP_PROOF_DOMAIN}&version={DESKTOP_PROOF_VERSION} HTTP/1.1\r\nHost: {OFFICE_HOST}:{OFFICE_PORT}\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
-    let Ok(response) = read_bounded_response(&mut stream, MAX_HTTP_HEADERS, deadline, true) else {
+    let Ok(response) = read_bounded_response(
+        &mut stream,
+        MAX_HEALTH_RESPONSE as usize,
+        deadline,
+        false,
+    ) else {
         return false;
     };
-    if !response.windows(4).any(|window| window == b"\r\n\r\n") {
-        return false;
-    }
     let text = match String::from_utf8(response) {
         Ok(value) => value,
         Err(_) => return false,
     };
-    http_status_is_ok(&text)
+    validate_desktop_proof_response(&text, desktop_capability, &nonce)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopProofResponse {
+    proof: String,
+}
+
+fn validate_desktop_proof_response(response: &str, capability: &str, nonce: &str) -> bool {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    if !http_status_is_ok(headers) || !proof_headers_are_strict(headers) {
+        return false;
+    }
+    let parsed: DesktopProofResponse = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let Some(proof) = decode_lower_hex_32(&parsed.proof) else {
+        return false;
+    };
+    let mut mac = match Hmac::<Sha256>::new_from_slice(capability.as_bytes()) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    mac.update(desktop_proof_message(nonce).as_bytes());
+    mac.verify_slice(&proof).is_ok()
+}
+
+fn proof_headers_are_strict(headers: &str) -> bool {
+    let mut content_type = None;
+    let mut cache_control = None;
+    for line in headers.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        if name.eq_ignore_ascii_case("content-type") {
+            if content_type.replace(value.trim()).is_some() {
+                return false;
+            }
+        }
+        if name.eq_ignore_ascii_case("cache-control") {
+            if cache_control.replace(value.trim()).is_some() {
+                return false;
+            }
+        }
+    }
+    content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json; charset=utf-8"))
+        && cache_control.is_some_and(|value| value.eq_ignore_ascii_case("no-store"))
+}
+
+fn desktop_proof_message(nonce: &str) -> String {
+    format!("{DESKTOP_PROOF_DOMAIN}\n{DESKTOP_PROOF_VERSION}\n{nonce}")
+}
+
+fn decode_lower_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return None;
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        decoded[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Some(decoded)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1266,6 +1354,78 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn desktop_readiness_proof_requires_exact_hmac_nonce_and_response_contract() {
+        let capability = "desktop-proof-test-capability";
+        let nonce = "ab".repeat(DESKTOP_PROOF_NONCE_BYTES);
+        let mut mac = Hmac::<Sha256>::new_from_slice(capability.as_bytes()).expect("HMAC key");
+        mac.update(desktop_proof_message(&nonce).as_bytes());
+        let proof = mac.finalize().into_bytes();
+        let proof_hex = encode_lower_hex(&proof);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\n\r\n{{\"proof\":\"{proof_hex}\"}}"
+        );
+
+        assert!(validate_desktop_proof_response(&response, capability, &nonce));
+        assert!(!validate_desktop_proof_response(&response, "wrong-capability", &nonce));
+        assert!(!validate_desktop_proof_response(&response, capability, &"cd".repeat(32)));
+        assert!(!validate_desktop_proof_response(
+            &response.replace("Cache-Control: no-store\r\n", ""),
+            capability,
+            &nonce,
+        ));
+        assert!(!validate_desktop_proof_response(
+            &response.replace("application/json; charset=utf-8", "text/plain"),
+            capability,
+            &nonce,
+        ));
+        assert!(!validate_desktop_proof_response(
+            &response.replace("200 OK", "201 Created"),
+            capability,
+            &nonce,
+        ));
+        assert!(decode_lower_hex_32(&proof_hex).is_some());
+        assert!(decode_lower_hex_32(&proof_hex.to_ascii_uppercase()).is_none());
+        assert!(decode_lower_hex_32("00").is_none());
+    }
+
+    #[test]
+    fn readiness_challenge_never_transmits_capability_and_rejects_forged_listener_proof() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind malicious temporary listener");
+        let address = listener.local_addr().expect("temporary listener address");
+        let capability = "capability-must-never-cross-the-readiness-socket".to_owned();
+        let secret_for_assertion = capability.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept readiness challenge");
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).expect("read readiness challenge");
+            sender.send(request[..read].to_vec()).expect("send captured request");
+            let forged = "0".repeat(64);
+            let body = format!("{{\"proof\":\"{forged}\"}}");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).expect("write forged proof");
+        });
+
+        assert!(!desktop_readiness_proof_check(
+            address,
+            &capability,
+            Instant::now() + Duration::from_secs(2),
+        ));
+        let captured = receiver.recv_timeout(Duration::from_secs(1)).expect("captured request");
+        let request = String::from_utf8(captured).expect("ASCII request");
+        assert!(!request.contains(&secret_for_assertion));
+        assert!(request.starts_with("GET /api/v1/health/desktop-proof?nonce="));
+        assert!(request.contains("&domain=hermes-office-desktop-readiness&version=1 HTTP/1.1\r\n"));
+        let nonce = request.split("nonce=").nth(1).and_then(|value| value.split('&').next()).expect("nonce");
+        assert_eq!(nonce.len(), DESKTOP_PROOF_NONCE_BYTES * 2);
+        assert!(nonce.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     }
 
     #[test]
