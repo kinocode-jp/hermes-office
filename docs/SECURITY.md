@@ -193,11 +193,17 @@ owned child before creating its WebView. A listener that races to acquire the
 port can observe a nonce but cannot forge the proof or obtain the capability.
 This endpoint does not create a session and does not authorize any mutation.
 After startup, each WebView capability request repeats a fresh proof and checks
-the owned child both before and after it. The web transport keeps no capability
-cache and repeats that IPC check immediately before every HTTP request and
-WebSocket connection. Independently, a 250 ms native monitor repeats the proof;
-on proof or child-liveness loss it clears the capability first and then closes
-the main window. An unowned replacement listener is never stopped or killed.
+the owned child both before and after it. These bounded process and TCP checks
+run through an asynchronous Tauri command on a blocking worker rather than the
+IPC/UI executor. The web transport keeps no capability cache and repeats that
+IPC check immediately before every HTTP request and WebSocket connection.
+Independently, a 250 ms native monitor repeats the proof. A confirmed child exit,
+wrong HMAC, oversized response, malformed response, or strict-contract failure
+clears the capability first and then closes the main window. A timeout,
+connection failure, or I/O error returns no capability for the affected send but
+does not permanently invalidate native state unless it occurs in three
+consecutive monitor checks; any valid proof resets that counter. An unowned
+replacement listener is never stopped or killed.
 
 The proof TCP connection and the following browser-managed request are distinct:
 there is no atomic channel binding across Tauri IPC and WebView networking. A

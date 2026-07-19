@@ -22,6 +22,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_RESPONSE_TIMEOUT: Duration = Duration::from_millis(750);
 const OWNED_SERVER_MONITOR_INTERVAL: Duration = Duration::from_millis(250);
+const OWNED_SERVER_TRANSIENT_FAILURE_LIMIT: u8 = 3;
 const HTTP_READ_SLICE: Duration = Duration::from_millis(250);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_VERSION_OUTPUT: u64 = 4096;
@@ -240,21 +241,39 @@ struct DesktopCapability(Mutex<Option<String>>);
 struct DesktopProofGate(Mutex<()>);
 
 #[tauri::command]
-fn desktop_capability(app: tauri::AppHandle) -> Option<String> {
-    let capability = authenticated_owned_capability(&app);
-    if capability.is_none() {
-        invalidate_owned_desktop(&app);
+async fn desktop_capability(app: tauri::AppHandle) -> Option<String> {
+    let worker_app = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        authenticated_owned_capability(&worker_app)
+    })
+    .await
+    .unwrap_or(OwnedCapabilityOutcome::TransientUnavailable);
+    match outcome {
+        OwnedCapabilityOutcome::Valid(capability) => Some(capability),
+        OwnedCapabilityOutcome::Invalid => {
+            invalidate_owned_desktop(&app);
+            None
+        }
+        OwnedCapabilityOutcome::TransientUnavailable => None,
     }
-    capability
 }
 
 #[tauri::command]
-fn desktop_owned(app: tauri::AppHandle) -> bool {
-    let owned = authenticated_owned_capability(&app).is_some();
-    if !owned {
-        invalidate_owned_desktop(&app);
+async fn desktop_owned(app: tauri::AppHandle) -> bool {
+    let worker_app = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        authenticated_owned_capability(&worker_app)
+    })
+    .await
+    .unwrap_or(OwnedCapabilityOutcome::TransientUnavailable);
+    match outcome {
+        OwnedCapabilityOutcome::Valid(_) => true,
+        OwnedCapabilityOutcome::Invalid => {
+            invalidate_owned_desktop(&app);
+            false
+        }
+        OwnedCapabilityOutcome::TransientUnavailable => false,
     }
-    owned
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -352,25 +371,66 @@ fn setup_office(app: &tauri::App) -> Result<(), StartupNoticeKind> {
     }
 }
 
-fn authenticated_owned_capability(app: &tauri::AppHandle) -> Option<String> {
-    let _proof_gate = app.state::<DesktopProofGate>().0.lock().ok()?;
-    let capability = app.state::<DesktopCapability>().0.lock().ok()?.clone()?;
-    if !owned_child_is_running(app) {
-        clear_desktop_capability(app);
-        return None;
+enum OwnedCapabilityOutcome {
+    Valid(String),
+    Invalid,
+    TransientUnavailable,
+}
+
+fn authenticated_owned_capability(app: &tauri::AppHandle) -> OwnedCapabilityOutcome {
+    let Ok(_proof_gate) = app.state::<DesktopProofGate>().0.lock() else {
+        return OwnedCapabilityOutcome::Invalid;
+    };
+    let capability = match app.state::<DesktopCapability>().0.lock() {
+        Ok(capability) => match capability.clone() {
+            Some(capability) => capability,
+            None => return OwnedCapabilityOutcome::Invalid,
+        },
+        Err(_) => return OwnedCapabilityOutcome::Invalid,
+    };
+    match owned_child_outcome(app) {
+        OwnedChildOutcome::Running => {}
+        OwnedChildOutcome::Exited | OwnedChildOutcome::InvalidState => {
+            clear_desktop_capability(app);
+            return OwnedCapabilityOutcome::Invalid;
+        }
+        OwnedChildOutcome::TransientUnavailable => {
+            return OwnedCapabilityOutcome::TransientUnavailable;
+        }
     }
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
-    if !desktop_readiness_proof_check(
+    match desktop_readiness_proof_outcome(
         address,
         &capability,
         Instant::now() + HEALTH_RESPONSE_TIMEOUT,
-    ) || !owned_child_is_running(app)
-    {
-        clear_desktop_capability(app);
-        return None;
+    ) {
+        DesktopProofOutcome::Valid => {}
+        DesktopProofOutcome::Invalid => {
+            clear_desktop_capability(app);
+            return OwnedCapabilityOutcome::Invalid;
+        }
+        DesktopProofOutcome::TransientUnavailable => {
+            return OwnedCapabilityOutcome::TransientUnavailable;
+        }
     }
-    let current = app.state::<DesktopCapability>().0.lock().ok()?;
-    (current.as_deref() == Some(capability.as_str())).then_some(capability)
+    match owned_child_outcome(app) {
+        OwnedChildOutcome::Running => {}
+        OwnedChildOutcome::Exited | OwnedChildOutcome::InvalidState => {
+            clear_desktop_capability(app);
+            return OwnedCapabilityOutcome::Invalid;
+        }
+        OwnedChildOutcome::TransientUnavailable => {
+            return OwnedCapabilityOutcome::TransientUnavailable;
+        }
+    }
+    let Ok(current) = app.state::<DesktopCapability>().0.lock() else {
+        return OwnedCapabilityOutcome::Invalid;
+    };
+    if current.as_deref() == Some(capability.as_str()) {
+        OwnedCapabilityOutcome::Valid(capability)
+    } else {
+        OwnedCapabilityOutcome::Invalid
+    }
 }
 
 fn clear_desktop_capability(app: &tauri::AppHandle) {
@@ -379,13 +439,25 @@ fn clear_desktop_capability(app: &tauri::AppHandle) {
     }
 }
 
-fn owned_child_is_running(app: &tauri::AppHandle) -> bool {
+enum OwnedChildOutcome {
+    Running,
+    Exited,
+    TransientUnavailable,
+    InvalidState,
+}
+
+fn owned_child_outcome(app: &tauri::AppHandle) -> OwnedChildOutcome {
     let Ok(mut process) = app.state::<OfficeServerProcess>().0.lock() else {
-        return false;
+        return OwnedChildOutcome::InvalidState;
     };
-    process
-        .as_mut()
-        .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    let Some(child) = process.as_mut() else {
+        return OwnedChildOutcome::Exited;
+    };
+    match child.try_wait() {
+        Ok(None) => OwnedChildOutcome::Running,
+        Ok(Some(_)) => OwnedChildOutcome::Exited,
+        Err(_) => OwnedChildOutcome::TransientUnavailable,
+    }
 }
 
 fn invalidate_owned_desktop(app: &tauri::AppHandle) {
@@ -395,21 +467,46 @@ fn invalidate_owned_desktop(app: &tauri::AppHandle) {
     }
 }
 
-fn start_owned_server_monitor(app: tauri::AppHandle) {
-    thread::spawn(move || loop {
-        thread::sleep(OWNED_SERVER_MONITOR_INTERVAL);
-        let still_owned = app
-            .state::<DesktopCapability>()
-            .0
-            .lock()
-            .ok()
-            .is_some_and(|capability| capability.is_some());
-        if !still_owned {
-            return;
+fn monitor_outcome_requires_invalidation(
+    outcome: &OwnedCapabilityOutcome,
+    consecutive_transient_failures: &mut u8,
+) -> bool {
+    match outcome {
+        OwnedCapabilityOutcome::Valid(_) => {
+            *consecutive_transient_failures = 0;
+            false
         }
-        if authenticated_owned_capability(&app).is_none() {
-            invalidate_owned_desktop(&app);
-            return;
+        OwnedCapabilityOutcome::Invalid => true,
+        OwnedCapabilityOutcome::TransientUnavailable => {
+            *consecutive_transient_failures =
+                (*consecutive_transient_failures).saturating_add(1);
+            *consecutive_transient_failures >= OWNED_SERVER_TRANSIENT_FAILURE_LIMIT
+        }
+    }
+}
+
+fn start_owned_server_monitor(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut consecutive_transient_failures = 0_u8;
+        loop {
+            thread::sleep(OWNED_SERVER_MONITOR_INTERVAL);
+            let still_owned = app
+                .state::<DesktopCapability>()
+                .0
+                .lock()
+                .ok()
+                .is_some_and(|capability| capability.is_some());
+            if !still_owned {
+                return;
+            }
+            let outcome = authenticated_owned_capability(&app);
+            if monitor_outcome_requires_invalidation(
+                &outcome,
+                &mut consecutive_transient_failures,
+            ) {
+                invalidate_owned_desktop(&app);
+                return;
+            }
         }
     });
 }
@@ -889,41 +986,65 @@ fn http_status_is_ok(headers: &str) -> bool {
     status == "200"
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopProofOutcome {
+    Valid,
+    Invalid,
+    TransientUnavailable,
+}
+
 fn desktop_readiness_proof_check(
     address: SocketAddr,
     desktop_capability: &str,
     startup_deadline: Instant,
 ) -> bool {
+    desktop_readiness_proof_outcome(address, desktop_capability, startup_deadline)
+        == DesktopProofOutcome::Valid
+}
+
+fn desktop_readiness_proof_outcome(
+    address: SocketAddr,
+    desktop_capability: &str,
+    startup_deadline: Instant,
+) -> DesktopProofOutcome {
     let nonce = random_hex::<DESKTOP_PROOF_NONCE_BYTES>();
     let deadline = response_deadline(startup_deadline);
     let Some(connect_timeout) = remaining_timeout(deadline, Duration::from_millis(200)) else {
-        return false;
+        return DesktopProofOutcome::TransientUnavailable;
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, connect_timeout) else {
-        return false;
+        return DesktopProofOutcome::TransientUnavailable;
     };
     if set_write_timeout_until(&stream, deadline).is_err() {
-        return false;
+        return DesktopProofOutcome::TransientUnavailable;
     }
     let request = format!(
         "GET /api/v1/health/desktop-proof?nonce={nonce}&domain={DESKTOP_PROOF_DOMAIN}&version={DESKTOP_PROOF_VERSION} HTTP/1.1\r\nHost: {OFFICE_HOST}:{OFFICE_PORT}\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return DesktopProofOutcome::TransientUnavailable;
     }
-    let Ok(response) = read_bounded_response(
+    let response = match read_bounded_response(
         &mut stream,
         MAX_HEALTH_RESPONSE as usize,
         deadline,
         false,
-    ) else {
-        return false;
+    ) {
+        Ok(response) => response,
+        Err(BoundedReadError::LimitExceeded) => return DesktopProofOutcome::Invalid,
+        Err(BoundedReadError::Timeout | BoundedReadError::Io) => {
+            return DesktopProofOutcome::TransientUnavailable;
+        }
     };
     let text = match String::from_utf8(response) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return DesktopProofOutcome::Invalid,
     };
-    validate_desktop_proof_response(&text, desktop_capability, &nonce)
+    if validate_desktop_proof_response(&text, desktop_capability, &nonce) {
+        DesktopProofOutcome::Valid
+    } else {
+        DesktopProofOutcome::Invalid
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1501,11 +1622,14 @@ mod tests {
             stream.write_all(response.as_bytes()).expect("write forged proof");
         });
 
-        assert!(!desktop_readiness_proof_check(
-            address,
-            &capability,
-            Instant::now() + Duration::from_secs(2),
-        ));
+        assert_eq!(
+            desktop_readiness_proof_outcome(
+                address,
+                &capability,
+                Instant::now() + Duration::from_secs(2),
+            ),
+            DesktopProofOutcome::Invalid,
+        );
         let captured = receiver.recv_timeout(Duration::from_secs(1)).expect("captured request");
         let request = String::from_utf8(captured).expect("ASCII request");
         assert!(!request.contains(&secret_for_assertion));
@@ -1514,6 +1638,51 @@ mod tests {
         let nonce = request.split("nonce=").nth(1).and_then(|value| value.split('&').next()).expect("nonce");
         assert_eq!(nonce.len(), DESKTOP_PROOF_NONCE_BYTES * 2);
         assert!(nonce.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+
+    #[test]
+    fn readiness_timeout_is_transient_but_monitor_grace_is_strictly_bounded() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind stalling readiness listener");
+        let address = listener.local_addr().expect("temporary listener address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept readiness challenge");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            thread::sleep(Duration::from_millis(900));
+        });
+        assert_eq!(
+            desktop_readiness_proof_outcome(
+                address,
+                "owned-listener-capability",
+                Instant::now() + Duration::from_secs(2),
+            ),
+            DesktopProofOutcome::TransientUnavailable,
+        );
+        server.join().expect("stalling listener exits");
+
+        let mut failures = 0;
+        assert!(!monitor_outcome_requires_invalidation(
+            &OwnedCapabilityOutcome::TransientUnavailable,
+            &mut failures,
+        ));
+        assert!(!monitor_outcome_requires_invalidation(
+            &OwnedCapabilityOutcome::TransientUnavailable,
+            &mut failures,
+        ));
+        assert!(monitor_outcome_requires_invalidation(
+            &OwnedCapabilityOutcome::TransientUnavailable,
+            &mut failures,
+        ));
+        assert!(!monitor_outcome_requires_invalidation(
+            &OwnedCapabilityOutcome::Valid("capability".to_owned()),
+            &mut failures,
+        ));
+        assert_eq!(failures, 0);
+        assert!(monitor_outcome_requires_invalidation(
+            &OwnedCapabilityOutcome::Invalid,
+            &mut failures,
+        ));
     }
 
     #[test]
@@ -1532,21 +1701,27 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
         ));
         owned.join().expect("owned listener exits");
-        assert!(!desktop_readiness_proof_check(
-            address,
-            &capability,
-            Instant::now() + Duration::from_millis(200),
-        ));
+        assert_eq!(
+            desktop_readiness_proof_outcome(
+                address,
+                &capability,
+                Instant::now() + Duration::from_millis(200),
+            ),
+            DesktopProofOutcome::TransientUnavailable,
+        );
 
         let replacement = TcpListener::bind(address).expect("rebind replacement listener");
         let attacker = thread::spawn(move || {
             serve_readiness_proof(replacement, "attacker-does-not-have-capability");
         });
-        assert!(!desktop_readiness_proof_check(
-            address,
-            &capability,
-            Instant::now() + Duration::from_secs(2),
-        ));
+        assert_eq!(
+            desktop_readiness_proof_outcome(
+                address,
+                &capability,
+                Instant::now() + Duration::from_secs(2),
+            ),
+            DesktopProofOutcome::Invalid,
+        );
         attacker.join().expect("replacement listener exits");
     }
 
