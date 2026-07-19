@@ -1888,7 +1888,7 @@ mod tests {
             thread::sleep(Duration::from_millis(800));
         });
         let error = classify_office_startup(address).expect_err("stalling server should error");
-        assert!(error.to_string().contains("timed out"));
+        assert_eq!(error, StartupProbeError::Timeout);
     }
 
     #[test]
@@ -1913,7 +1913,7 @@ mod tests {
             .expect_err("a slow-drip response must not extend the probe indefinitely");
         let elapsed = started.elapsed();
 
-        assert!(error.to_string().contains("timed out"));
+        assert_eq!(error, StartupProbeError::Timeout);
         assert!(
             elapsed < Duration::from_secs(2),
             "absolute health deadline was exceeded: {elapsed:?}"
