@@ -158,6 +158,12 @@ export function workspaceChatPrecedesSurface(
   return hasChats && !mobile && (placement === "top" || placement === "left");
 }
 
+export function workspaceSeparatorKeyShortcuts(placement: WorkspacePlacement): string {
+  return placement === "left" || placement === "right"
+    ? "ArrowLeft ArrowRight Home End"
+    : "ArrowUp ArrowDown Home End";
+}
+
 function clampRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return defaultWorkspaceLayout.ratio;
   return Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, ratio));

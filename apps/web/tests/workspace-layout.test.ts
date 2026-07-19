@@ -12,6 +12,7 @@ import {
   resetWorkspaceLayout,
   workspaceRatioBounds,
   workspaceChatPrecedesSurface,
+  workspaceSeparatorKeyShortcuts,
   workspacePlacement,
   workspaceRatio,
 } from "../src/workspace-layout.ts";
@@ -73,6 +74,13 @@ test("workspace DOM order follows dock direction without changing mobile overlay
   }
 });
 
+test("workspace separator advertises only resize keys for its current axis", () => {
+  assert.equal(workspaceSeparatorKeyShortcuts("left"), "ArrowLeft ArrowRight Home End");
+  assert.equal(workspaceSeparatorKeyShortcuts("right"), "ArrowLeft ArrowRight Home End");
+  assert.equal(workspaceSeparatorKeyShortcuts("top"), "ArrowUp ArrowDown Home End");
+  assert.equal(workspaceSeparatorKeyShortcuts("bottom"), "ArrowUp ArrowDown Home End");
+});
+
 test("workspace preferences persist, reset, and fail safely when storage is blocked", () => {
   const values = new Map<string, string>();
   const storage = {
@@ -126,6 +134,7 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.doesNotMatch(component.slice(separatorStart, separatorEnd), /<button/, "separator has no interactive descendants");
   assert.match(component, /class="workspace-dock-controls" role="group"/);
   assert.match(component, /aria-orientation=/);
+  assert.match(component, /aria-keyshortcuts=\{workspaceSeparatorKeyShortcuts\(placement\)\}/);
   assert.match(component, /aria-valuemin=/);
   assert.match(component, /onPointerMove=/);
   assert.match(component, /event\.key === "Home"/);

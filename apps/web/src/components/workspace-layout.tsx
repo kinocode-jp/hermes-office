@@ -10,6 +10,7 @@ import {
   setWorkspacePlacement,
   setWorkspaceRatio,
   workspaceChatPrecedesSurface,
+  workspaceSeparatorKeyShortcuts,
   workspaceRatioBounds,
   workspacePlacement,
   workspacePlacements,
@@ -209,7 +210,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
         aria-valuemin={Math.round(effectiveBounds.min * 100)}
         aria-valuemax={Math.round(effectiveBounds.max * 100)}
         aria-valuenow={Math.round(effectiveRatio * 100)}
-        aria-keyshortcuts="ArrowUp ArrowRight ArrowDown ArrowLeft Home End"
+        aria-keyshortcuts={workspaceSeparatorKeyShortcuts(placement)}
         onPointerDown={(event) => { if (event.button === 0) event.currentTarget.setPointerCapture(event.pointerId); }}
         onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event); }}
         onPointerUp={(event) => {
