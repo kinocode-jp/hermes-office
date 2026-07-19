@@ -14,12 +14,12 @@ declare global {
 let capabilityCache: { bridge: TauriInternals | undefined; request: Promise<string | undefined> } | undefined;
 
 // The desktop shell returns a capability only when it started and owns the
-// Office Server child. When it attaches to an existing compatible server, the
-// shell exits after opening the existing server in the system browser, so this
-// bundle remains on a Tauri asset or development origin. A null fallback is
-// retained for defense in depth. A non-null invalid value is rejected rather
-// than silently falling back, because that would mask owned-child security
-// failures.
+// Office Server child. An existing listener with compatible response shapes is
+// only an unauthenticated candidate: the shell keeps its fixed notice visible,
+// and the user may open the Web UI manually after verifying the port owner. A
+// null fallback is retained for defense in depth. A non-null invalid value is
+// rejected rather than silently falling back, because that would mask
+// owned-child security failures.
 
 export function isTauriAssetLocation(value: Pick<Location, "protocol" | "hostname">): boolean {
   return value.protocol === "tauri:" || value.hostname === "tauri.localhost";
