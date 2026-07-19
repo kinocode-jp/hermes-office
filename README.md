@@ -133,6 +133,27 @@ This is a developer build, not an official signed release. No project binary is
 currently published. The release requirements are tracked in
 [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## Desktop shell behavior
+
+Hermes Office is web-first: the shared web UI is the primary interface. The
+Tauri desktop shell is a local launcher that either starts and owns an Office
+Server child, or attaches to an already-running compatible server on the
+configured loopback port.
+
+- **Free port:** the shell starts its own child, verifies its health and the
+  shell’s ephemeral desktop capability, and stops only that owned child on exit.
+- **Compatible server already running:** the shell attaches without spawning,
+  stopping, or killing the existing server. It navigates the main WebView to the
+  server origin so the UI becomes a same-origin ordinary browser page and uses
+  local-cookie authentication. The desktop-only host administration capability
+  is unavailable because the external server cannot know this shell’s ephemeral
+  capability.
+- **Incompatible, malformed, timing-out, or non-Hermes listener:** the shell fails
+  closed with a precise error and does not take over the port.
+
+Remote access is implemented by the Office Server and the web UI; the desktop
+shell is not a relay and is not required on remote client devices.
+
 ## Security status
 
 The supported trust model is one trusted operator on one machine. The safest

@@ -550,6 +550,41 @@ test("desktop capability recovery remains cookie-free and does not call HTTP aut
       const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
       assert.notEqual(recovered.authRevision, lease.authRevision);
       assert.equal(fetches, 0);
+      const sockets = BareWebSocket.byPath("/api/v1/events");
+      assert.ok(sockets.length >= 1);
+      const protocols = sockets.at(-1)?.protocols;
+      assert.deepEqual(protocols, ["hermes-office.v1", `hermes-office.desktop.${"d".repeat(48)}`]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("null desktop capability falls back to local cookie auth without capability header or subprotocol", async () => {
+  await withBrowserEnvironment({ protocol: "tauri:", hostname: "tauri.localhost", origin: "tauri://localhost", desktopCapability: null }, async () => {
+    const originalFetch = globalThis.fetch;
+    let localBootstraps = 0;
+    let deviceRenewals = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = requestUrl(input);
+      const headers = new Headers(init?.headers);
+      if (headers.has("X-Hermes-Office-Desktop-Capability")) throw new Error("Must not send capability header when attached.");
+      if (url.endsWith("/api/v1/auth/local")) { localBootstraps += 1; return jsonResponse({ csrfToken: "local-csrf".repeat(4) }); }
+      if (url.endsWith("/api/v1/auth/device/renew")) { deviceRenewals += 1; return new Response(null, { status: 403 }); }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+    try {
+      const serverUrl = "http://127.0.0.1:4317/attached-desktop";
+      const lease = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
+      await recoverOfficeWebSocketAuthentication(serverUrl, lease.authRevision);
+      const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
+      assert.notEqual(recovered.authRevision, lease.authRevision);
+      assert.equal(localBootstraps, 2);
+      assert.equal(deviceRenewals, 0);
+      const sockets = BareWebSocket.byPath("/api/v1/events");
+      assert.ok(sockets.length >= 1);
+      const protocols = sockets.at(-1)?.protocols;
+      assert.equal(protocols, undefined);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -571,15 +606,17 @@ test("authenticated WebSocket leases reject cross-origin and non-Office targets 
   await assert.rejects(openOfficeWebSocket("wss://office.example/api/v1/chat?leak=1", "https://office.example"), /target is invalid/);
 });
 
-type BrowserLocation = { protocol: string; hostname: string; origin: string; desktopCapability?: string; fastTimers?: boolean; timerDelays?: number[] };
+type BrowserLocation = { protocol: string; hostname: string; origin: string; desktopCapability?: string | null; fastTimers?: boolean; timerDelays?: number[] };
 
 async function withBrowserEnvironment(locationValue: BrowserLocation, run: () => Promise<void>): Promise<void> {
   const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
   const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
   const webSocketDescriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
-  const bridge = locationValue.desktopCapability === undefined ? undefined : {
-    invoke: async () => locationValue.desktopCapability!,
-  };
+  const bridge = locationValue.desktopCapability === undefined
+    ? undefined
+    : {
+        invoke: async () => locationValue.desktopCapability!,
+      };
   Object.defineProperty(globalThis, "location", { configurable: true, value: locationValue });
   const browserWindow = {
     __TAURI_INTERNALS__: bridge,

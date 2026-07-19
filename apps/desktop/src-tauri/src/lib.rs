@@ -25,37 +25,113 @@ const SUPPORTED_NODE_MAJOR: u64 = 22;
 const SUPPORTED_HERMES_MAJOR: u64 = 0;
 const SUPPORTED_HERMES_MINOR: u64 = 18;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfficeStartup {
+    /// Loopback port is free; this desktop instance should start and own the
+    /// Office Server child.
+    PortFree,
+    /// A compatible Office Server is already listening on the port. This
+    /// desktop instance will attach without spawning or killing anything.
+    AttachExisting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartupProbeError {
+    Incompatible,
+    Malformed,
+    Timeout,
+    OtherService,
+}
+impl std::fmt::Display for StartupProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartupProbeError::Incompatible => {
+                write!(formatter, "An existing Office Server is listening on port {OFFICE_PORT}, but it reports an incompatible protocol version. Close the incompatible instance or start Office Server manually with a compatible version.")
+            }
+            StartupProbeError::Malformed => {
+                write!(formatter, "An existing Office Server is listening on port {OFFICE_PORT}, but its health response was malformed. Close the instance or start Office Server manually.")
+            }
+            StartupProbeError::Timeout => {
+                write!(formatter, "An existing Office Server is listening on port {OFFICE_PORT}, but its health response timed out. Close the instance or start Office Server manually.")
+            }
+            StartupProbeError::OtherService => {
+                write!(formatter, "Port {OFFICE_PORT} is already in use by a non-Hermes Office service. Close that service before starting Hermes Office.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StartupProbeError {}
+
 struct OfficeServerProcess(Mutex<Option<Child>>);
-struct DesktopCapability(String);
+struct DesktopCapability(Mutex<Option<String>>);
 
 #[tauri::command]
-fn desktop_capability(state: tauri::State<'_, DesktopCapability>) -> String {
-    state.0.clone()
+fn desktop_capability(state: tauri::State<'_, DesktopCapability>) -> Option<String> {
+    state.0.lock().expect("desktop capability lock").clone()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(OfficeServerProcess(Mutex::new(None)))
-        .manage(DesktopCapability(generate_desktop_capability()))
+        .manage(DesktopCapability(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![desktop_capability])
         .setup(|app| {
-            // Tauri owns exactly one Office Server process in every build mode.
-            // Release spawns the bundled sidecar; debug spawns the local dev server.
-            ensure_office_port_available()?;
-            let desktop_capability = app.state::<DesktopCapability>().0.clone();
-            #[cfg(debug_assertions)]
-            let mut child = start_office_dev_server(app)?;
-            #[cfg(not(debug_assertions))]
-            let mut child = start_office_server(app)?;
-            if let Err(error) = wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability) {
-                stop_office_server(&mut child);
-                return Err(error);
+            // The desktop shell is Web-first: it can start its own Office Server
+            // child or attach to an existing compatible server already listening on
+            // the configured loopback port. It never spawns, stops, or kills an
+            // independently started server.
+            let capability_state = app.state::<DesktopCapability>();
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
+            match classify_office_startup(address)? {
+                OfficeStartup::PortFree => {
+                    let desktop_capability = generate_desktop_capability();
+                    *capability_state
+                        .0
+                        .lock()
+                        .expect("desktop capability lock") = Some(desktop_capability.clone());
+                    #[cfg(debug_assertions)]
+                    let mut child = start_office_dev_server(app, &desktop_capability)?;
+                    #[cfg(not(debug_assertions))]
+                    let mut child = start_office_server(app, &desktop_capability)?;
+                    if let Err(error) =
+                        wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability)
+                    {
+                        stop_office_server(&mut child);
+                        return Err(error);
+                    }
+                    *app.state::<OfficeServerProcess>()
+                        .0
+                        .lock()
+                        .expect("server process lock") = Some(child);
+                }
+                OfficeStartup::AttachExisting => {
+                    // An existing compatible server is already running. We do not
+                    // verify the desktop capability against it, because an
+                    // independently started server cannot know this desktop
+                    // instance's ephemeral capability. OfficeServerProcess stays
+                    // None so app exit does not stop the external server.
+                    //
+                    // A tauri://localhost top-level page cannot reliably use the
+                    // existing server's SameSite=Strict local session cookie from
+                    // a cross-origin fetch. Navigate the main WebView to the
+                    // server origin so the web UI becomes a same-origin ordinary
+                    // browser page, using browser-equivalent local cookie auth.
+                    // The capability state remains None; the attached remote page
+                    // has no Tauri desktop capability and therefore no host
+                    // administration panel.
+                    let main_window = app
+                        .get_webview_window("main")
+                        .ok_or("Hermes Office main window is unavailable.")?;
+                    let target_url = format!("http://{OFFICE_HOST}:{OFFICE_PORT}/");
+                    main_window.navigate(
+                        target_url
+                            .parse()
+                            .map_err(|_| "Failed to parse Office Server origin.")?,
+                    )?;
+                }
             }
-            *app.state::<OfficeServerProcess>()
-                .0
-                .lock()
-                .expect("server process lock") = Some(child);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -72,7 +148,10 @@ pub fn run() {
     });
 }
 
-fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Error>> {
+fn start_office_server(
+    app: &tauri::App,
+    desktop_capability: &str,
+) -> Result<Child, Box<dyn std::error::Error>> {
     let resource_dir = app.path().resource_dir()?;
     let script = resource_dir.join("resources/server/hermes-office-server.mjs");
     if !script.is_file() {
@@ -80,7 +159,6 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
     }
 
     let (node, hermes) = resolve_managed_runtime()?;
-    let desktop_capability = app.state::<DesktopCapability>().0.clone();
 
     let mut command = Command::new(node);
     command.env_clear();
@@ -106,10 +184,12 @@ fn start_office_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Er
 }
 
 #[cfg(debug_assertions)]
-fn start_office_dev_server(app: &tauri::App) -> Result<Child, Box<dyn std::error::Error>> {
+fn start_office_dev_server(
+    app: &tauri::App,
+    desktop_capability: &str,
+) -> Result<Child, Box<dyn std::error::Error>> {
     let repo_root = resolve_repo_root()?;
     let (node, hermes) = resolve_managed_runtime()?;
-    let desktop_capability = app.state::<DesktopCapability>().0.clone();
     let tsx = resolve_tsx_cli(&repo_root)?;
 
     let mut command = Command::new(node);
@@ -201,13 +281,73 @@ fn random_desktop_capability() -> String {
     encoded
 }
 
-fn ensure_office_port_available() -> Result<(), Box<dyn std::error::Error>> {
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
-    let listener = TcpListener::bind(address).map_err(|_| {
-        "Office API port 4317 is already in use. Close another Hermes Office instance and retry."
-    })?;
-    drop(listener);
-    Ok(())
+fn classify_office_startup(
+    address: SocketAddr,
+) -> Result<OfficeStartup, Box<dyn std::error::Error>> {
+    if let Ok(listener) = TcpListener::bind(address) {
+        drop(listener);
+        return Ok(OfficeStartup::PortFree);
+    }
+
+    match probe_existing_health(address) {
+        ProbeOutcome::Compatible => Ok(OfficeStartup::AttachExisting),
+        ProbeOutcome::Incompatible => Err(StartupProbeError::Incompatible.into()),
+        ProbeOutcome::Malformed => Err(StartupProbeError::Malformed.into()),
+        ProbeOutcome::Timeout => Err(StartupProbeError::Timeout.into()),
+        ProbeOutcome::OtherService => Err(StartupProbeError::OtherService.into()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    Compatible,
+    Incompatible,
+    Malformed,
+    Timeout,
+    OtherService,
+}
+
+fn probe_existing_health(address: SocketAddr) -> ProbeOutcome {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+        return ProbeOutcome::OtherService;
+    };
+    let timeout = Some(Duration::from_millis(500));
+    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+        return ProbeOutcome::Timeout;
+    }
+    let host = format!("{address}");
+    let request =
+        format!("GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return ProbeOutcome::OtherService;
+    }
+    let mut response = Vec::new();
+    let read_result = stream
+        .take(MAX_HEALTH_RESPONSE + 1)
+        .read_to_end(&mut response);
+    match read_result {
+        Ok(()) if response.len() as u64 > MAX_HEALTH_RESPONSE => return ProbeOutcome::Malformed,
+        Ok(()) => {}
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+            return ProbeOutcome::Timeout;
+        }
+        Err(_) => return ProbeOutcome::Malformed,
+    }
+    let text = match String::from_utf8(response) {
+        Ok(value) => value,
+        Err(_) => return ProbeOutcome::Malformed,
+    };
+    let Some((headers, body)) = text.split_once("\r\n\r\n") else {
+        return ProbeOutcome::Malformed;
+    };
+    if !http_status_is_ok(headers) {
+        return ProbeOutcome::OtherService;
+    }
+    match classify_health_body(body) {
+        HealthCompatibility::Compatible => ProbeOutcome::Compatible,
+        HealthCompatibility::Incompatible => ProbeOutcome::Incompatible,
+        HealthCompatibility::Malformed => ProbeOutcome::Malformed,
+    }
 }
 
 fn wait_for_office_server(
@@ -324,14 +464,31 @@ fn desktop_capability_check(address: SocketAddr, desktop_capability: &str) -> bo
     http_status_is_ok(&text)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthCompatibility {
+    Compatible,
+    Incompatible,
+    Malformed,
+}
+
 fn health_body_is_compatible(body: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
+    classify_health_body(body) == HealthCompatibility::Compatible
+}
+
+fn classify_health_body(body: &str) -> HealthCompatibility {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return HealthCompatibility::Malformed,
     };
-    value
-        .get("protocolVersion")
-        .and_then(|version| version.as_i64())
-        == Some(OFFICE_PROTOCOL_VERSION)
+    let version = match value.get("protocolVersion") {
+        Some(version) => version,
+        None => return HealthCompatibility::Malformed,
+    };
+    match version.as_i64() {
+        Some(v) if v == OFFICE_PROTOCOL_VERSION => HealthCompatibility::Compatible,
+        Some(_) => HealthCompatibility::Incompatible,
+        None => HealthCompatibility::Malformed,
+    }
 }
 
 fn stop_office_server(child: &mut Child) {
@@ -652,6 +809,88 @@ mod tests {
     }
 
     #[test]
+    fn health_body_classifies_malformed_missing_and_nonnumeric_version() {
+        assert_eq!(classify_health_body("not-json"), HealthCompatibility::Malformed);
+        assert_eq!(classify_health_body(r#"{"status":"ok"}"#), HealthCompatibility::Malformed);
+        assert_eq!(classify_health_body(r#"{"protocolVersion":"1"}"#), HealthCompatibility::Malformed);
+        assert_eq!(classify_health_body(r#"{"protocolVersion":null}"#), HealthCompatibility::Malformed);
+        assert_eq!(classify_health_body(r#"{"protocolVersion":1.1}"#), HealthCompatibility::Malformed);
+        assert_eq!(classify_health_body(r#"{"protocolVersion":1}"#), HealthCompatibility::Compatible);
+        assert_eq!(classify_health_body(r#"{"protocolVersion":2}"#), HealthCompatibility::Incompatible);
+    }
+
+    #[test]
+    fn classify_free_port_allows_startup() {
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let listener = TcpListener::bind(address).expect("bind temporary port");
+        let actual = listener.local_addr().expect("local address");
+        drop(listener);
+
+        assert_eq!(
+            classify_office_startup(actual).expect("free port should classify"),
+            OfficeStartup::PortFree
+        );
+    }
+
+    #[test]
+    fn classify_compatible_existing_server_attaches() {
+        let address = bind_health_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":1}",
+        );
+        assert_eq!(
+            classify_office_startup(address).expect("compatible server should classify"),
+            OfficeStartup::AttachExisting
+        );
+    }
+
+    #[test]
+    fn classify_incompatible_existing_server_rejects() {
+        let address = bind_health_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":2}",
+        );
+        let error = classify_office_startup(address).expect_err("incompatible server should error");
+        assert!(error.to_string().contains("incompatible protocol version"));
+    }
+
+    #[test]
+    fn classify_malformed_health_response_rejects() {
+        let address =
+            bind_health_server("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nnot-json");
+        let error = classify_office_startup(address).expect_err("malformed health should error");
+        assert!(error.to_string().contains("malformed"));
+    }
+
+    #[test]
+    fn classify_nonnumeric_protocol_version_rejects_malformed() {
+        let address = bind_health_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"protocolVersion\":\"1\"}",
+        );
+        let error = classify_office_startup(address).expect_err("nonnumeric version should error");
+        assert!(error.to_string().contains("malformed"));
+    }
+
+    #[test]
+    fn classify_other_service_rejects() {
+        let address = bind_health_server(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnot found",
+        );
+        let error = classify_office_startup(address).expect_err("other service should error");
+        assert!(error.to_string().contains("non-Hermes Office service"));
+    }
+
+    fn bind_health_server(response: &'static str) -> SocketAddr {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind temporary health server");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health connection");
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+        address
+    }
+
+    #[test]
     fn office_remote_environment_allowlist_is_exact_when_host_values_present() {
         let mut lookup = std::collections::HashMap::new();
         lookup.insert("HERMES_OFFICE_REMOTE_TOKEN", OsString::from("office-token"));
@@ -686,5 +925,22 @@ mod tests {
             })
             .collect();
         assert!(envs.is_empty(), "empty or absent host values must not be forwarded");
+    }
+
+    #[test]
+    fn classify_stalling_health_response_is_timeout() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind temporary health server");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health connection");
+            // Read the request so the client finishes writing, then remain silent
+            // long enough for the client-side 500 ms read timeout to fire.
+            let mut buffer = [0_u8; 512];
+            let _ = stream.read(&mut buffer);
+            thread::sleep(Duration::from_millis(800));
+        });
+        let error = classify_office_startup(address).expect_err("stalling server should error");
+        assert!(error.to_string().contains("timed out"));
     }
 }

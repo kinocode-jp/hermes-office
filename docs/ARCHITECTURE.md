@@ -112,6 +112,17 @@ capability from the Tauri development command.
 Local builds are developer artifacts. A signed/notarized project release and
 release provenance pipeline do not exist yet; see [`RELEASING.md`](RELEASING.md).
 
+At launch, the desktop shell probes the configured loopback port. If the port is
+free, it generates a random ephemeral desktop capability, starts the Office
+Server child, verifies health and capability, and stops only that owned child
+on exit. If a compatible Office Server is already listening, it attaches without
+spawning, stopping, or killing the external server. The main WebView is
+navigated to the server origin so the page becomes a same-origin ordinary Web
+UI using browser-equivalent local-cookie authentication; the desktop-only host
+administration capability is unavailable because the external server cannot know
+this shell’s ephemeral capability. Incompatible, malformed,
+timing-out, or non-Hermes listeners fail closed with a clear error.
+
 ## Current data model
 
 ```text
