@@ -168,6 +168,13 @@ when the existing server carries an older protocol-v1 web bundle, so the
 ephemeral desktop capability is unavailable and the host administration panel is
 not rendered. The external server is not spawned, stopped, or killed by the
 launcher. The desktop app is optional and is not needed on remote clients.
+If that listener does not serve the Web UI, a bounded probe times out, or the
+system browser cannot be launched, the desktop window displays a fixed,
+self-contained recovery notice instead of crashing. The notice contains no
+server-supplied content, scripts, external resources, or secrets and does not
+stop or replace the existing process. Recovery is to use the combined
+development surface or serve built web assets from `/` on that listener, then
+open `http://127.0.0.1:4317/` in a browser.
 
 Changing remote access requires editing `HERMES_OFFICE_REMOTE_TOKEN`,
 `HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`, and

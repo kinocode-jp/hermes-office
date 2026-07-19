@@ -151,7 +151,12 @@ browser and do not need the desktop app.
   Running `npm run dev:server` alone does not provide that Web UI; run the normal
   combined development surface or otherwise serve built web assets from `/`.
 - **Incompatible, malformed, timing-out, or non-Hermes listener:** the shell fails
-  closed with a precise error and does not take over the port.
+  closed without taking over the port. If the existing server has no Web UI, a
+  probe times out, or the system browser cannot be launched, the desktop window
+  stays open on a self-contained recovery notice instead of crashing. Run the
+  normal combined development surface, or build the web assets and serve them
+  from `/` on the same listener; then open `http://127.0.0.1:4317/` in a browser.
+  The notice never stops or replaces the process that owns the port.
 
 Remote access is implemented by the Office Server and the web UI; the desktop
 shell is not a relay and is not required on remote client devices.

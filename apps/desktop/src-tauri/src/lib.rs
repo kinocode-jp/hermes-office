@@ -80,6 +80,68 @@ impl std::fmt::Display for StartupProbeError {
 
 impl std::error::Error for StartupProbeError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupNoticeKind {
+    ExistingServerIncompatible,
+    ExistingServerMalformed,
+    ExistingServerTimeout,
+    PortUsedByOtherService,
+    ExistingWebUiUnavailable,
+    ExistingWebUiTimeout,
+    BrowserLaunchFailed,
+    OwnedServerStartupFailed,
+}
+
+impl From<StartupProbeError> for StartupNoticeKind {
+    fn from(error: StartupProbeError) -> Self {
+        match error {
+            StartupProbeError::Incompatible => Self::ExistingServerIncompatible,
+            StartupProbeError::Malformed => Self::ExistingServerMalformed,
+            StartupProbeError::Timeout => Self::ExistingServerTimeout,
+            StartupProbeError::OtherService => Self::PortUsedByOtherService,
+            StartupProbeError::ExistingWebUiUnavailable => Self::ExistingWebUiUnavailable,
+            StartupProbeError::ExistingWebUiTimeout => Self::ExistingWebUiTimeout,
+        }
+    }
+}
+
+impl StartupNoticeKind {
+    fn explanation(self) -> &'static str {
+        match self {
+            Self::ExistingServerIncompatible => {
+                "The service on port 4317 is Hermes Office, but its protocol version is not compatible with this desktop launcher."
+            }
+            Self::ExistingServerMalformed => {
+                "The service on port 4317 returned an invalid Hermes Office health response."
+            }
+            Self::ExistingServerTimeout => {
+                "The service on port 4317 did not complete the Hermes Office health check in time."
+            }
+            Self::PortUsedByOtherService => {
+                "Port 4317 is occupied by a service that could not be verified as Hermes Office."
+            }
+            Self::ExistingWebUiUnavailable => {
+                "A compatible Hermes Office server is running on port 4317, but it is not serving the Web UI from /."
+            }
+            Self::ExistingWebUiTimeout => {
+                "A compatible Hermes Office server is running on port 4317, but its Web UI did not respond in time."
+            }
+            Self::BrowserLaunchFailed => {
+                "A compatible Hermes Office Web UI is running, but the default browser could not be opened automatically."
+            }
+            Self::OwnedServerStartupFailed => {
+                "The desktop launcher could not start its bundled Hermes Office server."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupOutcome {
+    KeepWindowOpen,
+    ExitAfterBrowserHandoff,
+}
+
 struct OfficeServerProcess(Mutex<Option<Child>>);
 struct DesktopCapability(Mutex<Option<String>>);
 
@@ -99,50 +161,22 @@ pub fn run() {
             // child or attach to an existing compatible server already listening on
             // the configured loopback port. It never spawns, stops, or kills an
             // independently started server.
-            let capability_state = app.state::<DesktopCapability>();
-            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
-            match classify_office_startup(address)? {
-                OfficeStartup::PortFree => {
-                    let desktop_capability = generate_desktop_capability();
-                    *capability_state
-                        .0
-                        .lock()
-                        .expect("desktop capability lock") = Some(desktop_capability.clone());
-                    #[cfg(debug_assertions)]
-                    let mut child = start_office_dev_server(app, &desktop_capability)?;
-                    #[cfg(not(debug_assertions))]
-                    let mut child = start_office_server(app, &desktop_capability)?;
-                    if let Err(error) =
-                        wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability)
-                    {
-                        stop_office_server(&mut child);
-                        return Err(error);
-                    }
-                    *app.state::<OfficeServerProcess>()
-                        .0
-                        .lock()
-                        .expect("server process lock") = Some(child);
-                }
-                OfficeStartup::AttachExisting => {
-                    // An existing compatible server is already running. We do not
-                    // verify the desktop capability against it, because an
-                    // independently started server cannot know this desktop
-                    // instance's ephemeral capability. OfficeServerProcess stays
-                    // None so app exit does not stop the external server.
-                    //
-                    // The already-running server can carry an older protocol-v1
-                    // web bundle that does not know about this desktop shell. Open
-                    // it as an ordinary browser page instead of navigating a Tauri
-                    // WebView into an untrusted, independently served document.
-                    // The fixed loopback URL is never derived from external input.
-                    open_office_in_system_browser()?;
-                    app.handle().exit(0);
-                }
+            match setup_office(app) {
+                Ok(SetupOutcome::KeepWindowOpen) => {}
+                Ok(SetupOutcome::ExitAfterBrowserHandoff) => app.handle().exit(0),
+                Err(notice) => show_startup_notice(app, notice)?,
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("failed to build Hermes Office");
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("Hermes Office could not start safely: {error}");
+            return;
+        }
+    };
 
     app.run(|handle, event| {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
@@ -153,6 +187,104 @@ pub fn run() {
             }
         }
     });
+}
+
+fn setup_office(app: &tauri::App) -> Result<SetupOutcome, StartupNoticeKind> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
+    match classify_office_startup(address).map_err(StartupNoticeKind::from)? {
+        OfficeStartup::PortFree => {
+            let desktop_capability = generate_desktop_capability();
+            *app.state::<DesktopCapability>()
+                .0
+                .lock()
+                .map_err(|_| StartupNoticeKind::OwnedServerStartupFailed)? =
+                Some(desktop_capability.clone());
+            #[cfg(debug_assertions)]
+            let mut child = start_office_dev_server(app, &desktop_capability)
+                .map_err(|_| StartupNoticeKind::OwnedServerStartupFailed)?;
+            #[cfg(not(debug_assertions))]
+            let mut child = start_office_server(app, &desktop_capability)
+                .map_err(|_| StartupNoticeKind::OwnedServerStartupFailed)?;
+            if wait_for_office_server(&mut child, START_TIMEOUT, &desktop_capability).is_err() {
+                stop_office_server(&mut child);
+                return Err(StartupNoticeKind::OwnedServerStartupFailed);
+            }
+            let process_state = app.state::<OfficeServerProcess>();
+            let mut process = match process_state.0.lock() {
+                Ok(process) => process,
+                Err(_) => {
+                    stop_office_server(&mut child);
+                    return Err(StartupNoticeKind::OwnedServerStartupFailed);
+                }
+            };
+            *process = Some(child);
+            Ok(SetupOutcome::KeepWindowOpen)
+        }
+        OfficeStartup::AttachExisting => {
+            // The external server is never spawned, stopped, or killed by this
+            // process. Its page is opened in an ordinary browser so it cannot
+            // access Tauri IPC or the launch-scoped desktop capability.
+            open_office_in_system_browser()
+                .map_err(|_| StartupNoticeKind::BrowserLaunchFailed)?;
+            Ok(SetupOutcome::ExitAfterBrowserHandoff)
+        }
+    }
+}
+
+fn show_startup_notice(
+    app: &tauri::App,
+    notice: StartupNoticeKind,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Hermes Office main window is unavailable")?;
+    let url = tauri::Url::parse(&startup_notice_data_url(notice))?;
+    window.navigate(url)?;
+    Ok(())
+}
+
+fn startup_notice_html(notice: StartupNoticeKind) -> String {
+    let title = html_escape("Hermes Office needs attention");
+    let explanation = html_escape(notice.explanation());
+    let office_url = html_escape(OFFICE_URL);
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title><style>html{{color-scheme:light dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.55 system-ui,-apple-system,sans-serif;background:#111827;color:#f8fafc}}main{{box-sizing:border-box;width:min(680px,calc(100% - 40px));padding:32px;border:1px solid #374151;border-radius:16px;background:#1f2937}}h1{{margin:0 0 16px;font-size:26px}}p,ol{{margin:12px 0}}code{{overflow-wrap:anywhere;color:#bae6fd}}li+li{{margin-top:8px}}</style></head><body><main><h1>{title}</h1><p>{explanation}</p><p>No external server or process was stopped.</p><ol><li>For development, run the normal combined development surface so the server and Web UI start together.</li><li>For a packaged or local production setup, build the web assets and serve them from <code>/</code> on the same port 4317 listener.</li><li>After the Web UI is available, open <code>{office_url}</code> in your browser.</li></ol></main></body></html>"
+    )
+}
+
+fn html_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn percent_encode_data(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
+}
+
+fn startup_notice_data_url(notice: StartupNoticeKind) -> String {
+    format!(
+        "data:text/html;charset=utf-8,{}",
+        percent_encode_data(&startup_notice_html(notice))
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,7 +518,7 @@ fn random_desktop_capability() -> String {
 
 fn classify_office_startup(
     address: SocketAddr,
-) -> Result<OfficeStartup, Box<dyn std::error::Error>> {
+) -> Result<OfficeStartup, StartupProbeError> {
     if let Ok(listener) = TcpListener::bind(address) {
         drop(listener);
         return Ok(OfficeStartup::PortFree);
@@ -396,14 +528,14 @@ fn classify_office_startup(
         ProbeOutcome::Compatible => match probe_existing_web_ui(address) {
             WebUiProbeOutcome::Compatible => Ok(OfficeStartup::AttachExisting),
             WebUiProbeOutcome::Unavailable => {
-                Err(StartupProbeError::ExistingWebUiUnavailable.into())
+                Err(StartupProbeError::ExistingWebUiUnavailable)
             }
-            WebUiProbeOutcome::Timeout => Err(StartupProbeError::ExistingWebUiTimeout.into()),
+            WebUiProbeOutcome::Timeout => Err(StartupProbeError::ExistingWebUiTimeout),
         },
-        ProbeOutcome::Incompatible => Err(StartupProbeError::Incompatible.into()),
-        ProbeOutcome::Malformed => Err(StartupProbeError::Malformed.into()),
-        ProbeOutcome::Timeout => Err(StartupProbeError::Timeout.into()),
-        ProbeOutcome::OtherService => Err(StartupProbeError::OtherService.into()),
+        ProbeOutcome::Incompatible => Err(StartupProbeError::Incompatible),
+        ProbeOutcome::Malformed => Err(StartupProbeError::Malformed),
+        ProbeOutcome::Timeout => Err(StartupProbeError::Timeout),
+        ProbeOutcome::OtherService => Err(StartupProbeError::OtherService),
     }
 }
 
@@ -1127,6 +1259,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn startup_notice_escapes_html_and_percent_encodes_the_document() {
+        assert_eq!(
+            html_escape("<&>\"' <script>alert(1)</script>"),
+            "&lt;&amp;&gt;&quot;&#39; &lt;script&gt;alert(1)&lt;/script&gt;"
+        );
+        assert_eq!(percent_encode_data("<a b='c'>&"), "%3Ca%20b%3D%27c%27%3E%26");
+
+        let url = startup_notice_data_url(StartupNoticeKind::ExistingWebUiUnavailable);
+        assert!(url.starts_with("data:text/html;charset=utf-8,"));
+        assert!(!url.contains('<'));
+        assert!(!url.contains('>'));
+        assert!(!url.contains(' '));
+        assert!(!url.contains("<script"));
+    }
+
+    #[test]
+    fn startup_notice_contains_fixed_url_and_complete_recovery_instructions() {
+        let html = startup_notice_html(StartupNoticeKind::BrowserLaunchFailed);
+        assert!(html.contains(OFFICE_URL));
+        assert!(html.contains("normal combined development surface"));
+        assert!(html.contains("build the web assets"));
+        assert!(html.contains("serve them from <code>/</code>"));
+        assert!(html.contains("No external server or process was stopped"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("src="));
+        assert!(!html.contains("href="));
     }
 
     #[test]
