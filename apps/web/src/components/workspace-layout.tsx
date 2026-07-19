@@ -132,10 +132,11 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   };
   const finishResize = (event?: PointerEvent) => {
     const gesture = resizeGestureRef.current;
-    if (event && gesture && event.pointerId !== gesture.pointerId) return;
+    if (event && !workspacePointerIsOwner(gesture?.pointerId ?? null, event.pointerId)) return;
     const shouldPersist = resizingRef.current || gesture !== null;
     resizeGestureRef.current = null;
     resizingRef.current = false;
+    if (event) releaseOwnedPointer(event);
     if (shouldPersist) persistWorkspaceLayout();
   };
   const cancelDockDrag = (event?: PointerEvent) => {
@@ -146,7 +147,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     if (event) releaseOwnedPointer(event);
   };
   const beginDockDrag = (source: DragSource, event: PointerEvent) => {
-    if (mobile || !hasChats || event.button !== 0 || dragRef.current) return;
+    if (mobile || !hasChats || event.button !== 0 || dragRef.current || resizeGestureRef.current) return;
     event.preventDefault();
     if (!(event.currentTarget instanceof HTMLElement)) return;
     const next = { source, candidate: placement, pointerId: event.pointerId } satisfies DockDrag;
@@ -170,7 +171,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     commitDock(current.candidate);
   };
   const beginResize = (event: PointerEvent) => {
-    if (mobile || !hasChats || event.button !== 0 || !host.current) return;
+    if (mobile || !hasChats || event.button !== 0 || !host.current || resizeGestureRef.current || dragRef.current) return;
     if (!(event.currentTarget instanceof HTMLElement)) return;
     const rect = host.current.getBoundingClientRect();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -186,6 +187,10 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   const resize = (event: PointerEvent) => {
     const gesture = resizeGestureRef.current;
     if (mobile || !hasChats || !host.current || !gesture || event.pointerId !== gesture.pointerId) return;
+    if (gesture.placement !== placement) {
+      finishResize(event);
+      return;
+    }
     const rect = host.current.getBoundingClientRect();
     const raw = workspaceResizeRatioFromDelta(
       gesture.startRatio,
@@ -200,7 +205,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     workspaceRatio.value = next;
   };
   const resizeWithKeyboard = (event: KeyboardEvent) => {
-    if (mobile || !hasChats) return;
+    if (mobile || !hasChats || dragRef.current || resizeGestureRef.current) return;
     let next: number | undefined;
     if (event.key === "Home") next = effectiveBounds.min;
     if (event.key === "End") next = effectiveBounds.max;
@@ -222,6 +227,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     setWorkspaceRatio(clamped);
   };
   const dockWithKeyboard = (source: DragSource, event: KeyboardEvent) => {
+    if (dragRef.current || resizeGestureRef.current) return;
     const edge = event.key === "ArrowUp" ? "top" : event.key === "ArrowRight" ? "right"
       : event.key === "ArrowDown" ? "bottom" : event.key === "ArrowLeft" ? "left" : null;
     if (!edge || (!event.altKey && !event.ctrlKey)) return;
@@ -260,14 +266,8 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
         aria-keyshortcuts={workspaceSeparatorKeyShortcuts(placement)}
         onPointerDown={beginResize}
         onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event); }}
-        onPointerUp={(event) => {
-          releaseOwnedPointer(event);
-          finishResize(event);
-        }}
-        onPointerCancel={(event) => {
-          releaseOwnedPointer(event);
-          finishResize(event);
-        }}
+        onPointerUp={finishResize}
+        onPointerCancel={finishResize}
         onLostPointerCapture={(event) => finishResize(event)}
         onKeyDown={resizeWithKeyboard}
       />
