@@ -160,25 +160,30 @@ list of registered devices, and it lets the owner revoke a device.
 The panel never displays the enrollment token, device credential digests, or
 cookies.
 
-When the desktop shell attaches to an existing compatible Office Server rather
-than starting its own child, it first verifies that the same listener serves the
-Hermes Office HTML shell, then opens the fixed loopback Web UI in the default
-system browser and exits. The browser page does not use Tauri IPC, including
-when the existing server carries an older protocol-v1 web bundle, so the
+When the desktop shell finds an existing listener with the compatible health
+contract and expected Hermes Office HTML shape, those public checks establish
+only a candidate and do not authenticate its identity. The shell keeps its
+window open on a fixed notice; it neither navigates to the listener nor opens a
+system browser. The operator must first verify that the process owning port 4317
+is their Hermes Office and only then manually open the fixed loopback URL in a
+normal browser. If the owner is unknown, the URL must not be opened; the process
+should be inspected or stopped through its normal management procedure. A
+manually opened browser page does not use Tauri IPC, including when the existing
+server carries an older protocol-v1 web bundle, so the
 ephemeral desktop capability is unavailable and the host administration panel is
 not rendered. The external server is not spawned, stopped, or killed by the
 launcher. The desktop app is optional and is not needed on remote clients.
-If that listener does not serve the Web UI, a bounded probe times out, or the
-system browser cannot be launched, the desktop window displays a fixed,
+If that listener does not serve the Web UI or a bounded probe times out, the
+desktop window displays a fixed,
 self-contained recovery notice instead of crashing. The notice contains no
 server-supplied content, scripts, external resources, or secrets and does not
 stop or replace the existing process. Recovery instructions are fixed per
 failure kind: port owner and normal-close checks for an unrelated listener;
 update or normal restart and log checks for compatibility and probe failures;
 combined development or built web assets only when the Web UI is unavailable;
-and the fixed loopback URL when automatic browser launch fails. Owned-server
-runtime, resource, child-launch, readiness, and internal-state failures also
-have separate fixed instructions.
+and identity/owner verification before manual loopback opening for a candidate.
+Owned-server runtime, resource, child-launch, readiness, and internal-state
+failures also have separate fixed instructions.
 
 Changing remote access requires editing `HERMES_OFFICE_REMOTE_TOKEN`,
 `HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`, and

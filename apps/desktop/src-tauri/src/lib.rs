@@ -18,10 +18,6 @@ const OFFICE_PROTOCOL_VERSION: i64 = 1;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
-// Browser launchers are not uniformly short-lived: for example, xdg-open may
-// remain attached to the browser it launched. Observe only long enough to catch
-// an immediate launch failure, then detach without terminating the launcher.
-const BROWSER_LAUNCH_GRACE: Duration = Duration::from_millis(750);
 const HEALTH_RESPONSE_TIMEOUT: Duration = Duration::from_millis(750);
 const HTTP_READ_SLICE: Duration = Duration::from_millis(250);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -39,9 +35,9 @@ enum OfficeStartup {
     /// Loopback port is free; this desktop instance should start and own the
     /// Office Server child.
     PortFree,
-    /// A compatible Office Server is already listening on the port. This
-    /// desktop instance will attach without spawning or killing anything.
-    AttachExisting,
+    /// A listener with the expected protocol and Web UI shape is already on
+    /// the port. These public responses do not authenticate its identity.
+    CompatibleCandidate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,22 +53,22 @@ impl std::fmt::Display for StartupProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StartupProbeError::Incompatible => {
-                write!(formatter, "An existing Office Server is listening on port {OFFICE_PORT}, but it reports an incompatible protocol version. Close the incompatible instance or start Office Server manually with a compatible version.")
+                write!(formatter, "A listener on port {OFFICE_PORT} returned an Office-shaped health response with an incompatible protocol version. Verify the port owner before closing or updating it.")
             }
             StartupProbeError::Malformed => {
-                write!(formatter, "An existing Office Server is listening on port {OFFICE_PORT}, but its health response was malformed. Close the instance or start Office Server manually.")
+                write!(formatter, "A listener on port {OFFICE_PORT} returned a malformed health response. Verify the port owner before inspecting or closing it.")
             }
             StartupProbeError::Timeout => {
-                write!(formatter, "An existing Office Server is listening on port {OFFICE_PORT}, but its health response timed out. Close the instance or start Office Server manually.")
+                write!(formatter, "A listener on port {OFFICE_PORT} did not complete the health probe in time. Verify the port owner before inspecting or closing it.")
             }
             StartupProbeError::OtherService => {
-                write!(formatter, "Port {OFFICE_PORT} is already in use by a non-Hermes Office service. Close that service before starting Hermes Office.")
+                write!(formatter, "Port {OFFICE_PORT} is already in use by a service that was not recognized as Hermes Office. Verify the port owner before inspecting or closing it.")
             }
             StartupProbeError::ExistingWebUiUnavailable => {
-                write!(formatter, "A compatible Office Server is listening on port {OFFICE_PORT}, but it is not serving the Hermes Office Web UI. Start Office with its built web assets, or serve the Web UI separately before using the desktop launcher.")
+                write!(formatter, "A listener on port {OFFICE_PORT} returned the compatible health shape but not the expected Hermes Office Web UI shape. Verify the port owner before changing that service.")
             }
             StartupProbeError::ExistingWebUiTimeout => {
-                write!(formatter, "A compatible Office Server is listening on port {OFFICE_PORT}, but its Web UI response timed out. Restart Office with its built web assets before using the desktop launcher.")
+                write!(formatter, "A listener on port {OFFICE_PORT} returned the compatible health shape, but its Web UI probe timed out. Verify the port owner before changing that service.")
             }
         }
     }
@@ -82,13 +78,13 @@ impl std::error::Error for StartupProbeError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupNoticeKind {
+    ExistingServerCandidate,
     ExistingServerIncompatible,
     ExistingServerMalformed,
     ExistingServerTimeout,
     PortUsedByOtherService,
     ExistingWebUiUnavailable,
     ExistingWebUiTimeout,
-    BrowserLaunchFailed,
     OwnedManagedRuntimeUnavailable,
     OwnedBundledResourceUnavailable,
     OwnedChildLaunchFailed,
@@ -112,26 +108,26 @@ impl From<StartupProbeError> for StartupNoticeKind {
 impl StartupNoticeKind {
     fn explanation(self) -> &'static str {
         match self {
+            Self::ExistingServerCandidate => {
+                "A listener on port 4317 has the expected Hermes Office protocol and Web UI shape, but those public responses do not verify its identity. Nothing was opened automatically."
+            }
             Self::ExistingServerIncompatible => {
-                "The service on port 4317 is Hermes Office, but its protocol version is not compatible with this desktop launcher."
+                "The listener on port 4317 returned an Office-shaped health response, but its protocol version is not compatible with this desktop launcher. This does not authenticate the listener."
             }
             Self::ExistingServerMalformed => {
-                "The service on port 4317 returned an invalid Hermes Office health response."
+                "The listener on port 4317 returned an invalid health response and has not been authenticated as Hermes Office."
             }
             Self::ExistingServerTimeout => {
-                "The service on port 4317 did not complete the Hermes Office health check in time."
+                "The listener on port 4317 did not complete the health probe in time and has not been authenticated as Hermes Office."
             }
             Self::PortUsedByOtherService => {
                 "Port 4317 is occupied by a service that could not be verified as Hermes Office."
             }
             Self::ExistingWebUiUnavailable => {
-                "A compatible Hermes Office server is running on port 4317, but it is not serving the Web UI from /."
+                "The listener on port 4317 returned the compatible health shape but is not serving the expected Web UI shape from /. Its identity is not authenticated."
             }
             Self::ExistingWebUiTimeout => {
-                "A compatible Hermes Office server is running on port 4317, but its Web UI did not respond in time."
-            }
-            Self::BrowserLaunchFailed => {
-                "A compatible Hermes Office Web UI is running, but the default browser could not be opened automatically."
+                "The listener on port 4317 returned the compatible health shape, but its Web UI probe did not respond in time. Its identity is not authenticated."
             }
             Self::OwnedManagedRuntimeUnavailable => {
                 "The desktop launcher could not find or validate the managed Node.js and Hermes Agent runtimes required to start its Office server."
@@ -153,34 +149,40 @@ impl StartupNoticeKind {
 
     fn recovery_steps(self) -> &'static [&'static str] {
         match self {
+            Self::ExistingServerCandidate => &[
+                "First confirm that the process which owns loopback port 4317 is your Hermes Office server.",
+                "Only after confirming the owner, manually open http://127.0.0.1:4317/ in a normal browser.",
+                "If the owner is unknown, do not open the URL. Inspect or stop that process through its normal management procedure; Hermes Office will not kill it automatically.",
+            ],
             Self::PortUsedByOtherService => &[
                 "Check which application owns loopback port 4317.",
                 "If that application is not needed, close it normally, then start Hermes Office again. Do not force-kill an unknown process.",
             ],
             Self::ExistingServerIncompatible => &[
-                "Update the existing Hermes Office server to a version compatible with this desktop launcher, or close that server normally.",
+                "First verify that the process owning loopback port 4317 is your Hermes Office server.",
+                "After verification, update it to a version compatible with this desktop launcher, or close it normally.",
                 "Start the desktop launcher again after the compatible server is ready or port 4317 is free.",
             ],
             Self::ExistingServerMalformed => &[
+                "First verify which process owns loopback port 4317.",
                 "Inspect the existing listener and its logs because its Hermes Office health response is invalid.",
                 "Restart that service normally, or close it and start a compatible Hermes Office server before retrying.",
             ],
             Self::ExistingServerTimeout => &[
+                "First verify which process owns loopback port 4317.",
                 "Inspect the existing listener and its logs because its Hermes Office health check timed out.",
                 "Restart that service normally, then retry after it responds on port 4317.",
             ],
             Self::ExistingWebUiUnavailable => &[
+                "First verify that the process owning loopback port 4317 is your Hermes Office server.",
                 "For development, run the normal combined development surface so the server and Web UI start together.",
                 "For a packaged or local production setup, build the web assets and serve them from / on the same port 4317 listener.",
-                "After the Web UI is available, open http://127.0.0.1:4317/ in your browser.",
+                "Only after verifying the owner and making the Web UI available, manually open http://127.0.0.1:4317/ in a normal browser.",
             ],
             Self::ExistingWebUiTimeout => &[
+                "First verify which process owns loopback port 4317.",
                 "Inspect the existing listener and its logs because its Web UI response timed out.",
                 "Restart that service normally, then retry after the Web UI responds on port 4317.",
-            ],
-            Self::BrowserLaunchFailed => &[
-                "Open http://127.0.0.1:4317/ manually in your browser.",
-                "If it does not open, confirm the compatible Hermes Office server is still running on port 4317.",
             ],
             Self::OwnedManagedRuntimeUnavailable => &[
                 "Confirm that the supported managed Node.js and Hermes Agent runtimes are installed and available to Hermes Office.",
@@ -228,12 +230,6 @@ impl From<OwnedServerLaunchError> for StartupNoticeKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetupOutcome {
-    KeepWindowOpen,
-    ExitAfterBrowserHandoff,
-}
-
 struct OfficeServerProcess(Mutex<Option<Child>>);
 struct DesktopCapability(Mutex<Option<String>>);
 
@@ -249,13 +245,11 @@ pub fn run() {
         .manage(DesktopCapability(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![desktop_capability])
         .setup(|app| {
-            // The desktop shell is Web-first: it can start its own Office Server
-            // child or attach to an existing compatible server already listening on
-            // the configured loopback port. It never spawns, stops, or kills an
-            // independently started server.
+            // The desktop shell starts its own Office Server only when the port
+            // is free. An existing listener is never trusted based only on its
+            // public responses, navigated to, stopped, or killed automatically.
             match setup_office(app) {
-                Ok(SetupOutcome::KeepWindowOpen) => {}
-                Ok(SetupOutcome::ExitAfterBrowserHandoff) => app.handle().exit(0),
+                Ok(()) => {}
                 Err(notice) => show_startup_notice(app, notice)?,
             }
             Ok(())
@@ -281,7 +275,7 @@ pub fn run() {
     });
 }
 
-fn setup_office(app: &tauri::App) -> Result<SetupOutcome, StartupNoticeKind> {
+fn setup_office(app: &tauri::App) -> Result<(), StartupNoticeKind> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, OFFICE_PORT));
     match classify_office_startup(address).map_err(StartupNoticeKind::from)? {
         OfficeStartup::PortFree => {
@@ -310,16 +304,9 @@ fn setup_office(app: &tauri::App) -> Result<SetupOutcome, StartupNoticeKind> {
                 }
             };
             *process = Some(child);
-            Ok(SetupOutcome::KeepWindowOpen)
+            Ok(())
         }
-        OfficeStartup::AttachExisting => {
-            // The external server is never spawned, stopped, or killed by this
-            // process. Its page is opened in an ordinary browser so it cannot
-            // access Tauri IPC or the launch-scoped desktop capability.
-            open_office_in_system_browser()
-                .map_err(|_| StartupNoticeKind::BrowserLaunchFailed)?;
-            Ok(SetupOutcome::ExitAfterBrowserHandoff)
-        }
+        OfficeStartup::CompatibleCandidate => Err(StartupNoticeKind::ExistingServerCandidate),
     }
 }
 
@@ -381,102 +368,6 @@ fn startup_notice_data_url(notice: StartupNoticeKind) -> String {
         "data:text/html;charset=utf-8,{}",
         percent_encode_data(&startup_notice_html(notice))
     )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BrowserLaunchCommand {
-    program: &'static str,
-    arguments: Vec<OsString>,
-}
-
-fn office_browser_launch_command() -> BrowserLaunchCommand {
-    #[cfg(target_os = "macos")]
-    {
-        BrowserLaunchCommand {
-            program: "open",
-            arguments: vec![OsString::from(OFFICE_URL)],
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        BrowserLaunchCommand {
-            program: "rundll32.exe",
-            arguments: vec![
-                OsString::from("url.dll,FileProtocolHandler"),
-                OsString::from(OFFICE_URL),
-            ],
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        BrowserLaunchCommand {
-            program: "xdg-open",
-            arguments: vec![OsString::from(OFFICE_URL)],
-        }
-    }
-}
-
-fn open_office_in_system_browser() -> Result<(), Box<dyn std::error::Error>> {
-    let launch = office_browser_launch_command();
-    let mut child = Command::new(launch.program)
-        .args(launch.arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            format!(
-                "A compatible Office Server is already running, but its Web UI could not be opened in the default browser: {error}"
-            )
-        })?;
-    match observe_browser_launcher(&mut child, BROWSER_LAUNCH_GRACE) {
-        Ok(Some(status)) if status.success() => Ok(()),
-        Ok(Some(status)) => Err(format!(
-            "A compatible Office Server is already running, but the default browser launcher exited unsuccessfully ({status})."
-        )
-        .into()),
-        // A still-running launcher may be waiting for the browser process. It
-        // has accepted the request, so drop the Child handle and let the OS own
-        // its remaining lifetime. In particular, do not kill xdg-open here.
-        Ok(None) => Ok(()),
-        Err(error) => Err(format!(
-            "A compatible Office Server is already running, but the default browser launcher could not be monitored: {error}"
-        )
-        .into()),
-    }
-}
-
-/// Briefly observe a browser launcher for an immediate failure.
-///
-/// `None` means that the launcher is still running after the grace period and
-/// must be detached by dropping the `Child`; unlike a bounded command probe,
-/// that is a successful browser handoff and the process must not be killed.
-fn observe_browser_launcher(
-    child: &mut Child,
-    grace: Duration,
-) -> std::io::Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + grace;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(Some(status)),
-            Ok(None) => {}
-            Err(error) => {
-                // Monitoring failed, so this child is no longer safe to leave
-                // unmanaged. Best-effort cleanup avoids leaking it on the
-                // error path while preserving the original monitoring error.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        }
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Ok(None);
-        };
-        if remaining.is_zero() {
-            return Ok(None);
-        }
-        thread::sleep(std::cmp::min(remaining, CHILD_POLL_INTERVAL));
-    }
 }
 
 fn start_office_server(
@@ -633,7 +524,7 @@ fn classify_office_startup(
 
     match probe_existing_health(address) {
         ProbeOutcome::Compatible => match probe_existing_web_ui(address) {
-            WebUiProbeOutcome::Compatible => Ok(OfficeStartup::AttachExisting),
+            WebUiProbeOutcome::Compatible => Ok(OfficeStartup::CompatibleCandidate),
             WebUiProbeOutcome::Unavailable => {
                 Err(StartupProbeError::ExistingWebUiUnavailable)
             }
@@ -1349,26 +1240,6 @@ mod tests {
     }
 
     #[test]
-    fn browser_launcher_uses_only_the_fixed_office_url_without_a_shell() {
-        let launch = office_browser_launch_command();
-        assert!(!matches!(launch.program, "sh" | "bash" | "zsh" | "cmd"));
-        assert!(launch
-            .arguments
-            .iter()
-            .any(|argument| argument.as_os_str() == std::ffi::OsStr::new(OFFICE_URL)));
-        assert_eq!(
-            launch
-                .arguments
-                .iter()
-                .filter(|argument| {
-                    argument.as_os_str() == std::ffi::OsStr::new(OFFICE_URL)
-                })
-                .count(),
-            1
-        );
-    }
-
-    #[test]
     fn startup_notice_escapes_html_and_percent_encodes_the_document() {
         assert_eq!(
             html_escape("<&>\"' <script>alert(1)</script>"),
@@ -1394,7 +1265,8 @@ mod tests {
         assert!(!port_used.contains("combined development surface"));
 
         let incompatible = startup_notice_html(StartupNoticeKind::ExistingServerIncompatible);
-        assert!(incompatible.contains("Update the existing Hermes Office server"));
+        assert!(incompatible.contains("verify that the process owning loopback port 4317"));
+        assert!(incompatible.contains("update it to a version"));
         assert!(incompatible.contains("compatible server"));
 
         let malformed = startup_notice_html(StartupNoticeKind::ExistingServerMalformed);
@@ -1414,9 +1286,15 @@ mod tests {
         assert!(web_ui.contains("build the web assets"));
         assert!(web_ui.contains(OFFICE_URL));
 
-        let browser = startup_notice_html(StartupNoticeKind::BrowserLaunchFailed);
-        assert!(browser.contains("Open http://127.0.0.1:4317/ manually"));
-        assert!(!browser.contains("build the web assets"));
+        let candidate = startup_notice_html(StartupNoticeKind::ExistingServerCandidate);
+        assert!(candidate.contains("do not verify its identity"));
+        assert!(candidate.contains("confirm that the process which owns loopback port 4317"));
+        assert!(candidate.contains(OFFICE_URL));
+        assert!(candidate.contains("manually open"));
+        assert!(candidate.contains("do not open the URL"));
+        assert!(candidate.contains("will not kill it automatically"));
+        assert!(!candidate.contains("automatically open"));
+        assert!(!candidate.contains("default browser"));
 
         let runtime = startup_notice_html(StartupNoticeKind::OwnedManagedRuntimeUnavailable);
         assert!(runtime.contains("managed Node.js and Hermes Agent runtimes"));
@@ -1441,12 +1319,12 @@ mod tests {
         assert!(state.contains("do not manually stop unrelated processes"));
 
         for notice in [
+            StartupNoticeKind::ExistingServerCandidate,
             StartupNoticeKind::ExistingServerIncompatible,
             StartupNoticeKind::ExistingServerMalformed,
             StartupNoticeKind::ExistingServerTimeout,
             StartupNoticeKind::PortUsedByOtherService,
             StartupNoticeKind::ExistingWebUiTimeout,
-            StartupNoticeKind::BrowserLaunchFailed,
             StartupNoticeKind::OwnedManagedRuntimeUnavailable,
             StartupNoticeKind::OwnedBundledResourceUnavailable,
             StartupNoticeKind::OwnedChildLaunchFailed,
@@ -1478,13 +1356,13 @@ mod tests {
     #[test]
     fn every_startup_notice_is_self_contained_and_has_no_active_resource() {
         let notices = [
+            StartupNoticeKind::ExistingServerCandidate,
             StartupNoticeKind::ExistingServerIncompatible,
             StartupNoticeKind::ExistingServerMalformed,
             StartupNoticeKind::ExistingServerTimeout,
             StartupNoticeKind::PortUsedByOtherService,
             StartupNoticeKind::ExistingWebUiUnavailable,
             StartupNoticeKind::ExistingWebUiTimeout,
-            StartupNoticeKind::BrowserLaunchFailed,
             StartupNoticeKind::OwnedManagedRuntimeUnavailable,
             StartupNoticeKind::OwnedBundledResourceUnavailable,
             StartupNoticeKind::OwnedChildLaunchFailed,
@@ -1597,14 +1475,14 @@ mod tests {
     }
 
     #[test]
-    fn classify_compatible_existing_server_attaches() {
+    fn classify_compatible_existing_server_as_unauthenticated_candidate() {
         let address = bind_office_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
             "HTTP/1.1 200 OK\r\ncontent-type: Text/HTML; charset=utf-8\r\n\r\n<!doctype html><html><head><title>Hermes Office</title></head><body><div id=\"app\"></div></body></html>",
         );
         assert_eq!(
-            classify_office_startup(address).expect("compatible server should classify"),
-            OfficeStartup::AttachExisting
+            classify_office_startup(address).expect("compatible candidate should classify"),
+            OfficeStartup::CompatibleCandidate
         );
     }
 
@@ -1616,7 +1494,7 @@ mod tests {
         );
         let error = classify_office_startup(address)
             .expect_err("a health-only server must not be treated as attachable");
-        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+        assert!(error.to_string().contains("not the expected Hermes Office Web UI shape"));
     }
 
     #[test]
@@ -1627,7 +1505,7 @@ mod tests {
         );
         let error = classify_office_startup(address)
             .expect_err("a non-HTML root must not be treated as attachable");
-        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+        assert!(error.to_string().contains("not the expected Hermes Office Web UI shape"));
     }
 
     #[test]
@@ -1638,7 +1516,7 @@ mod tests {
         );
         let error = classify_office_startup(address)
             .expect_err("unrelated HTML must not be treated as Hermes Office");
-        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+        assert!(error.to_string().contains("not the expected Hermes Office Web UI shape"));
     }
 
     #[test]
@@ -1649,7 +1527,7 @@ mod tests {
         );
         let error = classify_office_startup(address)
             .expect_err("a malformed root response must not be attachable");
-        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+        assert!(error.to_string().contains("not the expected Hermes Office Web UI shape"));
     }
 
     #[test]
@@ -1694,7 +1572,7 @@ mod tests {
             "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnot found",
         );
         let error = classify_office_startup(address).expect_err("other service should error");
-        assert!(error.to_string().contains("non-Hermes Office service"));
+        assert!(error.to_string().contains("not recognized as Hermes Office"));
     }
 
     fn bind_health_server(response: &'static str) -> SocketAddr {
@@ -1738,7 +1616,7 @@ mod tests {
         });
         let error = classify_office_startup(address)
             .expect_err("an oversized root response must not be attachable");
-        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+        assert!(error.to_string().contains("not the expected Hermes Office Web UI shape"));
     }
 
     #[test]
@@ -1843,7 +1721,7 @@ mod tests {
             .expect_err("a stalling Web UI must not extend the probe indefinitely");
         let elapsed = started.elapsed();
 
-        assert!(error.to_string().contains("Web UI response timed out"));
+        assert!(error.to_string().contains("Web UI probe timed out"));
         assert!(
             elapsed < Duration::from_secs(2),
             "absolute Web UI deadline was exceeded: {elapsed:?}"

@@ -110,20 +110,24 @@ both generate a launch-scoped random desktop capability, start an owned Office
 Server child, verify its health and capability, and stop only that child on exit.
 The capability is available to the WebView through Tauri IPC.
 
-If a compatible Office Server is already listening and serves the bundled
-Hermes Office Web UI from `/`, the optional desktop launcher does not generate
-a capability or start a child. It opens the fixed
-loopback Web UI in the default system browser and exits. This remains compatible
-with older protocol-v1 web bundles because the page never enters a Tauri WebView
-or uses Tauri IPC. Desktop-only host administration is unavailable in this mode,
-and the external server remains unowned and is never stopped or killed by the
-launcher. Remote clients require only a browser, not the desktop app.
+If a listener has a compatible protocol response and serves the expected Hermes
+Office Web UI shape from `/`, the optional desktop launcher does not generate a
+capability or start a child. Those public shape checks do not authenticate the
+listener. The launcher keeps its window open on a fixed notice and never
+automatically navigates to or opens the listener. The operator must first verify
+that the process owning port 4317 is their Hermes Office and only then manually
+open the fixed loopback URL in a normal browser. An unknown listener must not be
+opened and should be inspected or stopped through its normal management procedure.
+The launcher never stops or kills it. A manually opened older protocol-v1 web
+bundle remains usable without Tauri IPC; desktop-only host administration is
+unavailable. Remote clients require only a browser, not the desktop app.
 Incompatible, malformed, timing-out, or non-Hermes listeners fail closed. A
 self-contained startup notice remains in the desktop window when the existing
-server has no Web UI, a probe times out, or the fixed Web UI URL cannot be
-opened in the system browser. Its fixed recovery steps are cause-specific:
+server has no Web UI or a probe times out. Its fixed recovery steps are
+cause-specific:
 listener ownership, compatibility/update, response/log/restart, Web UI assets,
-or manual browser opening as appropriate. Failures while starting an owned
+or owner verification and manual browser opening as appropriate. Failures while
+starting an owned
 server distinguish managed runtime, bundled resources, child launch, readiness,
 and internal state. These paths do not crash the shell and never stop, replace,
 or take ownership of an existing listener.

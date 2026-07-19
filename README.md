@@ -141,23 +141,26 @@ browser and do not need the desktop app.
 
 - **Free port:** the shell starts its own child, verifies its health and the
   shell’s ephemeral desktop capability, and stops only that owned child on exit.
-- **Compatible server already running:** after verifying both the protocol-v1
-  health contract and the bundled Hermes Office Web UI, the launcher opens the fixed loopback
-  Web UI (`http://127.0.0.1:4317/`) in the default system browser and then exits.
-  It does not spawn, stop, or kill the existing server. Because this is an
-  ordinary browser page—even when the server carries an older protocol-v1 web
-  bundle—it does not use Tauri IPC, and desktop-only host administration is
-  unavailable.
+- **Compatible-looking server already running:** the protocol-v1 health and Web
+  UI shape checks identify only a candidate; public responses do not authenticate
+  the listener as the operator's Hermes Office. The launcher keeps its window
+  open on a fixed notice and does not navigate to or automatically open the
+  listener. First confirm that the process owning port 4317 is your Hermes Office.
+  Only then manually open `http://127.0.0.1:4317/` in a normal browser. If the
+  owner is unknown, do not open it; inspect or stop the process through its normal
+  management procedure. The launcher never stops or kills that external process.
+  A manually opened ordinary browser page—including an older protocol-v1 web
+  bundle—does not use Tauri IPC, so desktop-only host administration is unavailable.
   Running `npm run dev:server` alone does not provide that Web UI; run the normal
   combined development surface or otherwise serve built web assets from `/`.
 - **Incompatible, malformed, timing-out, or non-Hermes listener:** the shell fails
   closed without taking over the port. If the existing server has no Web UI, a
-  probe times out, or the system browser cannot be launched, the desktop window
+  probe times out, the desktop window
   stays open on a self-contained, cause-specific recovery notice instead of
   crashing. Port conflicts identify port-owner checks; compatibility and probe
   failures identify update, log, and normal restart steps; only a missing Web UI
-  identifies the combined development or built-web-assets steps. A browser-launch
-  failure displays the fixed URL for manual opening. Owned-server failures
+  identifies the combined development or built-web-assets steps. Owned-server
+  failures
   separately identify managed-runtime, bundled-resource, child-launch, readiness,
   and internal-state recovery. The notice never stops or replaces the process
   that owns the port.
