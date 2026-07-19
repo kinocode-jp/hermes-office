@@ -109,6 +109,20 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     setWorkspacePlacement(next);
     announcePlacement(next);
   };
+  const releaseOwnedPointer = (event: PointerEvent) => {
+    if (event.currentTarget instanceof HTMLElement && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+  const finishResize = () => {
+    if (!resizingRef.current) return;
+    resizingRef.current = false;
+    persistWorkspaceLayout();
+  };
+  const cancelDockDrag = (event?: PointerEvent) => {
+    if (event) releaseOwnedPointer(event);
+    setDrag(null);
+  };
   const beginDockDrag = (source: DragSource, event: PointerEvent) => {
     if (mobile || !hasChats || event.button !== 0) return;
     event.preventDefault();
@@ -121,9 +135,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   };
   const finishDockDrag = (event: PointerEvent) => {
     if (!drag) return;
-    if (event.currentTarget instanceof HTMLElement && event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
+    releaseOwnedPointer(event);
     commitDock(drag.candidate);
     setDrag(null);
   };
@@ -170,6 +182,18 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     commitDock(chatPlacementForEdge(source, edge));
   };
 
+  useEffect(() => {
+    if (hasChats && !mobile) return;
+    finishResize();
+    cancelDockDrag();
+  }, [hasChats, mobile]);
+
+  useEffect(() => () => {
+    if (!resizingRef.current) return;
+    resizingRef.current = false;
+    persistWorkspaceLayout();
+  }, []);
+
   return (
     <div
       ref={host}
@@ -192,15 +216,14 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
           onPointerDown={(event) => { if (event.button === 0) event.currentTarget.setPointerCapture(event.pointerId); }}
           onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event); }}
           onPointerUp={(event) => {
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-            resizingRef.current = false;
-            persistWorkspaceLayout();
+            releaseOwnedPointer(event);
+            finishResize();
           }}
           onPointerCancel={(event) => {
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-            resizingRef.current = false;
-            persistWorkspaceLayout();
+            releaseOwnedPointer(event);
+            finishResize();
           }}
+          onLostPointerCapture={finishResize}
           onKeyDown={resizeWithKeyboard}
         />
       )}
@@ -215,7 +238,8 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
             onPointerDown={(event) => { event.stopPropagation(); beginDockDrag("office", event); }}
             onPointerMove={moveDockDrag}
             onPointerUp={finishDockDrag}
-            onPointerCancel={() => setDrag(null)}
+            onPointerCancel={cancelDockDrag}
+            onLostPointerCapture={() => cancelDockDrag()}
             onKeyDown={(event) => dockWithKeyboard("office", event)}
           >O</button>
           <span aria-hidden="true" />
@@ -228,7 +252,8 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
             onPointerDown={(event) => { event.stopPropagation(); beginDockDrag("chat", event); }}
             onPointerMove={moveDockDrag}
             onPointerUp={finishDockDrag}
-            onPointerCancel={() => setDrag(null)}
+            onPointerCancel={cancelDockDrag}
+            onLostPointerCapture={() => cancelDockDrag()}
             onKeyDown={(event) => dockWithKeyboard("chat", event)}
           >C</button>
         </div>
@@ -237,7 +262,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
       <p class="visually-hidden" aria-live="polite" aria-atomic="true">
         {layoutAnnouncement.text}{layoutAnnouncement.token % 2 === 1 ? "\u200b" : ""}
       </p>
-      {drag && (
+      {drag && hasChats && !mobile && (
         <div class="workspace-drop-zones" aria-hidden="true">
           {workspacePlacements.map((edge) => (
             <span key={edge} data-edge={edge} class={drag.candidate === chatPlacementForEdge(drag.source, edge) ? "is-target" : ""}>
