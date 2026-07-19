@@ -560,18 +560,8 @@ test("desktop capability recovery remains cookie-free and does not call HTTP aut
   });
 });
 
-test("attached desktop origin bypasses exposed IPC and uses local cookie auth", async () => {
-  let desktopInvocations = 0;
-  await withBrowserEnvironment({
-    protocol: "http:",
-    hostname: "127.0.0.1",
-    port: "4317",
-    origin: "http://127.0.0.1:4317",
-    desktopInvoke: async () => {
-      desktopInvocations += 1;
-      throw new Error("Remote capability ACL rejected IPC.");
-    },
-  }, async () => {
+test("null desktop capability falls back to local cookie auth without capability header or subprotocol", async () => {
+  await withBrowserEnvironment({ protocol: "tauri:", hostname: "tauri.localhost", origin: "tauri://localhost", desktopCapability: null }, async () => {
     const originalFetch = globalThis.fetch;
     let localBootstraps = 0;
     let deviceRenewals = 0;
@@ -589,7 +579,6 @@ test("attached desktop origin bypasses exposed IPC and uses local cookie auth", 
       await recoverOfficeWebSocketAuthentication(serverUrl, lease.authRevision);
       const recovered = await openOfficeWebSocket("ws://127.0.0.1:4317/api/v1/events", serverUrl);
       assert.notEqual(recovered.authRevision, lease.authRevision);
-      assert.equal(desktopInvocations, 0);
       assert.equal(localBootstraps, 2);
       assert.equal(deviceRenewals, 0);
       const sockets = BareWebSocket.byPath("/api/v1/events");
@@ -646,7 +635,6 @@ test("authenticated WebSocket leases reject cross-origin and non-Office targets 
 type BrowserLocation = {
   protocol: string;
   hostname: string;
-  port?: string;
   origin: string;
   desktopCapability?: string | null;
   desktopInvoke?: () => Promise<string | null>;

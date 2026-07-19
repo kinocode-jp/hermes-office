@@ -13,6 +13,7 @@ use tauri::{Manager, RunEvent};
 
 const OFFICE_HOST: &str = "127.0.0.1";
 const OFFICE_PORT: u16 = 4317;
+const OFFICE_URL: &str = "http://127.0.0.1:4317/";
 const OFFICE_PROTOCOL_VERSION: i64 = 1;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,23 +114,13 @@ pub fn run() {
                     // instance's ephemeral capability. OfficeServerProcess stays
                     // None so app exit does not stop the external server.
                     //
-                    // A tauri://localhost top-level page cannot reliably use the
-                    // existing server's SameSite=Strict local session cookie from
-                    // a cross-origin fetch. Navigate the main WebView to the
-                    // server origin so the web UI becomes a same-origin ordinary
-                    // browser page, using browser-equivalent local cookie auth.
-                    // The capability state remains None; the attached remote page
-                    // has no Tauri desktop capability and therefore no host
-                    // administration panel.
-                    let main_window = app
-                        .get_webview_window("main")
-                        .ok_or("Hermes Office main window is unavailable.")?;
-                    let target_url = format!("http://{OFFICE_HOST}:{OFFICE_PORT}/");
-                    main_window.navigate(
-                        target_url
-                            .parse()
-                            .map_err(|_| "Failed to parse Office Server origin.")?,
-                    )?;
+                    // The already-running server can carry an older protocol-v1
+                    // web bundle that does not know about this desktop shell. Open
+                    // it as an ordinary browser page instead of navigating a Tauri
+                    // WebView into an untrusted, independently served document.
+                    // The fixed loopback URL is never derived from external input.
+                    open_office_in_system_browser()?;
+                    app.exit(0);
                 }
             }
             Ok(())
@@ -146,6 +137,55 @@ pub fn run() {
             }
         }
     });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserLaunchCommand {
+    program: &'static str,
+    arguments: Vec<OsString>,
+}
+
+fn office_browser_launch_command() -> BrowserLaunchCommand {
+    #[cfg(target_os = "macos")]
+    {
+        BrowserLaunchCommand {
+            program: "open",
+            arguments: vec![OsString::from(OFFICE_URL)],
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        BrowserLaunchCommand {
+            program: "rundll32.exe",
+            arguments: vec![
+                OsString::from("url.dll,FileProtocolHandler"),
+                OsString::from(OFFICE_URL),
+            ],
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        BrowserLaunchCommand {
+            program: "xdg-open",
+            arguments: vec![OsString::from(OFFICE_URL)],
+        }
+    }
+}
+
+fn open_office_in_system_browser() -> Result<(), Box<dyn std::error::Error>> {
+    let launch = office_browser_launch_command();
+    Command::new(launch.program)
+        .args(launch.arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "A compatible Office Server is already running, but its Web UI could not be opened in the default browser: {error}"
+            )
+        })?;
+    Ok(())
 }
 
 fn start_office_server(
@@ -805,6 +845,26 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn browser_launcher_uses_only_the_fixed_office_url_without_a_shell() {
+        let launch = office_browser_launch_command();
+        assert!(!matches!(launch.program, "sh" | "bash" | "zsh" | "cmd"));
+        assert!(launch
+            .arguments
+            .iter()
+            .any(|argument| argument.as_os_str() == std::ffi::OsStr::new(OFFICE_URL)));
+        assert_eq!(
+            launch
+                .arguments
+                .iter()
+                .filter(|argument| {
+                    argument.as_os_str() == std::ffi::OsStr::new(OFFICE_URL)
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]

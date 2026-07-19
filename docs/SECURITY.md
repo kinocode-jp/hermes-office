@@ -161,10 +161,12 @@ The panel never displays the enrollment token, device credential digests, or
 cookies.
 
 When the desktop shell attaches to an existing compatible Office Server rather
-than starting its own child, it navigates the WebView to the server origin. The
-page is an ordinary browser page, so the ephemeral desktop capability is not
-available and the host administration panel is not rendered. The external server
-is not spawned, stopped, or killed by the attaching shell.
+than starting its own child, it opens the fixed loopback Web UI in the default
+system browser and exits. The browser page does not use Tauri IPC, including
+when the existing server carries an older protocol-v1 web bundle, so the
+ephemeral desktop capability is unavailable and the host administration panel is
+not rendered. The external server is not spawned, stopped, or killed by the
+launcher. The desktop app is optional and is not needed on remote clients.
 
 Changing remote access requires editing `HERMES_OFFICE_REMOTE_TOKEN`,
 `HERMES_OFFICE_ALLOWED_ORIGINS`, `HERMES_OFFICE_TRUSTED_PROXY_HOPS`, and
