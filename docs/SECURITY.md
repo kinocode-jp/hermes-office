@@ -161,7 +161,8 @@ The panel never displays the enrollment token, device credential digests, or
 cookies.
 
 When the desktop shell attaches to an existing compatible Office Server rather
-than starting its own child, it opens the fixed loopback Web UI in the default
+than starting its own child, it first verifies that the same listener serves the
+Hermes Office HTML shell, then opens the fixed loopback Web UI in the default
 system browser and exits. The browser page does not use Tauri IPC, including
 when the existing server carries an older protocol-v1 web bundle, so the
 ephemeral desktop capability is unavailable and the host administration panel is

@@ -141,12 +141,15 @@ browser and do not need the desktop app.
 
 - **Free port:** the shell starts its own child, verifies its health and the
   shell’s ephemeral desktop capability, and stops only that owned child on exit.
-- **Compatible server already running:** the launcher opens the fixed loopback
+- **Compatible server already running:** after verifying both the protocol-v1
+  health contract and the bundled Hermes Office Web UI, the launcher opens the fixed loopback
   Web UI (`http://127.0.0.1:4317/`) in the default system browser and then exits.
   It does not spawn, stop, or kill the existing server. Because this is an
   ordinary browser page—even when the server carries an older protocol-v1 web
   bundle—it does not use Tauri IPC, and desktop-only host administration is
   unavailable.
+  Running `npm run dev:server` alone does not provide that Web UI; run the normal
+  combined development surface or otherwise serve built web assets from `/`.
 - **Incompatible, malformed, timing-out, or non-Hermes listener:** the shell fails
   closed with a precise error and does not take over the port.
 

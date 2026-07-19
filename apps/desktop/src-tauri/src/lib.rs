@@ -28,6 +28,7 @@ const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_VERSION_OUTPUT: u64 = 4096;
 const MAX_HTTP_HEADERS: usize = 8192;
 const MAX_HEALTH_RESPONSE: u64 = 4096;
+const MAX_WEB_UI_RESPONSE: usize = 128 * 1024;
 const DESKTOP_CAPABILITY_HEADER: &str = "X-Hermes-Office-Desktop-Capability";
 const SUPPORTED_NODE_MAJOR: u64 = 22;
 const SUPPORTED_HERMES_MAJOR: u64 = 0;
@@ -49,6 +50,8 @@ enum StartupProbeError {
     Malformed,
     Timeout,
     OtherService,
+    ExistingWebUiUnavailable,
+    ExistingWebUiTimeout,
 }
 impl std::fmt::Display for StartupProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,6 +67,12 @@ impl std::fmt::Display for StartupProbeError {
             }
             StartupProbeError::OtherService => {
                 write!(formatter, "Port {OFFICE_PORT} is already in use by a non-Hermes Office service. Close that service before starting Hermes Office.")
+            }
+            StartupProbeError::ExistingWebUiUnavailable => {
+                write!(formatter, "A compatible Office Server is listening on port {OFFICE_PORT}, but it is not serving the Hermes Office Web UI. Start Office with its built web assets, or serve the Web UI separately before using the desktop launcher.")
+            }
+            StartupProbeError::ExistingWebUiTimeout => {
+                write!(formatter, "A compatible Office Server is listening on port {OFFICE_PORT}, but its Web UI response timed out. Restart Office with its built web assets before using the desktop launcher.")
             }
         }
     }
@@ -384,12 +393,25 @@ fn classify_office_startup(
     }
 
     match probe_existing_health(address) {
-        ProbeOutcome::Compatible => Ok(OfficeStartup::AttachExisting),
+        ProbeOutcome::Compatible => match probe_existing_web_ui(address) {
+            WebUiProbeOutcome::Compatible => Ok(OfficeStartup::AttachExisting),
+            WebUiProbeOutcome::Unavailable => {
+                Err(StartupProbeError::ExistingWebUiUnavailable.into())
+            }
+            WebUiProbeOutcome::Timeout => Err(StartupProbeError::ExistingWebUiTimeout.into()),
+        },
         ProbeOutcome::Incompatible => Err(StartupProbeError::Incompatible.into()),
         ProbeOutcome::Malformed => Err(StartupProbeError::Malformed.into()),
         ProbeOutcome::Timeout => Err(StartupProbeError::Timeout.into()),
         ProbeOutcome::OtherService => Err(StartupProbeError::OtherService.into()),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebUiProbeOutcome {
+    Compatible,
+    Unavailable,
+    Timeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,6 +476,83 @@ fn probe_existing_health(address: SocketAddr) -> ProbeOutcome {
         HealthCompatibility::Incompatible => ProbeOutcome::Incompatible,
         HealthCompatibility::Malformed => ProbeOutcome::Malformed,
     }
+}
+
+fn probe_existing_web_ui(address: SocketAddr) -> WebUiProbeOutcome {
+    let deadline = Instant::now() + HEALTH_RESPONSE_TIMEOUT;
+    let Some(connect_timeout) = remaining_timeout(deadline, Duration::from_millis(200)) else {
+        return WebUiProbeOutcome::Timeout;
+    };
+    let mut stream = match TcpStream::connect_timeout(&address, connect_timeout) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            return WebUiProbeOutcome::Timeout;
+        }
+        Err(_) => return WebUiProbeOutcome::Unavailable,
+    };
+    if set_write_timeout_until(&stream, deadline).is_err() {
+        return WebUiProbeOutcome::Timeout;
+    }
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {address}\r\nAccept: text/html\r\nConnection: close\r\n\r\n"
+    );
+    if let Err(error) = stream.write_all(request.as_bytes()) {
+        return if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            WebUiProbeOutcome::Timeout
+        } else {
+            WebUiProbeOutcome::Unavailable
+        };
+    }
+    let response = match read_bounded_response(&mut stream, MAX_WEB_UI_RESPONSE, deadline, false) {
+        Ok(response) => response,
+        Err(BoundedReadError::Timeout) => return WebUiProbeOutcome::Timeout,
+        Err(BoundedReadError::LimitExceeded | BoundedReadError::Io) => {
+            return WebUiProbeOutcome::Unavailable;
+        }
+    };
+    let text = match String::from_utf8(response) {
+        Ok(value) => value,
+        Err(_) => return WebUiProbeOutcome::Unavailable,
+    };
+    let Some((headers, body)) = text.split_once("\r\n\r\n") else {
+        return WebUiProbeOutcome::Unavailable;
+    };
+    if !http_status_is_ok(headers) || !content_type_is_html(headers) || !body_is_office_web_ui(body)
+    {
+        return WebUiProbeOutcome::Unavailable;
+    }
+    WebUiProbeOutcome::Compatible
+}
+
+fn content_type_is_html(headers: &str) -> bool {
+    let mut content_type = None;
+    for line in headers.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-type") {
+            if content_type.is_some() {
+                return false;
+            }
+            content_type = value.split(';').next().map(str::trim);
+        }
+    }
+    content_type.is_some_and(|media_type| media_type.eq_ignore_ascii_case("text/html"))
+}
+
+fn body_is_office_web_ui(body: &str) -> bool {
+    let normalized = body.to_ascii_lowercase();
+    normalized.contains("<!doctype html>")
+        && normalized.contains("<title>hermes office</title>")
+        && normalized.contains("id=\"app\"")
 }
 
 fn wait_for_office_server(
@@ -1040,6 +1139,20 @@ mod tests {
     }
 
     #[test]
+    fn web_ui_contract_matches_the_bundled_index_and_requires_html_content_type() {
+        assert!(body_is_office_web_ui(include_str!("../../../web/index.html")));
+        assert!(content_type_is_html(
+            "HTTP/1.1 200 OK\r\ncOnTeNt-TyPe: Text/HTML; charset=utf-8"
+        ));
+        assert!(!content_type_is_html(
+            "HTTP/1.1 200 OK\r\nX-Content-Type-Options: text/html"
+        ));
+        assert!(!content_type_is_html(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/xhtml+xml"
+        ));
+    }
+
+    #[test]
     fn health_body_compatibility_requires_the_office_health_contract() {
         assert!(health_body_is_compatible(
             r#"{"ok":true,"protocolVersion":1,"runtime":"ready"}"#
@@ -1113,13 +1226,58 @@ mod tests {
 
     #[test]
     fn classify_compatible_existing_server_attaches() {
-        let address = bind_health_server(
+        let address = bind_office_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
+            "HTTP/1.1 200 OK\r\ncontent-type: Text/HTML; charset=utf-8\r\n\r\n<!doctype html><html><head><title>Hermes Office</title></head><body><div id=\"app\"></div></body></html>",
         );
         assert_eq!(
             classify_office_startup(address).expect("compatible server should classify"),
             OfficeStartup::AttachExisting
         );
+    }
+
+    #[test]
+    fn classify_compatible_health_without_root_web_ui_rejects() {
+        let address = bind_office_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnot found",
+        );
+        let error = classify_office_startup(address)
+            .expect_err("a health-only server must not be treated as attachable");
+        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+    }
+
+    #[test]
+    fn classify_compatible_health_with_non_html_root_rejects() {
+        let address = bind_office_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"title\":\"Hermes Office\",\"id\":\"app\"}",
+        );
+        let error = classify_office_startup(address)
+            .expect_err("a non-HTML root must not be treated as attachable");
+        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+    }
+
+    #[test]
+    fn classify_compatible_health_with_unrelated_html_rejects() {
+        let address = bind_office_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!doctype html><html><head><title>Other App</title></head><body><div id=\"app\"></div></body></html>",
+        );
+        let error = classify_office_startup(address)
+            .expect_err("unrelated HTML must not be treated as Hermes Office");
+        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
+    }
+
+    #[test]
+    fn classify_compatible_health_with_malformed_root_rejects() {
+        let address = bind_office_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n<!doctype html><title>Hermes Office</title><div id=\"app\"></div>",
+        );
+        let error = classify_office_startup(address)
+            .expect_err("a malformed root response must not be attachable");
+        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
     }
 
     #[test]
@@ -1168,15 +1326,47 @@ mod tests {
     }
 
     fn bind_health_server(response: &'static str) -> SocketAddr {
+        bind_http_server(vec![response])
+    }
+
+    fn bind_office_server(health_response: &'static str, root_response: &'static str) -> SocketAddr {
+        bind_http_server(vec![health_response, root_response])
+    }
+
+    fn bind_http_server(responses: Vec<&'static str>) -> SocketAddr {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .expect("bind temporary health server");
         let address = listener.local_addr().expect("local address");
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept health connection");
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            for response in responses {
+                serve_one_response(&listener, response.as_bytes());
+            }
         });
         address
+    }
+
+    fn serve_one_response(listener: &TcpListener, response: &[u8]) {
+        let (mut stream, _) = listener.accept().expect("accept HTTP connection");
+        let mut request = [0_u8; 512];
+        let _ = stream.read(&mut request);
+        let _ = stream.write_all(response);
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[test]
+    fn classify_compatible_health_with_oversized_root_rejects() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind temporary Office server");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let health = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}";
+            serve_one_response(&listener, health.as_bytes());
+            let oversized = vec![b'x'; MAX_WEB_UI_RESPONSE + 1];
+            serve_one_response(&listener, &oversized);
+        });
+        let error = classify_office_startup(address)
+            .expect_err("an oversized root response must not be attachable");
+        assert!(error.to_string().contains("not serving the Hermes Office Web UI"));
     }
 
     #[test]
@@ -1259,6 +1449,32 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "absolute health deadline was exceeded: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn classify_stalling_root_response_is_web_ui_timeout() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind temporary Office server");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let health = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}";
+            serve_one_response(&listener, health.as_bytes());
+            let (mut stream, _) = listener.accept().expect("accept root connection");
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            thread::sleep(Duration::from_millis(800));
+        });
+
+        let started = Instant::now();
+        let error = classify_office_startup(address)
+            .expect_err("a stalling Web UI must not extend the probe indefinitely");
+        let elapsed = started.elapsed();
+
+        assert!(error.to_string().contains("Web UI response timed out"));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "absolute Web UI deadline was exceeded: {elapsed:?}"
         );
     }
 }

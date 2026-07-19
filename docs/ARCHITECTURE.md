@@ -110,8 +110,9 @@ both generate a launch-scoped random desktop capability, start an owned Office
 Server child, verify its health and capability, and stop only that child on exit.
 The capability is available to the WebView through Tauri IPC.
 
-If a compatible Office Server is already listening, the optional desktop
-launcher does not generate a capability or start a child. It opens the fixed
+If a compatible Office Server is already listening and serves the bundled
+Hermes Office Web UI from `/`, the optional desktop launcher does not generate
+a capability or start a child. It opens the fixed
 loopback Web UI in the default system browser and exits. This remains compatible
 with older protocol-v1 web bundles because the page never enters a Tauri WebView
 or uses Tauri IPC. Desktop-only host administration is unavailable in this mode,
@@ -119,6 +120,8 @@ and the external server remains unowned and is never stopped or killed by the
 launcher. Remote clients require only a browser, not the desktop app.
 Incompatible, malformed, timing-out, or non-Hermes listeners fail closed with a
 clear error.
+The health-only `npm run dev:server` process is therefore not attachable unless
+the Web UI is also served from the same listener.
 
 Local builds are developer artifacts. A signed/notarized project release and
 release provenance pipeline do not exist yet; see [`RELEASING.md`](RELEASING.md).
