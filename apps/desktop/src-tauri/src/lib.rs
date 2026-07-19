@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::Mutex,
     thread,
     time::{Duration, Instant},
@@ -18,6 +18,10 @@ const OFFICE_PROTOCOL_VERSION: i64 = 1;
 const START_TIMEOUT: Duration = Duration::from_secs(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
+const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+const HEALTH_RESPONSE_TIMEOUT: Duration = Duration::from_millis(750);
+const HTTP_READ_SLICE: Duration = Duration::from_millis(250);
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_VERSION_OUTPUT: u64 = 4096;
 const MAX_HTTP_HEADERS: usize = 8192;
 const MAX_HEALTH_RESPONSE: u64 = 4096;
@@ -174,7 +178,7 @@ fn office_browser_launch_command() -> BrowserLaunchCommand {
 
 fn open_office_in_system_browser() -> Result<(), Box<dyn std::error::Error>> {
     let launch = office_browser_launch_command();
-    Command::new(launch.program)
+    let mut child = Command::new(launch.program)
         .args(launch.arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -185,7 +189,22 @@ fn open_office_in_system_browser() -> Result<(), Box<dyn std::error::Error>> {
                 "A compatible Office Server is already running, but its Web UI could not be opened in the default browser: {error}"
             )
         })?;
-    Ok(())
+    match wait_for_bounded_child(&mut child, BROWSER_LAUNCH_TIMEOUT) {
+        Ok(Some(status)) if status.success() => Ok(()),
+        Ok(Some(status)) => Err(format!(
+            "A compatible Office Server is already running, but the default browser launcher exited unsuccessfully ({status})."
+        )
+        .into()),
+        Ok(None) => Err(format!(
+            "A compatible Office Server is already running, but the default browser launcher did not finish within {} seconds.",
+            BROWSER_LAUNCH_TIMEOUT.as_secs()
+        )
+        .into()),
+        Err(error) => Err(format!(
+            "A compatible Office Server is already running, but the default browser launcher could not be monitored: {error}"
+        )
+        .into()),
+    }
 }
 
 fn start_office_server(
@@ -348,31 +367,43 @@ enum ProbeOutcome {
 }
 
 fn probe_existing_health(address: SocketAddr) -> ProbeOutcome {
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
-        return ProbeOutcome::OtherService;
+    let deadline = Instant::now() + HEALTH_RESPONSE_TIMEOUT;
+    let mut stream = match TcpStream::connect_timeout(&address, Duration::from_millis(200)) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            return ProbeOutcome::Timeout;
+        }
+        Err(_) => return ProbeOutcome::OtherService,
     };
-    let timeout = Some(Duration::from_millis(500));
-    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+    if set_write_timeout_until(&stream, deadline).is_err() {
         return ProbeOutcome::Timeout;
     }
     let host = format!("{address}");
     let request =
         format!("GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return ProbeOutcome::OtherService;
+    if let Err(error) = stream.write_all(request.as_bytes()) {
+        return if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            ProbeOutcome::Timeout
+        } else {
+            ProbeOutcome::OtherService
+        };
     }
-    let mut response = Vec::new();
-    let read_result = stream
-        .take(MAX_HEALTH_RESPONSE + 1)
-        .read_to_end(&mut response);
-    match read_result {
-        Ok(()) if response.len() as u64 > MAX_HEALTH_RESPONSE => return ProbeOutcome::Malformed,
-        Ok(()) => {}
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-            return ProbeOutcome::Timeout;
-        }
-        Err(_) => return ProbeOutcome::Malformed,
-    }
+    let response =
+        match read_bounded_response(&mut stream, MAX_HEALTH_RESPONSE as usize, deadline, false) {
+            Ok(response) => response,
+            Err(BoundedReadError::Timeout) => return ProbeOutcome::Timeout,
+            Err(BoundedReadError::LimitExceeded | BoundedReadError::Io) => {
+                return ProbeOutcome::Malformed;
+            }
+        };
     let text = match String::from_utf8(response) {
         Ok(value) => value,
         Err(_) => return ProbeOutcome::Malformed,
@@ -401,7 +432,9 @@ fn wait_for_office_server(
         if let Some(status) = child.try_wait()? {
             return Err(format!("Office Server exited during startup ({status}).").into());
         }
-        if health_check(address) && desktop_capability_check(address, desktop_capability) {
+        if health_check(address, deadline)
+            && desktop_capability_check(address, desktop_capability, deadline)
+        {
             if let Some(status) = child.try_wait()? {
                 return Err(format!("Office Server exited during startup ({status}).").into());
             }
@@ -412,12 +445,15 @@ fn wait_for_office_server(
     Err("Office Server did not become ready within 50 seconds.".into())
 }
 
-fn health_check(address: SocketAddr) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+fn health_check(address: SocketAddr, startup_deadline: Instant) -> bool {
+    let deadline = response_deadline(startup_deadline);
+    let Some(connect_timeout) = remaining_timeout(deadline, Duration::from_millis(200)) else {
         return false;
     };
-    let timeout = Some(Duration::from_millis(500));
-    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, connect_timeout) else {
+        return false;
+    };
+    if set_write_timeout_until(&stream, deadline).is_err() {
         return false;
     }
     if stream
@@ -428,13 +464,14 @@ fn health_check(address: SocketAddr) -> bool {
     {
         return false;
     }
-    let mut response = Vec::new();
-    let read_result = stream
-        .take(MAX_HEALTH_RESPONSE + 1)
-        .read_to_end(&mut response);
-    if read_result.is_err() || response.len() as u64 > MAX_HEALTH_RESPONSE {
+    let Ok(response) = read_bounded_response(
+        &mut stream,
+        MAX_HEALTH_RESPONSE as usize,
+        deadline,
+        false,
+    ) else {
         return false;
-    }
+    };
     let text = match String::from_utf8(response) {
         Ok(value) => value,
         Err(_) => return false,
@@ -459,12 +496,19 @@ fn http_status_is_ok(headers: &str) -> bool {
     status == "200"
 }
 
-fn desktop_capability_check(address: SocketAddr, desktop_capability: &str) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+fn desktop_capability_check(
+    address: SocketAddr,
+    desktop_capability: &str,
+    startup_deadline: Instant,
+) -> bool {
+    let deadline = response_deadline(startup_deadline);
+    let Some(connect_timeout) = remaining_timeout(deadline, Duration::from_millis(200)) else {
         return false;
     };
-    let timeout = Some(Duration::from_millis(500));
-    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, connect_timeout) else {
+        return false;
+    };
+    if set_write_timeout_until(&stream, deadline).is_err() {
         return false;
     }
     let request = format!(
@@ -473,28 +517,10 @@ fn desktop_capability_check(address: SocketAddr, desktop_capability: &str) -> bo
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
-    let mut buffer = [0_u8; 512];
-    let mut total = 0_usize;
-    let mut response = Vec::new();
-    let mut found_headers = false;
-    loop {
-        let Ok(size) = stream.read(&mut buffer) else {
-            return false;
-        };
-        if size == 0 {
-            break;
-        }
-        total += size;
-        if total > MAX_HTTP_HEADERS {
-            return false;
-        }
-        response.extend_from_slice(&buffer[..size]);
-        if response.windows(4).any(|window| window == b"\r\n\r\n") {
-            found_headers = true;
-            break;
-        }
-    }
-    if !found_headers {
+    let Ok(response) = read_bounded_response(&mut stream, MAX_HTTP_HEADERS, deadline, true) else {
+        return false;
+    };
+    if !response.windows(4).any(|window| window == b"\r\n\r\n") {
         return false;
     }
     let text = match String::from_utf8(response) {
@@ -502,6 +528,86 @@ fn desktop_capability_check(address: SocketAddr, desktop_capability: &str) -> bo
         Err(_) => return false,
     };
     http_status_is_ok(&text)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundedReadError {
+    Timeout,
+    LimitExceeded,
+    Io,
+}
+
+fn response_deadline(outer_deadline: Instant) -> Instant {
+    std::cmp::min(outer_deadline, Instant::now() + HEALTH_RESPONSE_TIMEOUT)
+}
+
+fn remaining_timeout(deadline: Instant, maximum: Duration) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .map(|remaining| std::cmp::min(remaining, maximum))
+}
+
+fn set_write_timeout_until(stream: &TcpStream, deadline: Instant) -> std::io::Result<()> {
+    let timeout = remaining_timeout(deadline, HTTP_READ_SLICE)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP deadline elapsed"))?;
+    stream.set_write_timeout(Some(timeout))
+}
+
+fn read_bounded_response(
+    stream: &mut TcpStream,
+    maximum: usize,
+    deadline: Instant,
+    stop_after_headers: bool,
+) -> Result<Vec<u8>, BoundedReadError> {
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 512];
+    loop {
+        let Some(timeout) = remaining_timeout(deadline, HTTP_READ_SLICE) else {
+            return Err(BoundedReadError::Timeout);
+        };
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|_| BoundedReadError::Io)?;
+        let capped_length = maximum
+            .saturating_add(1)
+            .saturating_sub(response.len())
+            .min(buffer.len());
+        match stream.read(&mut buffer[..capped_length]) {
+            Ok(0) => {
+                return if Instant::now() < deadline {
+                    Ok(response)
+                } else {
+                    Err(BoundedReadError::Timeout)
+                };
+            }
+            Ok(size) => {
+                response.extend_from_slice(&buffer[..size]);
+                if response.len() > maximum {
+                    return Err(BoundedReadError::LimitExceeded);
+                }
+                if Instant::now() >= deadline {
+                    return Err(BoundedReadError::Timeout);
+                }
+                if stop_after_headers
+                    && response.windows(4).any(|window| window == b"\r\n\r\n")
+                {
+                    return Ok(response);
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(BoundedReadError::Timeout);
+                }
+            }
+            Err(_) => return Err(BoundedReadError::Io),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,18 +757,9 @@ fn run_version_command(path: &Path) -> Result<String, String> {
     let stderr = child.stderr.take().ok_or_else(|| "runtime version output unavailable".to_owned())?;
     let stdout_reader = thread::spawn(move || read_limited(stdout));
     let stderr_reader = thread::spawn(move || read_limited(stderr));
-    let deadline = Instant::now() + VERSION_TIMEOUT;
-    let status = loop {
-        match child.try_wait().map_err(|_| "runtime version probe failed".to_owned())? {
-            Some(status) => break status,
-            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("runtime version probe timed out".to_owned());
-            }
-        }
-    };
+    let status = wait_for_bounded_child(&mut child, VERSION_TIMEOUT)
+        .map_err(|_| "runtime version probe failed".to_owned())?
+        .ok_or_else(|| "runtime version probe timed out".to_owned())?;
     let stdout = stdout_reader.join().map_err(|_| "runtime version probe failed".to_owned())??;
     let stderr = stderr_reader.join().map_err(|_| "runtime version probe failed".to_owned())??;
     if !status.success() {
@@ -672,6 +769,37 @@ fn run_version_command(path: &Path) -> Result<String, String> {
     String::from_utf8(output)
         .map(|value| value.trim().to_owned())
         .map_err(|_| "runtime version output is not UTF-8".to_owned())
+}
+
+/// Wait for a short-lived helper process and reap it. A timed-out helper is
+/// killed and reaped before this function returns; `None` represents timeout.
+fn wait_for_bounded_child(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        };
+        if remaining.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(std::cmp::min(remaining, CHILD_POLL_INTERVAL));
+    }
 }
 
 fn read_limited(reader: impl Read) -> Result<Vec<u8>, String> {
@@ -1061,12 +1189,41 @@ mod tests {
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept health connection");
             // Read the request so the client finishes writing, then remain silent
-            // long enough for the client-side 500 ms read timeout to fire.
+            // long enough for the absolute health-response deadline to fire.
             let mut buffer = [0_u8; 512];
             let _ = stream.read(&mut buffer);
             thread::sleep(Duration::from_millis(800));
         });
         let error = classify_office_startup(address).expect_err("stalling server should error");
         assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn classify_slow_drip_health_response_obeys_absolute_deadline() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind temporary health server");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health connection");
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            for byte in b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"protocolVersion\":1,\"runtime\":\"ready\"}" {
+                if stream.write_all(std::slice::from_ref(byte)).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let started = Instant::now();
+        let error = classify_office_startup(address)
+            .expect_err("a slow-drip response must not extend the probe indefinitely");
+        let elapsed = started.elapsed();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "absolute health deadline was exceeded: {elapsed:?}"
+        );
     }
 }
