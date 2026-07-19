@@ -1,4 +1,4 @@
-import type { ComponentChildren } from "preact";
+import { Fragment, type ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { locale } from "../i18n";
 import {
@@ -9,6 +9,7 @@ import {
   persistWorkspaceLayout,
   setWorkspacePlacement,
   setWorkspaceRatio,
+  workspaceChatPrecedesSurface,
   workspaceRatioBounds,
   workspacePlacement,
   workspacePlacements,
@@ -194,6 +195,66 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     persistWorkspaceLayout();
   }, []);
 
+  const surfacePane = <div key="surface-pane" class="workspace-layout-surface">{main}</div>;
+  const chatPane = <div key="chat-pane" class="workspace-layout-chat">{workspace}</div>;
+  const chatFirst = workspaceChatPrecedesSurface(placement, mobile, hasChats);
+  const desktopDivider = hasChats && !mobile ? (
+    <Fragment key="desktop-divider">
+      <div
+        class="workspace-separator"
+        role="separator"
+        tabIndex={0}
+        aria-label={copy.separator(placementName)}
+        aria-orientation={placement === "left" || placement === "right" ? "vertical" : "horizontal"}
+        aria-valuemin={Math.round(effectiveBounds.min * 100)}
+        aria-valuemax={Math.round(effectiveBounds.max * 100)}
+        aria-valuenow={Math.round(effectiveRatio * 100)}
+        aria-keyshortcuts="ArrowUp ArrowRight ArrowDown ArrowLeft Home End"
+        onPointerDown={(event) => { if (event.button === 0) event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event); }}
+        onPointerUp={(event) => {
+          releaseOwnedPointer(event);
+          finishResize();
+        }}
+        onPointerCancel={(event) => {
+          releaseOwnedPointer(event);
+          finishResize();
+        }}
+        onLostPointerCapture={finishResize}
+        onKeyDown={resizeWithKeyboard}
+      />
+      <div class="workspace-dock-controls" role="group" aria-label={copy.dockGroup}>
+        <button
+          type="button"
+          class="workspace-dock-handle workspace-dock-handle--office"
+          aria-label={copy.officeHandle}
+          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowRight Alt+ArrowDown Alt+ArrowLeft"
+          title={copy.handleTitle}
+          onPointerDown={(event) => { event.stopPropagation(); beginDockDrag("office", event); }}
+          onPointerMove={moveDockDrag}
+          onPointerUp={finishDockDrag}
+          onPointerCancel={cancelDockDrag}
+          onLostPointerCapture={() => cancelDockDrag()}
+          onKeyDown={(event) => dockWithKeyboard("office", event)}
+        >O</button>
+        <span aria-hidden="true" />
+        <button
+          type="button"
+          class="workspace-dock-handle workspace-dock-handle--chat"
+          aria-label={copy.chatHandle}
+          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowRight Alt+ArrowDown Alt+ArrowLeft"
+          title={copy.handleTitle}
+          onPointerDown={(event) => { event.stopPropagation(); beginDockDrag("chat", event); }}
+          onPointerMove={moveDockDrag}
+          onPointerUp={finishDockDrag}
+          onPointerCancel={cancelDockDrag}
+          onLostPointerCapture={() => cancelDockDrag()}
+          onKeyDown={(event) => dockWithKeyboard("chat", event)}
+        >C</button>
+      </div>
+    </Fragment>
+  ) : null;
+
   return (
     <div
       ref={host}
@@ -201,64 +262,11 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
       data-workspace-placement={placement}
       style={`--workspace-ratio: ${effectiveRatio * 100}%`}
     >
-      <div class="workspace-layout-surface">{main}</div>
-      {hasChats && !mobile && (
-        <div
-          class="workspace-separator"
-          role="separator"
-          tabIndex={0}
-          aria-label={copy.separator(placementName)}
-          aria-orientation={placement === "left" || placement === "right" ? "vertical" : "horizontal"}
-          aria-valuemin={Math.round(effectiveBounds.min * 100)}
-          aria-valuemax={Math.round(effectiveBounds.max * 100)}
-          aria-valuenow={Math.round(effectiveRatio * 100)}
-          aria-keyshortcuts="ArrowUp ArrowRight ArrowDown ArrowLeft Home End"
-          onPointerDown={(event) => { if (event.button === 0) event.currentTarget.setPointerCapture(event.pointerId); }}
-          onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event); }}
-          onPointerUp={(event) => {
-            releaseOwnedPointer(event);
-            finishResize();
-          }}
-          onPointerCancel={(event) => {
-            releaseOwnedPointer(event);
-            finishResize();
-          }}
-          onLostPointerCapture={finishResize}
-          onKeyDown={resizeWithKeyboard}
-        />
-      )}
-      {hasChats && !mobile && (
-        <div class="workspace-dock-controls" role="group" aria-label={copy.dockGroup}>
-          <button
-            type="button"
-            class="workspace-dock-handle workspace-dock-handle--office"
-            aria-label={copy.officeHandle}
-            aria-keyshortcuts="Alt+ArrowUp Alt+ArrowRight Alt+ArrowDown Alt+ArrowLeft"
-            title={copy.handleTitle}
-            onPointerDown={(event) => { event.stopPropagation(); beginDockDrag("office", event); }}
-            onPointerMove={moveDockDrag}
-            onPointerUp={finishDockDrag}
-            onPointerCancel={cancelDockDrag}
-            onLostPointerCapture={() => cancelDockDrag()}
-            onKeyDown={(event) => dockWithKeyboard("office", event)}
-          >O</button>
-          <span aria-hidden="true" />
-          <button
-            type="button"
-            class="workspace-dock-handle workspace-dock-handle--chat"
-            aria-label={copy.chatHandle}
-            aria-keyshortcuts="Alt+ArrowUp Alt+ArrowRight Alt+ArrowDown Alt+ArrowLeft"
-            title={copy.handleTitle}
-            onPointerDown={(event) => { event.stopPropagation(); beginDockDrag("chat", event); }}
-            onPointerMove={moveDockDrag}
-            onPointerUp={finishDockDrag}
-            onPointerCancel={cancelDockDrag}
-            onLostPointerCapture={() => cancelDockDrag()}
-            onKeyDown={(event) => dockWithKeyboard("chat", event)}
-          >C</button>
-        </div>
-      )}
-      <div class="workspace-layout-chat">{workspace}</div>
+      {chatFirst && chatPane}
+      {!chatFirst && surfacePane}
+      {desktopDivider}
+      {chatFirst && surfacePane}
+      {!chatFirst && chatPane}
       <p class="visually-hidden" aria-live="polite" aria-atomic="true">
         {layoutAnnouncement.text}{layoutAnnouncement.token % 2 === 1 ? "\u200b" : ""}
       </p>

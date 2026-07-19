@@ -11,6 +11,7 @@ import {
   readWorkspaceLayout,
   resetWorkspaceLayout,
   workspaceRatioBounds,
+  workspaceChatPrecedesSurface,
   workspacePlacement,
   workspaceRatio,
 } from "../src/workspace-layout.ts";
@@ -61,6 +62,17 @@ test("workspace ratio conflict minimizes asymmetric pane violations and remains 
   }
 });
 
+test("workspace DOM order follows dock direction without changing mobile overlay order", () => {
+  assert.equal(workspaceChatPrecedesSurface("top", false, true), true);
+  assert.equal(workspaceChatPrecedesSurface("left", false, true), true);
+  assert.equal(workspaceChatPrecedesSurface("bottom", false, true), false);
+  assert.equal(workspaceChatPrecedesSurface("right", false, true), false);
+  for (const placement of ["top", "right", "bottom", "left"] as const) {
+    assert.equal(workspaceChatPrecedesSurface(placement, true, true), false, "mobile always keeps main before its chat overlay");
+    assert.equal(workspaceChatPrecedesSurface(placement, false, false), false, "an empty workspace keeps the compact main-first order");
+  }
+});
+
 test("workspace preferences persist, reset, and fail safely when storage is blocked", () => {
   const values = new Map<string, string>();
   const storage = {
@@ -100,6 +112,12 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
     readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8"),
   ]);
   assert.match(component, /role="separator"/);
+  assert.match(component, /const chatFirst = workspaceChatPrecedesSurface\(placement, mobile, hasChats\)/);
+  assert.match(component, /const desktopDivider = hasChats && !mobile \? \(/);
+  assert.match(component, /key="surface-pane"/);
+  assert.match(component, /key="chat-pane"/);
+  assert.match(component, /<Fragment key="desktop-divider">/);
+  assert.match(component, /\{chatFirst && chatPane\}\s*\{!chatFirst && surfacePane\}\s*\{desktopDivider\}\s*\{chatFirst && surfacePane\}\s*\{!chatFirst && chatPane\}/);
   const separatorStart = component.indexOf('class="workspace-separator"');
   const separatorEnd = component.indexOf("/>", separatorStart);
   const dockControlsStart = component.indexOf('class="workspace-dock-controls"');

@@ -150,6 +150,14 @@ export function oppositePlacement(placement: WorkspacePlacement): WorkspacePlace
   return "right";
 }
 
+export function workspaceChatPrecedesSurface(
+  placement: WorkspacePlacement,
+  mobile: boolean,
+  hasChats: boolean,
+): boolean {
+  return hasChats && !mobile && (placement === "top" || placement === "left");
+}
+
 function clampRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return defaultWorkspaceLayout.ratio;
   return Math.min(WORKSPACE_RATIO_MAX, Math.max(WORKSPACE_RATIO_MIN, ratio));
