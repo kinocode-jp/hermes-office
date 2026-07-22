@@ -153,7 +153,7 @@ test("pickSafeConfigValues returns only safe scalar leaves", () => {
     logging: { level: "INFO" },
     memory: { memory_char_limit: 8_000, write_approval: true },
     security: { allow_private_urls: true },
-    auxiliary: { vision: { api_key: "sk-secret" } },
+    auxiliary: { vision: { api_key: "sk-secret" } }, // gitleaks:allow -- synthetic rejection fixture
   }, fields);
   assert.deepEqual(values, {
     "agent.max_turns": 40,

@@ -11,14 +11,14 @@ import {
   OfficeGlobalSettingsStore,
 } from "./hermes-settings.js";
 
-const TOKEN = "0123456789abcdef0123456789abcdef";
-const DASHBOARD_SECRET = "dashboard-example-value-123456";
-const OPENAI_SECRET = "openai-example-value-123456";
-const AWS_SECRET = "aws-example-value-123456";
-const PASSWORD_SECRET = "password-example-value-123456";
-const ANTHROPIC_SECRET = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
-const AUTH_HEADER_SECRET = "opaque-settings-credential";
-const DATABASE_SECRET = "database-password-example-value";
+const TOKEN = "0123456789abcdef0123456789abcdef"; // gitleaks:allow -- synthetic test credential
+const DASHBOARD_SECRET = "dashboard-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const OPENAI_SECRET = "openai-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const AWS_SECRET = "aws-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const PASSWORD_SECRET = "password-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const ANTHROPIC_SECRET = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"; // gitleaks:allow -- synthetic test credential
+const AUTH_HEADER_SECRET = "opaque-settings-credential"; // gitleaks:allow -- synthetic test credential
+const DATABASE_SECRET = "database-password-example-value"; // gitleaks:allow -- synthetic test credential
 
 test("profile settings use a profile-pinned backend and expose secret-safe DTOs", async (t) => {
   const requests: Array<{ method: string; token: string; url: string }> = [];
@@ -353,7 +353,7 @@ test("profile Hermes config picks safe leaves, denies secrets, and conflicts on 
     display: { compact: false },
     memory: { memory_char_limit: 4_000, write_approval: true },
     security: { allow_private_urls: true },
-    auxiliary: { vision: { api_key: "sk-should-not-leak" } },
+    auxiliary: { vision: { api_key: "sk-should-not-leak" } }, // gitleaks:allow -- synthetic rejection fixture
   };
   const schemaPayload = {
     category_order: ["general", "agent", "display", "memory", "security"],

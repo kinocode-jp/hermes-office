@@ -149,8 +149,9 @@ invalid-digest registry fails closed and does not reopen enrollment.
 - Office Teams are user-owned Office metadata (opaque team IDs, name, color,
   optional description/lead, ordered unique member profile IDs). They are stored
   with atomic writes, mode-0600 files under mode-0700 directories by default,
-  bounded request/file size, and race-safe serialization. Team mutations use the
-  same CSRF-protected operator `remote-safe` policy as Kanban. Teams never write
+  bounded request/file size, and race-safe serialization. Because team context,
+  skills, and membership feed new-session inheritance, Team mutations require
+  manager tier plus verified local step-up. Teams never write
   Hermes Agent `kanban.db` and never replace individual card assignees.
 
 The desktop shell canonicalizes local Node/Hermes executable paths, rejects

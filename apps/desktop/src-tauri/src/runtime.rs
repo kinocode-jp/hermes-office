@@ -16,18 +16,20 @@ use crate::constants::{
 fn brand_env(suffix: &str) -> Option<OsString> {
     let studio = format!("HERMES_STUDIO_{suffix}");
     let legacy = format!("HERMES_OFFICE_{suffix}");
-    env::var_os(&studio)
-        .filter(|value| !value.is_empty())
-        .or_else(|| env::var_os(&legacy).filter(|value| !value.is_empty()))
+    match env::var_os(&studio) {
+        Some(value) => (!value.is_empty()).then_some(value),
+        None => env::var_os(&legacy).filter(|value| !value.is_empty()),
+    }
 }
 
 /// Lookup helper used when the process environment was already env_clear'd on a Command.
 fn brand_env_lookup(suffix: &str, lookup: &impl Fn(&str) -> Option<OsString>) -> Option<OsString> {
     let studio = format!("HERMES_STUDIO_{suffix}");
     let legacy = format!("HERMES_OFFICE_{suffix}");
-    lookup(&studio)
-        .filter(|value| !value.is_empty())
-        .or_else(|| lookup(&legacy).filter(|value| !value.is_empty()))
+    match lookup(&studio) {
+        Some(value) => (!value.is_empty()).then_some(value),
+        None => lookup(&legacy).filter(|value| !value.is_empty()),
+    }
 }
 
 pub(crate) fn resolve_managed_runtime() -> Result<(PathBuf, PathBuf), String> {

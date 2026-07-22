@@ -9,7 +9,7 @@ import { createOfficeServer } from "./server.js";
 
 const LOCAL_ORIGIN = "http://localhost:4173";
 const REMOTE_ORIGIN = "https://office.tailnet.example";
-const REMOTE_TOKEN = "correct-horse-battery-staple-remote-token";
+const REMOTE_TOKEN = "correct-horse-battery-staple-remote-token"; // gitleaks:allow -- synthetic enrollment fixture
 
 async function deviceLogin(
   base: string,

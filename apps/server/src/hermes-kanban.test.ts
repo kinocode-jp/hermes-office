@@ -20,7 +20,7 @@ const CARD = {
   latest_summary: null,
   comment_count: 2,
   workspace_path: "/Users/private/project",
-  api_key: "must-not-leak",
+  api_key: "must-not-leak", // gitleaks:allow -- synthetic rejection fixture
 };
 
 function mockAdapter(handler: (request: HermesKanbanRequest) => unknown | Promise<unknown>) {
@@ -36,7 +36,7 @@ test("board reads are allowlisted and strip paths, secrets, and unknown fields",
     assignees: ["mina"],
     latest_event_id: 9,
     now: 200,
-    access_token: "must-not-leak",
+    access_token: "must-not-leak", // gitleaks:allow -- synthetic rejection fixture
   }));
   const board = await adapter.getBoard({ board: "Project_One", includeArchived: true });
 

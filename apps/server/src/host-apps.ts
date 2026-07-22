@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -10,6 +10,9 @@ const OBSIDIAN_APP_PATHS = [
 ] as const;
 const HOMEBREW_PATHS = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] as const;
 const INSTALL_TIMEOUT_MS = 20 * 60 * 1_000;
+const INSTALL_KILL_GRACE_MS = 5_000;
+const HOMEBREW_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const HOMEBREW_ENV_KEYS = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] as const;
 
 /**
  * Fixed-function host application manager. It intentionally accepts no app id,
@@ -20,6 +23,7 @@ export class HostAppManager {
   #failure: HostAppStatus["failure"];
   #installer: ChildProcess | undefined;
   #timeout: ReturnType<typeof setTimeout> | undefined;
+  #killTimeout: ReturnType<typeof setTimeout> | undefined;
 
   obsidianStatus(): HostAppStatus {
     if (OBSIDIAN_APP_PATHS.some((candidate) => existsSync(candidate))) {
@@ -28,10 +32,12 @@ export class HostAppManager {
       return status("installed", true, false);
     }
     if (platform() !== "darwin") return status("unsupported", false, false, "unsupported_platform");
+    if (this.#phase === "failed") {
+      return status("failed", false, this.#installer === undefined, this.#failure ?? "install_failed");
+    }
     if (this.#installer !== undefined || this.#phase === "installing") return status("installing", false, false);
     const brew = homebrewPath();
     if (brew === undefined) return status("blocked", false, false, "homebrew_missing");
-    if (this.#phase === "failed") return status("failed", false, true, this.#failure ?? "install_failed");
     return status("available", false, true);
   }
 
@@ -46,7 +52,7 @@ export class HostAppManager {
     const child = spawn(brew, ["install", "--cask", "obsidian"], {
       shell: false,
       stdio: "ignore",
-      env: process.env,
+      env: homebrewChildEnvironment(),
     });
     this.#installer = child;
     this.#timeout = setTimeout(() => {
@@ -54,6 +60,10 @@ export class HostAppManager {
       this.#failure = "install_timeout";
       this.#phase = "failed";
       child.kill("SIGTERM");
+      this.#killTimeout = setTimeout(() => {
+        if (this.#installer === child) child.kill("SIGKILL");
+      }, INSTALL_KILL_GRACE_MS);
+      this.#killTimeout.unref?.();
     }, INSTALL_TIMEOUT_MS);
     this.#timeout.unref?.();
 
@@ -64,7 +74,9 @@ export class HostAppManager {
 
   close(): void {
     if (this.#timeout !== undefined) clearTimeout(this.#timeout);
+    if (this.#killTimeout !== undefined) clearTimeout(this.#killTimeout);
     this.#timeout = undefined;
+    this.#killTimeout = undefined;
     this.#installer?.kill("SIGTERM");
     this.#installer = undefined;
   }
@@ -72,7 +84,9 @@ export class HostAppManager {
   #finish(child: ChildProcess, succeeded: boolean): void {
     if (this.#installer !== child) return;
     if (this.#timeout !== undefined) clearTimeout(this.#timeout);
+    if (this.#killTimeout !== undefined) clearTimeout(this.#killTimeout);
     this.#timeout = undefined;
+    this.#killTimeout = undefined;
     this.#installer = undefined;
     if (succeeded && OBSIDIAN_APP_PATHS.some((candidate) => existsSync(candidate))) {
       this.#phase = "installed";
@@ -85,7 +99,37 @@ export class HostAppManager {
 }
 
 function homebrewPath(): string | undefined {
-  return HOMEBREW_PATHS.find((candidate) => existsSync(candidate));
+  for (const candidate of HOMEBREW_PATHS) {
+    const validated = validatedLocalExecutable(candidate);
+    if (validated !== undefined) return validated;
+  }
+  return undefined;
+}
+
+export function validatedLocalExecutable(candidate: string): string | undefined {
+  try {
+    const canonical = realpathSync(candidate);
+    const metadata = statSync(canonical);
+    const effectiveUid = process.geteuid?.();
+    if (!metadata.isFile()) return undefined;
+    if ((metadata.mode & 0o6000) !== 0) return undefined;
+    if ((metadata.mode & 0o111) === 0 || (metadata.mode & 0o022) !== 0) return undefined;
+    if (metadata.uid !== 0 && (effectiveUid === undefined || metadata.uid !== effectiveUid)) return undefined;
+    return canonical;
+  } catch {
+    return undefined;
+  }
+}
+
+export function homebrewChildEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { PATH: HOMEBREW_PATH };
+  for (const key of HOMEBREW_ENV_KEYS) {
+    const value = source[key];
+    if (value !== undefined && value.length > 0) result[key] = value;
+  }
+  return result;
 }
 
 function status(

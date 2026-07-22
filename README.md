@@ -287,8 +287,8 @@ is stored separately under `~/.hermes-studio/teams.json` by default
 many-to-many on the Office side only; they do not write Hermes `kanban.db`.
 
 A remote device receives the `operator` tier. It can use the shared
-single-operator chat/session namespace, update Kanban, and manage Teams, but cannot change
-Profile/global settings or invoke step-up/local-only operations. Capabilities in
+single-operator chat/session namespace and update Kanban, but cannot manage Teams,
+change Profile/global settings, or invoke step-up/local-only operations. Capabilities in
 the snapshot are calculated for the authenticated client. Approval replies are
 bound to the requesting device and chat socket; permanent approvals remain
 local-only. Audit records and audit events are owner-only.

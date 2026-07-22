@@ -137,6 +137,10 @@ test("raw memory file GETs map to memory.update and are denied without that auth
   assert.equal(OPERATION_POLICIES["memory.update"].boundary, "step-up-required");
   assert.equal(OPERATION_POLICIES["profile-config.update"].minimumTier, "manager");
   assert.equal(OPERATION_POLICIES["profile-config.update"].boundary, "step-up-required");
+  for (const operation of ["team.create", "team.update", "team.delete"] as const) {
+    assert.equal(OPERATION_POLICIES[operation].minimumTier, "manager");
+    assert.equal(OPERATION_POLICIES[operation].boundary, "step-up-required");
+  }
   assert.equal(OPERATION_POLICIES["profile-config.update"].auditable, true);
   assert.equal(OPERATION_POLICIES["privileged-config.read"].minimumTier, "owner");
   assert.equal(OPERATION_POLICIES["privileged-config.read"].boundary, "read-only");
@@ -165,7 +169,7 @@ test("raw memory file GETs map to memory.update and are denied without that auth
     settings: () => settings,
     globalSettings: () => global,
   };
-  const remoteToken = "settings-memory-auth-token-with-32chars!";
+  const remoteToken = "settings-memory-auth-token-with-32chars!"; // gitleaks:allow -- synthetic auth fixture
   const remoteOrigin = "https://office.tailnet.example";
   const localOrigin = "http://localhost:4173";
   const server = createOfficeServer({

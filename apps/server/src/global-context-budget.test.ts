@@ -18,7 +18,7 @@ import type { HermesSettingsAdapter } from "./hermes-settings.js";
 import { OfficeGlobalSettingsStore } from "./hermes-settings.js";
 import { routeSettingsHttp } from "./settings-http.js";
 
-const TOKEN = "0123456789abcdef0123456789abcdef";
+const TOKEN = "0123456789abcdef0123456789abcdef"; // gitleaks:allow -- synthetic test credential
 
 test("maximum global context saves over HTTP and seeds session.create within one wire budget", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "hermes-studio-context-budget-"));

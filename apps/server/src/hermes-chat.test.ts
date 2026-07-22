@@ -10,16 +10,16 @@ import {
   type HermesChatRequest,
 } from "./hermes-chat.js";
 
-const TOKEN = "0123456789abcdef0123456789abcdef";
-const DASHBOARD_SECRET = "dashboard-example-value-123456";
-const OPENAI_SECRET = "openai-example-value-123456";
-const AWS_SECRET = "aws-example-value-123456";
-const PASSWORD_SECRET = "password-example-value-123456";
-const SERVICE_SECRET = "service-example-value-123456";
-const GITHUB_SECRET = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
-const OPENAI_STANDALONE_SECRET = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
-const AUTH_HEADER_SECRET = "opaque-auth-header-value";
-const COOKIE_SECRET = "office-cookie-example-value-123456";
+const TOKEN = "0123456789abcdef0123456789abcdef"; // gitleaks:allow -- synthetic test credential
+const DASHBOARD_SECRET = "dashboard-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const OPENAI_SECRET = "openai-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const AWS_SECRET = "aws-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const PASSWORD_SECRET = "password-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const SERVICE_SECRET = "service-example-value-123456"; // gitleaks:allow -- synthetic test credential
+const GITHUB_SECRET = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"; // gitleaks:allow -- synthetic test credential
+const OPENAI_STANDALONE_SECRET = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"; // gitleaks:allow -- synthetic test credential
+const AUTH_HEADER_SECRET = "opaque-auth-header-value"; // gitleaks:allow -- synthetic test credential
+const COOKIE_SECRET = "office-cookie-example-value-123456"; // gitleaks:allow -- synthetic test credential
 const JWT_SECRET = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "signature0123456789"].join(".");
 
 test("fetchHistory authenticates internally and returns a bounded secret-safe DTO", async (t) => {
@@ -45,7 +45,7 @@ test("fetchHistory authenticates internally and returns a bounded secret-safe DT
       session_id: "resolved-42",
       messages: historyRows.slice(0, requestedLimit),
       system_prompt: "must never escape",
-      model_config: { api_key: "must never escape" },
+      model_config: { api_key: "must never escape" }, // gitleaks:allow -- synthetic rejection fixture
     });
   });
   const origin = await listen(server);
@@ -92,7 +92,7 @@ test("fetchHistory counts and safely drops individual malformed wire rows", asyn
       { role: "assistant", content: "also kept", timestamp: 1_700_000_001 },
       { role: "user", content: "bad timestamp secret=never-return-this", timestamp: "tomorrow" },
     ],
-    api_key: "never-return-this",
+    api_key: "never-return-this", // gitleaks:allow -- synthetic rejection fixture
   }));
   const origin = await listen(server);
   t.after(() => server.close());

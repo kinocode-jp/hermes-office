@@ -23,8 +23,8 @@ test("ready status is validated and reduced to a secret-free DTO", async () => {
     active_sessions: 2,
     auth_required: true,
     auth_providers: ["nous"],
-    access_token: "must-not-escape",
-    gateways: [{ port: 9119, secret: "must-not-escape" }],
+    access_token: "must-not-escape", // gitleaks:allow -- synthetic rejection fixture
+    gateways: [{ port: 9119, secret: "must-not-escape" }], // gitleaks:allow -- synthetic rejection fixture
   });
 
   try {

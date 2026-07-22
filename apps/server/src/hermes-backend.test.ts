@@ -669,7 +669,7 @@ async function startHermesFixture(handler: (request: IncomingMessage, response: 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   return {
-    backend: new HermesBackend({ baseUrl: `http://127.0.0.1:${address.port}`, sessionToken: "fixture-session-token-0123456789", requestTimeoutMs }),
+    backend: new HermesBackend({ baseUrl: `http://127.0.0.1:${address.port}`, sessionToken: "fixture-session-token-0123456789", requestTimeoutMs }), // gitleaks:allow -- synthetic test credential
     close: async () => await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }

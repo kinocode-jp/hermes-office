@@ -38,7 +38,7 @@ const config = {
   toolsets: ["browser", "coding"],
   display: { compact: true },
   agent: { max_turns: 12 },
-  auxiliary: { vision: { api_key: "sk-live-should-not-leak" } },
+  auxiliary: { vision: { api_key: "sk-live-should-not-leak" } }, // gitleaks:allow -- synthetic rejection fixture
   security: { redact_secrets: true },
   moa: {
     presets: {

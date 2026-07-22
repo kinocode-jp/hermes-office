@@ -177,9 +177,11 @@ export const OPERATION_POLICIES: Readonly<Record<Operation, OperationPolicy>> = 
   "kanban.card.create": policy("kanban.card.create", "operator", "remote-safe", true),
   "kanban.card.update": policy("kanban.card.update", "operator", "remote-safe", true),
   "kanban.card.comment": policy("kanban.card.comment", "operator", "remote-safe", true),
-  "team.create": policy("team.create", "operator", "remote-safe", true),
-  "team.update": policy("team.update", "operator", "remote-safe", true),
-  "team.delete": policy("team.delete", "operator", "remote-safe", true),
+  // Team membership, context, and skills are inherited by new sessions. Keep
+  // these mutations on the same boundary as direct profile/skill changes.
+  "team.create": policy("team.create", "manager", "step-up-required", true),
+  "team.update": policy("team.update", "manager", "step-up-required", true),
+  "team.delete": policy("team.delete", "manager", "step-up-required", true),
   "profile.create": policy("profile.create", "manager", "step-up-required", true),
   "profile.update": policy("profile.update", "manager", "step-up-required", true),
   "profile.delete": policy("profile.delete", "owner", "step-up-required", true),

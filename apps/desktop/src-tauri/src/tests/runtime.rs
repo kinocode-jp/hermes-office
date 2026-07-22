@@ -93,6 +93,7 @@ fn office_remote_environment_allowlist_is_exact_when_host_values_present() {
 fn office_remote_environment_allowlist_ignores_empty_or_missing_values() {
     let mut lookup = std::collections::HashMap::new();
     lookup.insert("HERMES_STUDIO_REMOTE_TOKEN", OsString::from(""));
+    lookup.insert("HERMES_OFFICE_REMOTE_TOKEN", OsString::from("deprecated-value"));
     let mut command = Command::new("/bin/sh");
     command.env_clear();
     inherit_office_remote_environment(&mut command, |key| lookup.get(key).cloned());
@@ -102,5 +103,8 @@ fn office_remote_environment_allowlist_ignores_empty_or_missing_values() {
             v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
         })
         .collect();
-    assert!(envs.is_empty(), "empty or absent host values must not be forwarded");
+    assert!(
+        envs.is_empty(),
+        "an explicitly empty Studio value must disable legacy fallback",
+    );
 }
