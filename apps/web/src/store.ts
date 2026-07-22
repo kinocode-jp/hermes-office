@@ -1,93 +1,184 @@
-import { computed, signal } from "@preact/signals";
-import { officeInventoryReliability } from "@hermes-office/protocol";
-import { initialSessions, initialTaskComments, initialTasks, profiles } from "./demo-data";
+import { officeInventoryReliability } from "@hermes-studio/protocol";
+import { initialSessions, initialTaskComments, initialTasks, initialTeams, profiles } from "./demo-data";
 import { createDemoKanbanApi } from "./demo-kanban-api";
-import type { ChatGatewayEvent, ChatHistoryResult, ChatPromptResult, ChatSteerResult, ChatTarget } from "./chat-api";
-import type { ApprovalChoice, ChatConnectionState, ChatMessage, ChatOperationEvidence, ChatPendingInteraction, ChatSession, InspectorTab, OfficeAccess, OfficeConnection, OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface } from "./domain";
+import { loadTeamsDemoRuntime, resetTeamsRuntimeState } from "./teams-store";
+import type { ChatTarget } from "./chat-api";
+import type { OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, Surface } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import { loadKanbanDemoRuntime, registerKanbanProfileTaskUpdater, resetKanbanRuntimeState } from "./kanban-store";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
-import { canSubmitChatPrompt, isChatRunActive, mergeGatewayStatusUpdate, mergeServerSessionStatus } from "./session-runtime";
-import { reconcileChatSessionConnecting, reconcileChatSessionDisconnected, reconcileChatSessionError, reconcileChatSessionReady, type ChatSessionReadyRuntime } from "./chat-session-reconciliation";
-import { approvalChoices, gatewayMessageId, nowTimestamp, stringArray, stringValue } from "./chat-store-utils";
-import { boundedOperationEvidence, interruptChatRun, steerChatRun } from "./chat-run-actions";
+import { mergeServerSessionStatus } from "./session-runtime";
+import { reconcileChatSessionDisconnected } from "./chat-session-reconciliation";
 import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
-import { appendLiveDelta, appendLiveMessage, boundedTranscriptSuffix, replaceLiveMessages, type TranscriptChange } from "./live-transcript";
-import { officeMessage, officeRuntimeMessage, upstreamMessage, type RuntimeMessage } from "./i18n";
+import { ensurePokemonDisplayNames } from "./profile-names";
+import { resolvedCreateModelPrefs } from "./chat-model-prefs";
+import { setOfficeWindowOpen } from "./office-window";
+import { officeMessage, officeRuntimeMessage } from "./i18n";
+import { isRecurringSessionHidden } from "./recurring-jobs";
+import {
+  buildCardAskSeedPrompt,
+  cardAskSeedInputFromTask,
+  findCardAskSession,
+} from "./kanban-ask";
+import {
+  clearMobileRoutes,
+  noteMobileWorkspaceClosed,
+  openMobileInspector,
+  openMobileWorkspace,
+} from "./mobile-routes";
+import {
+  MAX_OPEN_CHAT_SESSIONS,
+  activeSessionId,
+  activeSurface,
+  chatSocketState,
+  inspectorTab,
+  latestOfficeSnapshotIdentity,
+  officeAccess,
+  officeConnection,
+  officeRuntimeHooks,
+  officeSnapshot,
+  openSessionIds,
+  profileList,
+  profileDetailModalId,
+  profileSettingsModalId,
+  profileChatModalId,
+  recurringJobsOpen,
+  runtimeDataSource,
+  selectedProfile,
+  selectedProfileId,
+  selectedProfileSessions,
+  sessions,
+  settingsTab,
+  setLatestOfficeSnapshotIdentity,
+  setRuntimeDataSource,
+} from "./store-state";
+import { persistUiNavPreferences } from "./ui-nav-prefs";
+
+export {
+  MAX_OPEN_CHAT_SESSIONS,
+  activeSessionId,
+  activeSurface,
+  chatSocketState,
+  inspectorTab,
+  mobileInspectorOpen,
+  mobileWorkspaceOpen,
+  officeAccess,
+  officeConnection,
+  officeSnapshot,
+  openSessionIds,
+  profileDetailModalId,
+  profileList,
+  profileSettingsModalId,
+  profileChatModalId,
+  recurringJobsOpen,
+  selectedProfile,
+  selectedProfileId,
+  selectedProfileSessions,
+  sessions,
+  settingsTab,
+} from "./store-state";
+
+export {
+  clearMobileRoutes,
+  closeMobileRoute,
+  installMobileRouteHistory,
+  openMobileInspector,
+  openMobileWorkspace,
+} from "./mobile-routes";
+
 export { addTaskComment, assignTask, createTask, expandedTaskId, kanbanAssignees, kanbanState, moveTask, refreshKanbanBoard, registerKanbanRuntime, retryTaskComments, taskCommentDetail, tasks, toggleTaskComments } from "./kanban-store";
-export const profileList = signal<Profile[]>([]);
-export const sessions = signal<ChatSession[]>([]);
+import {
+  applyChatGatewayEvent,
+  applyChatHistory,
+  applySessionModelPrefs,
+  clearFollowUpSuggestions,
+  interruptSession,
+  reconcilePromptOperationsWithHistory,
+  reconnectChatSession,
+  reduceChatGatewayEvent,
+  refreshFollowUpSuggestions,
+  respondToApproval,
+  respondToClarification,
+  sendMessage,
+  setChatHistoryError,
+  setChatHistoryLoading,
+  setChatSessionConnecting,
+  setChatSessionDisconnected,
+  setChatSessionError,
+  setChatSessionReady,
+  setChatSocketState,
+  steerSession,
+  tryFlushCardSeed,
+} from "./store-chat";
+
+export {
+  applyChatGatewayEvent,
+  applyChatHistory,
+  applySessionModelPrefs,
+  clearFollowUpSuggestions,
+  interruptSession,
+  reconcilePromptOperationsWithHistory,
+  reconnectChatSession,
+  reduceChatGatewayEvent,
+  refreshFollowUpSuggestions,
+  respondToApproval,
+  respondToClarification,
+  sendMessage,
+  setChatHistoryError,
+  setChatHistoryLoading,
+  setChatSessionConnecting,
+  setChatSessionDisconnected,
+  setChatSessionError,
+  setChatSessionReady,
+  setChatSocketState,
+  steerSession,
+  tryFlushCardSeed,
+};
+
 registerKanbanProfileTaskUpdater((counts) => {
   profileList.value = profileList.value.map((profile) => ({ ...profile, taskCount: counts.get(profile.id) ?? 0 }));
 });
-export const activeSurface = signal<Surface>("office");
-export const inspectorTab = signal<InspectorTab>("chat");
-export const settingsTab = signal<SettingsTab>("skills");
-export const selectedProfileId = signal("");
-export const openSessionIds = signal<string[]>([]);
-export const activeSessionId = signal("");
-export const mobileInspectorOpen = signal(false);
-export const mobileWorkspaceOpen = signal(false);
-export const MAX_OPEN_CHAT_SESSIONS = 4;
 
 export function navigateToSurface(surface: Surface): void {
-  activeSurface.value = surface;
-  mobileInspectorOpen.value = false;
-  mobileWorkspaceOpen.value = false;
+  // Legacy "library" was global agent settings; fold it into Settings.
+  if (surface === "library") {
+    activeSurface.value = "settings";
+    settingsTab.value = "global";
+  } else {
+    activeSurface.value = surface;
+  }
+  if (activeSurface.value === "office") setOfficeWindowOpen(true);
+  clearMobileRoutes();
+  persistNavigationState();
 }
-export const chatSocketState = signal<{ state: ChatConnectionState; message: RuntimeMessage }>({
-  state: "disconnected",
-  message: officeMessage("runtime.chat.waiting")
-});
-export const officeSnapshot = signal<OfficeSnapshot | undefined>(undefined);
-export const officeAccess = signal<OfficeAccess>({
-  state: "checking",
-  serverUrl: "",
-  message: officeMessage("runtime.office.checking")
-});
-export const officeConnection = signal<OfficeConnection>({
-  state: "connecting",
-  source: "server",
-  serverUrl: "",
-  eventStream: "closed",
-  message: officeMessage("runtime.office.checking")
-});
-export const selectedProfile = computed(() =>
-  profileList.value.find((profile) => profile.id === selectedProfileId.value)
-);
 
-export const selectedProfileSessions = computed(() =>
-  sessions.value.filter((session) => session.profileId === selectedProfileId.value)
-);
-let retryOfficeConnection = () => {};
-let ensureChatSession = (_target: ChatTarget) => {};
-let releaseChatSession = (_clientSessionId: string) => {};
-let submitChatPrompt: (clientSessionId: string, text: string, operationId: string) => Promise<ChatPromptResult> | void = async () => ({ status: "rejected", message: "Chat runtime is not registered." });
-let steerChatSession: (clientSessionId: string, text: string) => Promise<ChatSteerResult> = async () => { throw new Error("Chat runtime is not registered."); };
-let interruptChatSession: (clientSessionId: string) => Promise<void> | void = (_clientSessionId: string) => {};
-let respondClarify = async (_clientSessionId: string, _requestId: string, _answer: string) => {};
-let respondApproval = async (_clientSessionId: string, _approvalId: string, _choice: ApprovalChoice) => {};
-let runtimeDataSource: "none" | "demo" | "live" = "none";
-let latestOfficeSnapshotIdentity: OfficeSnapshotRequestIdentity | undefined;
+function persistNavigationState(): void {
+  persistUiNavPreferences({
+    surface: activeSurface.value,
+    settingsTab: settingsTab.value,
+    selectedProfileId: selectedProfileId.value,
+  });
+}
 
 export function registerChatRuntime(actions: {
   ensureSession(target: ChatTarget): void;
   releaseSession(clientSessionId: string): void;
-  submitPrompt(clientSessionId: string, text: string, operationId: string): Promise<ChatPromptResult> | void;
-  steer(clientSessionId: string, text: string): Promise<ChatSteerResult>;
+  submitPrompt(clientSessionId: string, text: string, operationId: string): Promise<import("./chat-api").ChatPromptResult> | void;
+  steer(clientSessionId: string, text: string): Promise<import("./chat-api").ChatSteerResult>;
   interrupt(clientSessionId: string): Promise<void> | void;
   respondClarify(clientSessionId: string, requestId: string, answer: string): Promise<void>;
-  respondApproval(clientSessionId: string, approvalId: string, choice: ApprovalChoice): Promise<void>;
+  respondApproval(clientSessionId: string, approvalId: string, choice: import("./domain").ApprovalChoice): Promise<void>;
 }): void {
-  ensureChatSession = actions.ensureSession;
-  releaseChatSession = actions.releaseSession;
-  submitChatPrompt = actions.submitPrompt;
-  steerChatSession = actions.steer;
-  interruptChatSession = actions.interrupt;
-  respondClarify = actions.respondClarify;
-  respondApproval = actions.respondApproval;
-  for (const target of getOpenChatTargets()) ensureChatSession(target);
+  officeRuntimeHooks.ensureChatSession = actions.ensureSession;
+  officeRuntimeHooks.releaseChatSession = actions.releaseSession;
+  officeRuntimeHooks.submitChatPrompt = actions.submitPrompt;
+  officeRuntimeHooks.steerChatSession = actions.steer;
+  officeRuntimeHooks.interruptChatSession = actions.interrupt;
+  officeRuntimeHooks.respondClarify = actions.respondClarify;
+  officeRuntimeHooks.respondApproval = actions.respondApproval;
+  for (const target of getOpenChatTargets()) officeRuntimeHooks.ensureChatSession(target);
 }
+
 export function getOpenChatTargets(): ChatTarget[] {
   return openSessionIds.value.flatMap((clientSessionId) => {
     const session = sessions.value.find((item) => item.id === clientSessionId);
@@ -101,12 +192,12 @@ export function getOpenChatTargets(): ChatTarget[] {
 }
 
 export function registerOfficeRetry(action: () => void): void {
-  retryOfficeConnection = action;
+  officeRuntimeHooks.retryOfficeConnection = action;
 }
 
 export function retryOfficeServer(): void {
   officeAccess.value = { ...officeAccess.value, state: "checking", message: officeMessage("runtime.office.reconnecting") };
-  retryOfficeConnection();
+  officeRuntimeHooks.retryOfficeConnection();
 }
 
 export function requireDeviceLogin(serverUrl: string): void {
@@ -155,7 +246,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
     const latest = latestOfficeSnapshotIdentity;
     if (latest && (source.connectionGeneration < latest.connectionGeneration
       || (source.connectionGeneration === latest.connectionGeneration && source.requestGeneration <= latest.requestGeneration))) return false;
-    latestOfficeSnapshotIdentity = source;
+    setLatestOfficeSnapshotIdentity(source);
   }
   const explicitDemo = snapshot.capabilities.features.includes("demo");
   const profileInventoryUnavailable = !explicitDemo
@@ -201,6 +292,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   const previousTargetIds = new Set(getOpenChatTargets().map((target) => target.clientSessionId));
   const sessionCounts = new Map<string, number>();
   for (const session of snapshot.sessions) {
+    if (isRecurringSessionHidden(storedSessionClientId(session.profileId, session.id))) continue;
     sessionCounts.set(session.profileId, (sessionCounts.get(session.profileId) ?? 0) + 1);
   }
   const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
@@ -210,6 +302,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   } else {
     registerDefaultAvatarProfiles(snapshotProfileIds);
   }
+  ensurePokemonDisplayNames(snapshotProfileIds);
   profileList.value = snapshot.profiles.map((live, index) => {
     const previous = previousProfiles.get(live.id);
     return {
@@ -229,7 +322,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   if (snapshot.inventory.profiles.hasMore || snapshot.inventory.profiles.truncated) profileList.value = [...profileList.value, ...[...previousProfiles.values()].filter((profile) => !snapshot.profiles.some((live) => live.id === profile.id))];
 
   const previousSessions = sessions.value;
-  const snapshotSessions = snapshot.sessions.map((live): ChatSession => {
+  const snapshotSessions = snapshot.sessions.filter((live) => !isRecurringSessionHidden(storedSessionClientId(live.profileId, live.id))).map((live): import("./domain").ChatSession => {
     const previous = findStoredSession(previousSessions, live);
     return {
       ...(previous ?? { id: storedSessionClientId(live.profileId, live.id), messages: [] }),
@@ -237,6 +330,9 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
       profileId: live.profileId,
       title: live.title,
       titlePresentation: undefined,
+      ...(live.createdAt === undefined ? {} : { createdAt: live.createdAt }),
+      ...(live.updatedAt === undefined ? {} : { updatedAt: live.updatedAt }),
+      ...(live.lastMessagePreview === undefined ? {} : { lastMessagePreview: live.lastMessagePreview }),
       status: mergeServerSessionStatus(previous, live.activity),
       connectionState: previous?.connectionState ?? "disconnected",
       historyState: previous?.historyState ?? "unloaded",
@@ -256,12 +352,12 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   if (!profileList.value.some((profile) => profile.id === selectedProfileId.value)) {
     selectedProfileId.value = profileList.value[0]?.id ?? "";
   }
-  runtimeDataSource = "live";
-  for (const target of getOpenChatTargets()) if (!previousTargetIds.has(target.clientSessionId)) ensureChatSession(target);
+  setRuntimeDataSource("live");
+  for (const target of getOpenChatTargets()) if (!previousTargetIds.has(target.clientSessionId)) officeRuntimeHooks.ensureChatSession(target);
   return true;
 }
 
-export function setOfficeEventStream(eventStream: OfficeConnection["eventStream"]): void {
+export function setOfficeEventStream(eventStream: import("./domain").OfficeConnection["eventStream"]): void {
   officeConnection.value = { ...officeConnection.value, eventStream };
 }
 
@@ -284,18 +380,67 @@ function activityToStatus(activity: string): Profile["status"] {
   return "idle";
 }
 
-export function selectProfile(profileId: string): void {
+function updateProfileSessionCounts(): void {
+  const counts = new Map<string, number>();
+  for (const session of sessions.value) if (session.remoteKind !== "demo") counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  profileList.value = profileList.value.map((profile) => ({ ...profile, sessions: counts.get(profile.id) ?? 0 }));
+}
+
+export function selectProfile(profileId: string, options?: { openWorkspace?: boolean; openDetail?: boolean }): void {
   selectedProfileId.value = profileId;
-  const firstSession = sessions.value.find((session) => session.profileId === profileId);
-  if (firstSession) {
-    openSession(firstSession.id);
-    mobileWorkspaceOpen.value = true;
-    mobileInspectorOpen.value = false;
-  } else {
-    mobileInspectorOpen.value = true;
-    mobileWorkspaceOpen.value = false;
-  }
   inspectorTab.value = "chat";
+  persistNavigationState();
+  if (options?.openWorkspace) {
+    const existing = sessions.value.find((session) => session.profileId === profileId);
+    if (existing) openSession(existing.id);
+    else createSession(profileId);
+    // Office floor / character click: chat workspace only on mobile (not the inspector).
+    openMobileWorkspace();
+    return;
+  }
+  if (options?.openDetail !== false) {
+    openProfileChatModal(profileId);
+    return;
+  }
+  openMobileInspector();
+}
+
+export function openProfileDetailModal(profileId: string): void {
+  selectedProfileId.value = profileId;
+  profileDetailModalId.value = profileId;
+  persistNavigationState();
+}
+
+export function closeProfileDetailModal(): void {
+  profileDetailModalId.value = null;
+}
+
+export function openProfileSettingsModal(profileId: string): void {
+  selectedProfileId.value = profileId;
+  profileSettingsModalId.value = profileId;
+  persistNavigationState();
+}
+
+export function closeProfileSettingsModal(): void {
+  profileSettingsModalId.value = null;
+}
+
+export function openProfileChatModal(profileId: string): void {
+  selectedProfileId.value = profileId;
+  profileChatModalId.value = profileId;
+  persistNavigationState();
+}
+
+export function closeProfileChatModal(): void {
+  profileChatModalId.value = null;
+}
+
+export function openRecurringJobs(): void {
+  recurringJobsOpen.value = true;
+}
+
+export function closeRecurringJobs(): void {
+  recurringJobsOpen.value = false;
 }
 
 export function openSession(sessionId: string): void {
@@ -310,7 +455,7 @@ export function openSession(sessionId: string): void {
   if (session) {
     selectedProfileId.value = session.profileId;
     const target = chatTarget(session);
-    if (target) ensureChatSession(target);
+    if (target) officeRuntimeHooks.ensureChatSession(target);
   }
 }
 
@@ -325,14 +470,64 @@ export function closeSession(sessionId: string): void {
   if (activeSessionId.value === sessionId) {
     activeSessionId.value = openSessionIds.value.at(-1) ?? "";
   }
-  if (openSessionIds.value.length === 0) mobileWorkspaceOpen.value = false;
+  if (openSessionIds.value.length === 0) noteMobileWorkspaceClosed();
+}
+
+export function dismissSessions(sessionIds: readonly string[]): void {
+  const ids = new Set(sessionIds);
+  if (ids.size === 0) return;
+  for (const sessionId of ids) releaseChatTarget(sessionId);
+  sessions.value = sessions.value.filter((session) => !ids.has(session.id));
+  openSessionIds.value = openSessionIds.value.filter((sessionId) => !ids.has(sessionId));
+  if (ids.has(activeSessionId.value)) activeSessionId.value = openSessionIds.value.at(-1) ?? "";
+  updateProfileSessionCounts();
+  if (openSessionIds.value.length === 0) noteMobileWorkspaceClosed();
+}
+
+/**
+ * Open or reuse a chat with the Kanban card's assignee for confirmation Q&A.
+ * Does not change card status or call Hermes dispatch.
+ */
+export function askAssigneeAboutTask(task: import("./domain").WorkTask): string | undefined {
+  const assigneeId = task.assigneeId;
+  if (!assigneeId || task.pending) return undefined;
+
+  const existing = findCardAskSession(sessions.value, task.id, assigneeId);
+  if (existing) {
+    openSession(existing.id);
+    openMobileWorkspace();
+    return existing.id;
+  }
+
+  const sessionId = createSession(assigneeId);
+  if (sessionId === undefined) return undefined;
+
+  const seed = buildCardAskSeedPrompt(cardAskSeedInputFromTask({ ...task, assigneeId }));
+  sessions.value = sessions.value.map((session) =>
+    session.id === sessionId
+      ? {
+          ...session,
+          sourceCardId: task.id,
+          sourceCardTitle: task.title,
+          sourceCardSeeded: false,
+          pendingCardSeed: seed,
+          title: task.title,
+          titlePresentation: undefined,
+        }
+      : session,
+  );
+  openMobileWorkspace();
+  tryFlushCardSeed(sessionId);
+  return sessionId;
 }
 
 export function createSession(profileId: string): string | undefined {
   const isLive = officeConnection.value.source === "server" && officeConnection.value.runtime === "ready";
   const isDemo = officeConnection.value.source === "demo" && officeConnection.value.state === "demo";
   if ((!isLive && !isDemo) || !profileList.value.some((profile) => profile.id === profileId)) return undefined;
-  const session: ChatSession = {
+  // Effort on prefs is only set after live-enum apply (or cleared). Shape-sanitize here.
+  const { model, provider, reasoningEffort } = resolvedCreateModelPrefs();
+  const session: import("./domain").ChatSession = {
     id: crypto.randomUUID(),
     profileId,
     title: "",
@@ -342,7 +537,10 @@ export function createSession(profileId: string): string | undefined {
     connectionState: isLive ? "connecting" : "ready",
     historyState: "loaded",
     remoteKind: isLive ? "draft" : "demo",
-    readOnly: isLive
+    readOnly: isLive,
+    ...(model ? { model } : {}),
+    ...(provider ? { provider } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
   sessions.value = [...sessions.value, session];
   openSession(session.id);
@@ -352,8 +550,10 @@ export function createSession(profileId: string): string | undefined {
 function loadExplicitDemoState(): void {
   clearRuntimeState();
   reconcileDefaultAvatarProfiles(profiles.map((profile) => profile.id));
+  ensurePokemonDisplayNames(profiles.map((profile) => profile.id));
   profileList.value = profiles.map((profile) => ({ ...profile, skills: [...profile.skills], inheritedSkills: [...profile.inheritedSkills] }));
   loadKanbanDemoRuntime(createDemoKanbanApi(initialTasks, initialTaskComments, profileList.value.map((profile) => profile.id)));
+  loadTeamsDemoRuntime(initialTeams);
   sessions.value = initialSessions.map((session) => ({
     ...session,
     messages: session.messages.map((message) => ({ ...message })),
@@ -365,7 +565,7 @@ function loadExplicitDemoState(): void {
   selectedProfileId.value = profileList.value[0]?.id ?? "";
   openSessionIds.value = sessions.value.slice(0, MAX_OPEN_CHAT_SESSIONS).map((session) => session.id);
   activeSessionId.value = openSessionIds.value[0] ?? "";
-  runtimeDataSource = "demo";
+  setRuntimeDataSource("demo");
 }
 
 function clearRuntimeState(): void {
@@ -373,378 +573,34 @@ function clearRuntimeState(): void {
   profileList.value = [];
   sessions.value = [];
   resetKanbanRuntimeState();
+  resetTeamsRuntimeState();
   selectedProfileId.value = "";
   openSessionIds.value = [];
   activeSessionId.value = "";
-  mobileWorkspaceOpen.value = false;
-  mobileInspectorOpen.value = false;
+  clearMobileRoutes();
   chatSocketState.value = { state: "disconnected", message: officeMessage("runtime.chat.waiting") };
-  runtimeDataSource = "none";
+  setRuntimeDataSource("none");
 }
 
-export function sendMessage(sessionId: string, body: string): void {
-  const trimmed = body.trim();
-  if (!trimmed) return;
-  const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session || !canSubmitChatPrompt(session)) return;
-  const operationId = crypto.randomUUID();
-  sessions.value = sessions.value.map((session) =>
-    session.id === sessionId
-      ? {
-          ...session,
-          status: "streaming",
-          errorMessage: undefined,
-          ...(session.remoteKind === "demo" ? {
-            messages: [...session.messages, { id: `prompt-${operationId}`, from: "user" as const, body: trimmed, at: nowTimestamp() }],
-          } : {
-            operationEvidence: boundedOperationEvidence([
-              ...(session.operationEvidence ?? []),
-              { id: operationId, kind: "prompt", body: trimmed, at: nowTimestamp(), state: "pending" },
-            ]),
-          })
-        }
-      : session
-  );
-  if (session.remoteKind !== "demo") {
-    const submission = submitChatPrompt(sessionId, trimmed, operationId);
-    if (submission === undefined) updatePromptOperation(sessionId, operationId, { status: "accepted" });
-    else {
-      void submission.then((result) => {
-        updatePromptOperation(sessionId, operationId, result);
-      }, (reason) => {
-        updatePromptOperation(sessionId, operationId, {
-          status: "unconfirmed",
-          message: reason instanceof Error ? reason.message : "Prompt submission could not be confirmed.",
-        });
-      });
-    }
-  }
-}
-
-export async function steerSession(sessionId: string, body: string): Promise<boolean> {
-  return steerChatRun(sessions, steerChatSession, sessionId, body);
-}
-
-export async function interruptSession(sessionId: string): Promise<boolean> {
-  return await interruptChatRun(sessions, interruptChatSession, sessionId);
-}
-
-export async function respondToClarification(sessionId: string, answer: string): Promise<void> {
-  const trimmed = answer.trim();
-  const session = sessions.value.find((item) => item.id === sessionId);
-  const pending = session?.pendingInteraction;
-  if (!trimmed || session?.connectionState !== "ready" || pending?.kind !== "clarify" || pending.submitting) return;
-  markInteractionSubmitting(sessionId, pending.id);
-  try {
-    await respondClarify(sessionId, pending.requestId, trimmed);
-    clearInteraction(sessionId, pending.id);
-  } catch {
-    failInteraction(sessionId, pending.id, officeMessage("runtime.chat.answerFailed"));
-  }
-}
-
-export async function respondToApproval(sessionId: string, choice: ApprovalChoice): Promise<void> {
-  const session = sessions.value.find((item) => item.id === sessionId);
-  const pending = session?.pendingInteraction;
-  if (session?.connectionState !== "ready" || pending?.kind !== "approval" || pending.submitting) return;
-  if (!pending.choices.includes(choice) || (choice === "always" && !pending.allowPermanent)) return;
-  markInteractionSubmitting(sessionId, pending.id);
-  try {
-    await respondApproval(sessionId, pending.approvalId, choice);
-    clearInteraction(sessionId, pending.id);
-  } catch {
-    failInteraction(sessionId, pending.id, officeMessage("runtime.chat.approvalFailed"));
-  }
-}
-
-export function reconnectChatSession(sessionId: string): void {
-  const session = sessions.value.find((item) => item.id === sessionId);
-  const target = session ? chatTarget(session) : undefined;
-  if (target) ensureChatSession(target);
-}
-
-export function setChatSocketState(state: ChatConnectionState, message = ""): void {
-  chatSocketState.value = { state, message: message ? officeRuntimeMessage(message) : officeMessage("runtime.chat.waiting") };
-}
-
-export function setChatHistoryLoading(sessionId: string, resetTranscript = false): void {
-  updateChatSession(sessionId, (session) => {
-    const migrated = migrateLegacyPromptEvidence(session);
-    return {
-      ...migrated,
-      historyState: "loading",
-      ...(resetTranscript ? {
-        messages: [],
-        streamingMessageId: undefined,
-        historyPartial: false,
-        historyNotice: undefined,
-      } : {}),
-    };
-  });
-}
-
-export function applyChatHistory(sessionId: string, history: ChatMessage[], resolvedStoredSessionId?: string, result?: ChatHistoryResult): void {
-  updateChatSession(sessionId, (session) => {
-    const migrated = migrateLegacyPromptEvidence(session);
-    const historyIds = new Set(history.map((message) => message.id));
-    const localMessages = migrated.messages
-      .filter((message) => !historyIds.has(message.id));
-    const merged = boundedTranscriptSuffix([...history, ...localMessages]);
-    return {
-      ...migrated,
-      ...(resolvedStoredSessionId ? { storedSessionId: resolvedStoredSessionId, remoteKind: "stored" as const } : {}),
-      historyState: "loaded",
-      historyPartial: result?.partial === true || merged.truncated, historyNotice: result?.error ? officeRuntimeMessage(result.error) : undefined,
-      errorMessage: session.connectionState === "error" ? session.errorMessage : undefined,
-      messages: merged.messages
-    };
-  });
-}
-
-function updatePromptOperation(sessionId: string, operationId: string, result: ChatPromptResult): void {
-  updateChatSession(sessionId, (session) => {
-    let found = false;
-    const evidence = (session.operationEvidence ?? []).map((operation) => {
-      if (operation.id !== operationId || operation.kind !== "prompt" || operation.state !== "pending") return operation;
-      found = true;
-      return {
-        ...operation,
-        state: result.status,
-        ...(result.status === "accepted" ? { message: undefined } : { message: result.message }),
-      };
-    });
-    if (!found) return session;
-    return {
-      ...session,
-      operationEvidence: evidence,
-      ...(result.status === "rejected" || result.status === "unconfirmed" ? { status: "ready" as const } : {}),
-    };
-  });
-}
-
-export function reconcilePromptOperationsWithHistory(local: readonly ChatOperationEvidence[], _history: readonly ChatMessage[]): ChatOperationEvidence[] {
-  return boundedOperationEvidence(local);
-}
-
-function migrateLegacyPromptEvidence(session: ChatSession): ChatSession {
-  const legacy = session.messages.flatMap<ChatOperationEvidence>((message): ChatOperationEvidence[] => {
-    if (message.promptOperation) return [{
-      id: message.promptOperation.id, kind: "prompt" as const, body: message.body, at: message.at,
-      state: message.promptOperation.state,
-      ...(message.promptOperation.message ? { message: message.promptOperation.message } : {}),
-    }];
-    return message.kind === "steer"
-      ? [{ id: message.id, kind: "steer" as const, body: message.body, at: message.at, state: "accepted" as const }]
-      : [];
-  });
-  if (legacy.length === 0) return session;
-  return {
-    ...session,
-    messages: session.messages.filter((message) => message.promptOperation === undefined && message.kind !== "steer"),
-    operationEvidence: boundedOperationEvidence([...(session.operationEvidence ?? []), ...legacy]),
-  };
-}
-
-export function setChatHistoryError(sessionId: string, message: string): void {
-  updateChatSession(sessionId, (session) => ({ ...session, historyState: "error", errorMessage: officeRuntimeMessage(message) }));
-}
-
-export function setChatSessionConnecting(sessionId: string): void {
-  updateChatSession(sessionId, reconcileChatSessionConnecting);
-}
-
-export function setChatSessionReady(sessionId: string, liveSessionId: string, storedSessionId?: string, runtime?: ChatSessionReadyRuntime): void {
-  updateChatSession(sessionId, (session) => reconcileChatSessionReady(session, liveSessionId, storedSessionId, runtime));
-}
-
-export function setChatSessionDisconnected(sessionId: string): void {
-  updateChatSession(sessionId, reconcileChatSessionDisconnected);
-}
-
-export function setChatSessionError(sessionId: string, message: string): void {
-  updateChatSession(sessionId, (session) => reconcileChatSessionError(session, officeRuntimeMessage(message)));
-}
-
-export function applyChatGatewayEvent(sessionId: string, event: ChatGatewayEvent): "resync-required" | void {
-  let resyncRequired = false;
-  updateChatSession(sessionId, (session) => reduceChatGatewayEvent(session, event, () => { resyncRequired = true; }));
-  return resyncRequired ? "resync-required" : undefined;
-}
-
-export function reduceChatGatewayEvent(
-  session: ChatSession,
-  event: ChatGatewayEvent,
-  onTranscriptLimit?: (reason: Extract<TranscriptChange, { status: "resync-required" }>["reason"]) => void,
-): ChatSession {
-  if (session.liveSessionId && event.liveSessionId !== session.liveSessionId) return session;
-  const payload = event.payload ?? {};
-  if (event.type === "clarify.request") {
-    const requestId = stringValue(payload.requestId) ?? stringValue(payload.request_id);
-    const question = stringValue(payload.question);
-    if (!requestId || !question) return session;
-    return withPendingInteraction(session, {
-      id: `clarify:${requestId}`,
-      kind: "clarify",
-      requestId,
-      question,
-      choices: stringArray(payload.choices),
-      submitting: false
-    });
-  }
-  if (event.type === "approval.request") {
-    const approvalId = stringValue(payload.approvalId) ?? stringValue(payload.approval_id);
-    const command = stringValue(payload.command);
-    const description = stringValue(payload.description);
-    const allowPermanent = (payload.allowPermanent === true || payload.allow_permanent === true)
-      && officeSnapshot.value?.capabilities.access.allowedOperations.includes("chat.approval.permanent") === true;
-    const choices = approvalChoices(payload.choices, allowPermanent);
-    if (!approvalId || choices.length === 0) return session;
-    return withPendingInteraction(session, {
-      id: `approval:${approvalId}`,
-      kind: "approval",
-      approvalId,
-      ...(command ? { command } : {}),
-      ...(description ? { description } : {}),
-      choices,
-      allowPermanent,
-      submitting: false
-    });
-  }
-  if (event.type === "message.start") {
-    const messageId = gatewayMessageId(payload) ?? `stream-${event.liveSessionId}-${Date.now()}`;
-    const change = appendLiveMessage(session.messages, { id: messageId, from: "agent", body: "", at: nowTimestamp(), status: "streaming" });
-    return withTranscriptChange(session, change, onTranscriptLimit, {
-      ...session,
-      status: "streaming",
-      streamingMessageId: messageId,
-    });
-  }
-  if (event.type === "message.delta") {
-    const delta = stringValue(payload.text) ?? stringValue(payload.delta) ?? "";
-    if (!delta) return session;
-    const messageId = gatewayMessageId(payload) ?? session.streamingMessageId ?? `stream-${event.liveSessionId}`;
-    const exists = session.messages.some((message) => message.id === messageId);
-    const change = exists
-      ? appendLiveDelta(session.messages, messageId, delta)
-      : appendLiveMessage(session.messages, { id: messageId, from: "agent", body: delta, at: nowTimestamp(), status: "streaming" });
-    return withTranscriptChange(session, change, onTranscriptLimit, {
-      ...session,
-      status: "streaming",
-      streamingMessageId: messageId,
-    });
-  }
-  if (event.type === "message.complete") {
-    const messageId = gatewayMessageId(payload) ?? session.streamingMessageId ?? `complete-${event.liveSessionId}-${Date.now()}`;
-    const completeText = stringValue(payload.text);
-    const exists = session.messages.some((message) => message.id === messageId);
-    const replacements = exists
-      ? session.messages.map((message) => message.id === messageId ? { ...message, body: completeText || message.body, status: "complete" as const } : message.status === "streaming" ? { ...message, status: "complete" as const } : message)
-      : [...session.messages.map((message) => message.status === "streaming" ? { ...message, status: "complete" as const } : message), ...(completeText ? [{ id: messageId, from: "agent" as const, body: completeText, at: nowTimestamp(), status: "complete" as const }] : [])];
-    const change = replaceLiveMessages(session.messages, replacements, new Set([messageId]));
-    return withTranscriptChange(session, change, onTranscriptLimit, {
-      ...session,
-      status: "ready",
-      streamingMessageId: undefined,
-      pendingInteraction: undefined,
-      interruptPending: false,
-      interruptOperationId: undefined,
-    });
-  }
-  if (event.type === "status.update") {
-    return isChatRunActive(session) ? mergeGatewayStatusUpdate(session, payload) : session;
-  }
-  if (event.type === "session.info") {
-    // session.info is an uncorrelated observation and may predate this interrupt.
-    // Only the interrupt RPC acknowledgement or a current terminal event can finish it.
-    return session;
-  }
-  if (event.type.startsWith("tool.")) {
-    const toolId = stringValue(payload.toolId) ?? stringValue(payload.tool_id) ?? `tool-${event.liveSessionId}`;
-    const name = stringValue(payload.name);
-    const detail = stringValue(payload.summary) ?? stringValue(payload.status);
-    const phase = event.type === "tool.complete" ? "complete" as const : "running" as const;
-    const status = phase === "complete" ? "complete" as const : "streaming" as const;
-    const body = detail ? `${name ?? "Tool"}: ${detail}` : "";
-    const presentation = detail ? undefined : { kind: "tool-fallback" as const, ...(name ? { name } : {}), phase };
-    const index = session.messages.findIndex((message) => message.id === toolId);
-    const replacements = index >= 0
-      ? session.messages.map((message, currentIndex) => currentIndex === index ? { ...message, body, presentation, status } : message)
-      : [...session.messages, { id: toolId, from: "tool" as const, body, presentation, at: nowTimestamp(), status }];
-    const change = replaceLiveMessages(session.messages, replacements, new Set([toolId]));
-    return withTranscriptChange(session, change, onTranscriptLimit, {
-      ...session,
-      status: event.type === "tool.complete" ? session.status : "streaming",
-    });
-  }
-  if (event.type === "error") {
-    const upstreamText = stringValue(payload.message);
-    return {
-      ...session,
-      status: "ready",
-      errorMessage: upstreamText ? upstreamMessage(upstreamText) : officeMessage("runtime.chat.hermesGenericError"),
-      streamingMessageId: undefined,
-      pendingInteraction: undefined,
-      interruptPending: false,
-      interruptOperationId: undefined,
-      messages: session.messages.map((item) => item.status === "streaming" ? { ...item, status: "failed" } : item)
-    };
-  }
-  return session;
-}
-
-function withTranscriptChange(
-  session: ChatSession,
-  change: TranscriptChange,
-  onTranscriptLimit: ((reason: Extract<TranscriptChange, { status: "resync-required" }>["reason"]) => void) | undefined,
-  next: ChatSession,
-): ChatSession {
-  if (change.status === "resync-required") {
-    onTranscriptLimit?.(change.reason);
-    return session;
-  }
-  return { ...next, messages: change.messages, historyPartial: next.historyPartial === true || change.windowed };
-}
-
-function withPendingInteraction(session: ChatSession, interaction: ChatPendingInteraction): ChatSession {
-  const current = session.pendingInteraction;
-  const pendingInteraction = current?.id === interaction.id
-    ? { ...interaction, submitting: current.submitting, error: current.error }
-    : interaction;
-  return { ...session, status: "waiting", pendingInteraction };
-}
-
-function markInteractionSubmitting(sessionId: string, interactionId: string): void {
-  updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
-    ? { ...session, pendingInteraction: { ...session.pendingInteraction, submitting: true, error: undefined } }
-    : session);
-}
-
-function clearInteraction(sessionId: string, interactionId: string): void {
-  updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
-    ? { ...session, status: "streaming", pendingInteraction: undefined }
-    : session);
-}
-
-function failInteraction(sessionId: string, interactionId: string, error: RuntimeMessage): void {
-  updateChatSession(sessionId, (session) => session.pendingInteraction?.id === interactionId
-    ? { ...session, pendingInteraction: { ...session.pendingInteraction, submitting: false, error } }
-    : session);
-}
-
-function chatTarget(session: ChatSession): ChatTarget | undefined {
+function chatTarget(session: import("./domain").ChatSession): ChatTarget | undefined {
   if (!session.remoteKind || session.remoteKind === "demo") return undefined;
+  // Session effort was set via apply (live allowlist) or createSession from validated prefs.
+  const resolved = resolvedCreateModelPrefs({
+    provider: session.provider ?? "",
+    model: session.model ?? "",
+    reasoningEffort: session.reasoningEffort ?? "",
+  });
   return {
     clientSessionId: session.id,
     profileId: session.profileId,
-    ...(session.storedSessionId ? { storedSessionId: session.storedSessionId } : {})
+    ...(session.storedSessionId ? { storedSessionId: session.storedSessionId } : {}),
+    ...(resolved.model ? { model: resolved.model } : {}),
+    ...(resolved.provider ? { provider: resolved.provider } : {}),
+    ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
   };
 }
 
-function updateChatSession(sessionId: string, update: (session: ChatSession) => ChatSession): void {
-  sessions.value = sessions.value.map((session) => session.id === sessionId ? update(session) : session);
-}
-
 function releaseChatTarget(sessionId: string): void {
-  updateChatSession(sessionId, reconcileChatSessionDisconnected);
-  releaseChatSession(sessionId);
+  sessions.value = sessions.value.map((session) => session.id === sessionId ? reconcileChatSessionDisconnected(session) : session);
+  officeRuntimeHooks.releaseChatSession(sessionId);
 }

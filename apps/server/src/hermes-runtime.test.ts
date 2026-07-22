@@ -93,7 +93,7 @@ test("unsupported Hermes API versions fail closed", async () => {
 });
 
 test("CLI invocation never passes executable text through a shell", async () => {
-  const sentinel = join(tmpdir(), `hermes-office-shell-${process.pid}-${Date.now()}`);
+  const sentinel = join(tmpdir(), `hermes-studio-shell-${process.pid}-${Date.now()}`);
   const result = await probeHermesCli(`/missing/hermes;touch ${sentinel}`, 200);
   assert.equal(result.state, "unavailable");
   assert.equal(existsSync(sentinel), false);

@@ -1,33 +1,42 @@
 import { createOfficeServer } from "./server.js";
 import { HermesBackend } from "./hermes-backend.js";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { OfficeTeamsStore } from "./office-teams.js";
+import { brandEnv, brandEnvIsTrue, brandStatePath } from "./brand-env.js";
 
-const host = process.env.HERMES_OFFICE_HOST ?? "127.0.0.1";
-const configuredPort = Number.parseInt(process.env.HERMES_OFFICE_PORT ?? "4317", 10);
+const host = brandEnv("HOST") ?? "127.0.0.1";
+const configuredPort = Number.parseInt(brandEnv("PORT") ?? "4317", 10);
 const port = Number.isSafeInteger(configuredPort) && configuredPort >= 0 ? configuredPort : 4317;
-const configuredOrigins = process.env.HERMES_OFFICE_ALLOWED_ORIGINS
+const configuredOrigins = brandEnv("ALLOWED_ORIGINS")
   ?.split(",")
   .map((origin) => origin.trim())
   .filter((origin) => origin.length > 0);
-const desktopOrigins = process.env.HERMES_OFFICE_DESKTOP_ORIGINS
+const desktopOrigins = brandEnv("DESKTOP_ORIGINS")
   ?.split(",")
   .map((origin) => origin.trim())
   .filter((origin) => origin.length > 0);
-const parsedTrustedProxyHops = Number.parseInt(process.env.HERMES_OFFICE_TRUSTED_PROXY_HOPS ?? "0", 10);
+const parsedTrustedProxyHops = Number.parseInt(brandEnv("TRUSTED_PROXY_HOPS") ?? "0", 10);
 const trustedProxyHops = Number.isInteger(parsedTrustedProxyHops) && parsedTrustedProxyHops >= 0 && parsedTrustedProxyHops <= 8
   ? parsedTrustedProxyHops
   : 0;
 
-const hermesMode = process.env.HERMES_OFFICE_HERMES_MODE ?? "managed";
+const teamsPath = brandEnv("TEAMS_PATH") ?? brandStatePath("teams.json");
+const teamsStore = new OfficeTeamsStore(teamsPath);
+const listTeamLayers = async () => await teamsStore.listSkillLayers();
+
+const hermesMode = brandEnv("HERMES_MODE") ?? "managed";
+const hermesToken = brandEnv("HERMES_TOKEN");
 const runtimeSource = hermesMode === "demo"
   ? undefined
   : hermesMode === "existing"
     ? new HermesBackend({
-        baseUrl: process.env.HERMES_OFFICE_HERMES_URL ?? "",
-        ...(process.env.HERMES_OFFICE_HERMES_TOKEN === undefined ? {} : { sessionToken: process.env.HERMES_OFFICE_HERMES_TOKEN }),
+        baseUrl: brandEnv("HERMES_URL") ?? "",
+        ...(hermesToken === undefined ? {} : { sessionToken: hermesToken }),
+        listTeamLayers,
       })
-    : new HermesBackend({ executable: process.env.HERMES_OFFICE_HERMES_EXECUTABLE ?? "hermes" });
+    : new HermesBackend({
+        executable: brandEnv("HERMES_EXECUTABLE") ?? "hermes",
+        listTeamLayers,
+      });
 
 let shuttingDown = false;
 let server: ReturnType<typeof createOfficeServer> | undefined;
@@ -60,23 +69,32 @@ initialization = (async () => {
     if (runtimeSource !== undefined) await runtimeSource.start();
     if (shuttingDown) return;
 
+    const remoteToken = brandEnv("REMOTE_TOKEN");
+    const desktopCapability = brandEnv("DESKTOP_CAPABILITY");
+    const webRoot = brandEnv("WEB_ROOT");
     const candidate = createOfficeServer({
       host,
       port,
       ...(configuredOrigins === undefined ? {} : { allowedOrigins: configuredOrigins }),
-      allowNonLoopback: process.env.HERMES_OFFICE_ALLOW_NON_LOOPBACK === "true",
+      allowNonLoopback: brandEnvIsTrue("ALLOW_NON_LOOPBACK"),
       trustedProxyHops,
-      deviceRegistryPath: process.env.HERMES_OFFICE_DEVICE_REGISTRY_PATH ?? join(homedir(), ".hermes-office", "devices.json"),
-      ...(process.env.HERMES_OFFICE_REMOTE_TOKEN === undefined ? {} : { remoteToken: process.env.HERMES_OFFICE_REMOTE_TOKEN }),
-      ...(process.env.HERMES_OFFICE_DESKTOP_CAPABILITY === undefined ? {} : { desktopCapability: process.env.HERMES_OFFICE_DESKTOP_CAPABILITY }),
+      deviceRegistryPath: brandEnv("DEVICE_REGISTRY_PATH") ?? brandStatePath("devices.json"),
+      tokenUsagePath: brandEnv("TOKEN_USAGE_PATH") ?? brandStatePath("token-usage.json"),
+      teamsPath,
+      teamsStore,
+      ...(remoteToken === undefined ? {} : { remoteToken }),
+      ...(desktopCapability === undefined ? {} : { desktopCapability }),
       ...(desktopOrigins === undefined ? {} : { desktopOrigins }),
-      ...(process.env.HERMES_OFFICE_WEB_ROOT === undefined ? {} : { staticWebRoot: process.env.HERMES_OFFICE_WEB_ROOT }),
+      ...(webRoot === undefined ? {} : { staticWebRoot: webRoot }),
+      // Fail closed unless the Tailscale launcher (or operator) sets this explicitly.
+      // Accepts HERMES_STUDIO_REMOTE_PRIVILEGED or deprecated HERMES_OFFICE_REMOTE_PRIVILEGED.
+      remotePrivilegedEnabled: brandEnvIsTrue("REMOTE_PRIVILEGED"),
       ...(runtimeSource === undefined ? {} : { runtimeSource }),
     });
     const address = await candidate.listen();
     if (shuttingDown) { await candidate.close(); return; }
     server = candidate;
-    process.stdout.write(`Hermes Office Server listening on http://${address.address}:${address.port}\n`);
+    process.stdout.write(`Hermes Studio Server listening on http://${address.address}:${address.port}\n`);
   } catch (error) {
     await runtimeSource?.close().catch(() => undefined);
     throw error;

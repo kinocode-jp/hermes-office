@@ -3,24 +3,33 @@ import { KanbanBoard } from "./components/kanban-board";
 import { LiveSettings } from "./components/live-settings";
 import { OfficeScene } from "./components/office-scene";
 import { ProfilePanel } from "./components/profile-panel";
+import { TeamsPanel } from "./components/teams-panel";
 import { DeviceLogin } from "./components/device-login";
 import { AppearanceSettings } from "./components/appearance-settings";
 import { ProfileCommand } from "./components/profile-command";
+import { ProfileSettingsModal } from "./components/profile-settings-modal";
+import { ProfileDetailModal } from "./components/profile-detail-modal";
+import { ProfileChatModal } from "./components/profile-chat-modal";
+import { RecurringJobsPanel } from "./components/recurring-jobs-panel";
+import { SideRail, type SideRailNavItem } from "./components/side-rail";
 import { WorkspaceLayout } from "./components/workspace-layout";
-import { isLocalOfficeClient } from "./auth-state";
-import { logoutRemoteDevice } from "./office-api";
 import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
-import type { Surface } from "./domain";
-import { surfaceAriaCurrent } from "./navigation-state";
-import { activeSurface, mobileInspectorOpen, mobileWorkspaceOpen, navigateToSurface, officeAccess, officeConnection, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
+import { BoardIcon, HomeIcon, SettingsIcon, UsersIcon } from "./components/icons";
+import type { SettingsTab, Surface } from "./domain";
+import { profileDisplayName } from "./profile-names";
+import { officeWindowOpen } from "./office-window";
+import { sidebarWidth } from "./sidebar-layout";
+import { activeSurface, mobileWorkspaceOpen, navigateToSurface, officeAccess, officeConnection, openMobileInspector, openSessionIds, profileList, retryOfficeServer, selectedProfile, settingsTab } from "./store";
+import { persistUiNavPreferences } from "./ui-nav-prefs";
 import { rememberSurfaceScroll, restoreSurfaceScroll, type SurfaceScrollPosition } from "./surface-scroll";
 import { useLayoutEffect, useRef } from "preact/hooks";
 
-const navItems: { id: Surface; glyph: string; label: TranslationKey }[] = [
-  { id: "office", glyph: "⌂", label: "nav.office" },
-  { id: "kanban", glyph: "▦", label: "nav.kanban" },
-  { id: "library", glyph: "▤", label: "nav.library" },
-  { id: "settings", glyph: "⚙", label: "nav.settings" }
+const navItems: { id: Surface; icon: SideRailNavItem["icon"]; label: TranslationKey }[] = [
+  { id: "office", icon: HomeIcon, label: "nav.office" },
+  { id: "kanban", icon: BoardIcon, label: "nav.kanban" },
+  { id: "teams", icon: UsersIcon, label: "nav.teams" },
+  // Agent settings (global + profile) live under Settings only — not a separate "Library".
+  { id: "settings", icon: SettingsIcon, label: "nav.settings" }
 ];
 
 export function App() {
@@ -37,14 +46,17 @@ export function App() {
       : connection.state === "degraded" ? t("connection.degraded")
       : connection.state === "error" ? t("connection.error") : connection.state;
   return (
-    <div class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}>
+    <div
+      class={`app-shell ${openSessionIds.value.length > 0 ? "has-open-workspace" : "is-workspace-empty"}`}
+      style={{ "--sidebar-width": `${sidebarWidth.value}px` }}
+    >
       <header class="topbar" data-mobile-route-chrome>
         <a class="brand" href="#" aria-label={t("app.home")} onClick={(event) => { event.preventDefault(); navigateToSurface("office"); }}>
           <span class="brand-mark">H</span>
-          <span><b>Hermes</b><small>Office</small></span>
+          <span><b>Hermes</b><small>Studio</small></span>
         </a>
         <div class={`runtime-status runtime-${connection.state}`} title={localizeRuntimeMessage(connection.message)}>
-          <i /><span class="rt-label">Office Server</span> <span class="rt-state">{connectionLabel}</span>
+          <i /><span class="rt-label">Studio Server</span> <span class="rt-state">{connectionLabel}</span>
         </div>
         <div class="top-actions">
           <AppearanceSettings />
@@ -62,31 +74,19 @@ export function App() {
             class="quiet-button compact-inspector-button"
             type="button"
             aria-label={t("profile.details")}
-            onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}
+            title={t("profile.detailsHint")}
+            onClick={openMobileInspector}
           >
             ◧
           </button>
-          {isLocalOfficeClient(location)
-            ? <span class="user-button user-button--display" role="note" aria-label={t("app.localOwner")} title={t("app.localOwner")}>KO</span>
-            : <button class="user-button" type="button" aria-label={t("app.logout")} onClick={() => void logoutRemoteDevice().then(() => location.reload())}>⇥</button>}
         </div>
       </header>
 
-      <nav class="side-rail" aria-label={t("nav.main")} data-mobile-route-chrome>
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            class={activeSurface.value === item.id ? "is-active" : ""}
-            aria-current={surfaceAriaCurrent(activeSurface.value, item.id)}
-            onClick={() => navigateToSurface(item.id)}
-          >
-            <span>{item.glyph}</span>{t(item.label)}
-          </button>
-        ))}
-      </nav>
+      <SideRail navItems={navItems.filter((item) => item.id !== "office" || officeWindowOpen.value)} />
 
       <WorkspaceLayout
         hasChats={openSessionIds.value.length > 0}
+        surfaceVisible={officeWindowOpen.value || activeSurface.value !== "office"}
         main={(
           <main
             ref={mainStageRef}
@@ -99,10 +99,10 @@ export function App() {
                 <button type="button" onClick={retryOfficeServer}>{t("connection.retry")}</button>
               </div>
             )}
-            {activeSurface.value === "office" && <OfficeScene profiles={profileList.value} />}
+            {activeSurface.value === "office" && officeWindowOpen.value && <OfficeScene profiles={profileList.value} />}
             {activeSurface.value === "kanban" && <KanbanBoard />}
-            {activeSurface.value === "library" && <LiveSettings key="global-library" profileId={null} initialTab="global" />}
-            {activeSurface.value === "settings" && (
+            {activeSurface.value === "teams" && <TeamsPanel />}
+            {(activeSurface.value === "settings" || activeSurface.value === "library") && (
               // Host admin is host-scoped and intentionally survives profile selection; "open live settings" switches to the profile tab.
               settingsTab.value === "host" ? (
                 <LiveSettings
@@ -112,18 +112,18 @@ export function App() {
                   activeTab="host"
                   showAccessAudit
                   showHostAdmin
-                  onTabChange={(tab) => { settingsTab.value = tab; }}
+                  onTabChange={setSettingsTab}
                 />
               ) : (
                 <LiveSettings
                   key={`settings-${selectedProfile.value?.id ?? "global"}`}
                   profileId={selectedProfile.value?.id ?? null}
-                  {...(selectedProfile.value?.name === undefined ? {} : { profileLabel: selectedProfile.value.name })}
+                  {...(selectedProfile.value?.name === undefined ? {} : { profileLabel: profileDisplayName(selectedProfile.value) })}
                   initialTab={selectedProfile.value ? settingsTab.value : "global"}
                   activeTab={selectedProfile.value ? settingsTab.value : "global"}
                   showAccessAudit
                   showHostAdmin
-                  onTabChange={(tab) => { settingsTab.value = tab; }}
+                  onTabChange={setSettingsTab}
                 />
               )
             )}
@@ -132,6 +132,19 @@ export function App() {
         workspace={<div class={`workspace-drawer ${openSessionIds.value.length === 0 ? "is-empty" : ""} ${mobileWorkspaceOpen.value ? "is-mobile-open" : ""}`}><ChatWorkspace /></div>}
       />
       <ProfilePanel />
+      <ProfileDetailModal />
+      <ProfileSettingsModal />
+      <ProfileChatModal />
+      <RecurringJobsPanel />
     </div>
   );
+}
+
+function setSettingsTab(tab: SettingsTab): void {
+  settingsTab.value = tab;
+  persistUiNavPreferences({
+    surface: activeSurface.value,
+    settingsTab: tab,
+    selectedProfileId: selectedProfile.value?.id ?? "",
+  });
 }

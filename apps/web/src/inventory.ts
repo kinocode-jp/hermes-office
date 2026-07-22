@@ -4,7 +4,9 @@ import { officeMessage, type RuntimeMessage } from "./i18n";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
 import { mergeServerSessionStatus } from "./session-runtime";
+import { isRecurringSessionHidden } from "./recurring-jobs";
 import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
+import { ensurePokemonDisplayNames } from "./profile-names";
 import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
@@ -153,7 +155,9 @@ function commitInventoryPage(page: InventoryPage, identity: InventoryIdentity): 
 }
 
 function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void {
-  registerDefaultAvatarProfiles(rows.map((profile) => profile.id));
+  const profileIds = rows.map((profile) => profile.id);
+  registerDefaultAvatarProfiles(profileIds);
+  ensurePokemonDisplayNames(profileIds);
   const next = [...profileList.value];
   const existing = new Map(next.map((profile, index) => [profile.id, index]));
   const pageSeen = new Set<string>();
@@ -180,6 +184,7 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
   const pageSeen = new Set<string>();
   for (const live of rows) {
     const key = sessionKey(live);
+    if (isRecurringSessionHidden(storedSessionClientId(live.profileId, live.id))) continue;
     if (pageSeen.has(key)) continue;
     pageSeen.add(key);
     seen?.add(key);
@@ -188,10 +193,10 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
     const status = mergeServerSessionStatus(previous, live.activity);
     if (index === undefined || previous === undefined) {
       existing.set(key, next.length);
-      next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
+      next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, ...(live.createdAt === undefined ? {} : { createdAt: live.createdAt }), ...(live.updatedAt === undefined ? {} : { updatedAt: live.updatedAt }), ...(live.lastMessagePreview === undefined ? {} : { lastMessagePreview: live.lastMessagePreview }), status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
       continue;
     }
-    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, titlePresentation: undefined, status, remoteKind: "stored" };
+    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, titlePresentation: undefined, ...(live.createdAt === undefined ? {} : { createdAt: live.createdAt }), ...(live.updatedAt === undefined ? {} : { updatedAt: live.updatedAt }), ...(live.lastMessagePreview === undefined ? {} : { lastMessagePreview: live.lastMessagePreview }), status, remoteKind: "stored" };
   }
   sessions.value = next;
   updateProfileSessionCounts();

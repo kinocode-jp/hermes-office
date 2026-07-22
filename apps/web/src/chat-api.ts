@@ -32,6 +32,10 @@ export type ChatTarget = {
   clientSessionId: string;
   profileId: string;
   storedSessionId?: string;
+  model?: string;
+  provider?: string;
+  /** Hermes session.create reasoning_effort when set. */
+  reasoningEffort?: string;
 };
 
 export type ChatGatewayEvent = {
@@ -404,7 +408,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     try {
       const raw = target.storedSessionId
         ? await rpc("session.resume", { session_id: target.storedSessionId, profile: target.profileId })
-        : await rpc("session.create", { profile: target.profileId });
+        : await rpc("session.create", {
+          profile: target.profileId,
+          ...(target.model ? { model: target.model } : {}),
+          ...(target.provider ? { provider: target.provider } : {}),
+          ...(target.reasoningEffort ? { reasoning_effort: target.reasoningEffort } : {}),
+        });
       const envelope = asRecord(raw);
       const result = (asRecord(envelope?.value) ?? envelope) as JsonRpcResult | undefined;
       const liveSessionId = typeof result?.session_id === "string"

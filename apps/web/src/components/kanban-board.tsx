@@ -1,13 +1,15 @@
+import { useRef, useState } from "preact/hooks";
 import type { TaskStatus, TaskWritableStatus, WorkTask } from "../domain";
 import { locale, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import {
   addTaskComment,
+  askAssigneeAboutTask,
   assignTask,
   createTask,
   expandedTaskId,
   kanbanAssignees,
   kanbanState,
-  moveTask,
+  officeConnection,
   profileList,
   refreshKanbanBoard,
   retryTaskComments,
@@ -24,6 +26,27 @@ import {
   unconfirmedTaskComments,
   unconfirmedTaskCreation
 } from "../kanban-store";
+import { profileDisplayName } from "../profile-names";
+import {
+  kanbanTeamFilterId,
+  setKanbanTeamFilter,
+  teams,
+} from "../teams-store";
+import {
+  isKanbanColumnCollapsed,
+  loadKanbanColumnVisibility,
+  paintKanbanColumns,
+  requestTaskMove,
+  saveKanbanColumnVisibility,
+  toggleKanbanSelectedStatus,
+  visibleKanbanStatuses,
+  type KanbanBoardStatus,
+  type KanbanColumnVisibility,
+} from "../kanban-board-logic";
+import { InfoTip } from "./info-tip";
+import { useMobileOverlay } from "./use-mobile-overlay";
+
+export { isKanbanColumnCollapsed, requestTaskMove } from "../kanban-board-logic";
 
 const columns: Array<{ id: TaskStatus; label: TranslationKey; caption: TranslationKey; writable?: TaskWritableStatus }> = [
   { id: "triage", label: "kanban.column.triage", caption: "kanban.caption.triage", writable: "triage" },
@@ -38,12 +61,12 @@ const columns: Array<{ id: TaskStatus; label: TranslationKey; caption: Translati
 const writableColumns = columns.filter((column): column is typeof column & { writable: TaskWritableStatus } => Boolean(column.writable));
 const writableStatuses = new Set<TaskStatus>(writableColumns.map((column) => column.writable));
 
-export function requestTaskMove(taskId: string, value: string): Promise<void> {
-  const status = writableColumns.find((column) => column.writable === value)?.writable;
-  return status ? moveTask(taskId, status) : Promise.resolve();
-}
+const DRAG_MIME = "application/x-hermes-task";
+const DETAIL_CLICK_SLOP_PX = 6;
 
 function TaskCard({ task }: { task: WorkTask }) {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const detailGesture = useRef<{ x: number; y: number; dragged: boolean } | null>(null);
   const assignee = profileList.value.find((profile) => profile.id === task.assigneeId);
   const selectableProfiles = kanbanAssignees.value.length === 0
     ? profileList.value
@@ -51,6 +74,18 @@ function TaskCard({ task }: { task: WorkTask }) {
   const expanded = expandedTaskId.value === task.id;
   const detail = taskCommentDetail.value.cardId === task.id ? taskCommentDetail.value : undefined;
   const unconfirmedComment = unconfirmedTaskComments.value[task.id];
+  const chatReady = (officeConnection.value.source === "server" && officeConnection.value.runtime === "ready")
+    || (officeConnection.value.source === "demo" && officeConnection.value.state === "demo");
+  const canAskAssignee = Boolean(task.assigneeId) && !task.pending && chatReady;
+  const askDisabledReason = task.pending
+    ? t("kanban.saving")
+    : !task.assigneeId
+      ? t("kanban.askAssigneeNoAssignee")
+      : !chatReady
+        ? t("kanban.askAssigneeUnavailable")
+        : undefined;
+  const previewText = task.latestSummary ?? task.body;
+  const statusLabel = columns.find((column) => column.id === task.status);
 
   const submitComment = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -59,18 +94,70 @@ function TaskCard({ task }: { task: WorkTask }) {
     if (await addTaskComment(task.id, input.value) === "success") form.reset();
   };
 
+  const openDetailIfClick = () => {
+    if (detailGesture.current?.dragged) return;
+    setDetailOpen(true);
+  };
+
   return (
     <article
       class={`task-card priority-${task.priority} ${task.pending ? "is-pending" : ""}`}
       draggable={!task.pending}
-      onDragStart={(event) => event.dataTransfer?.setData("application/x-hermes-task", task.id)}
+      onDragStart={(event) => {
+        if (task.pending) {
+          event.preventDefault();
+          return;
+        }
+        if (detailGesture.current) detailGesture.current.dragged = true;
+        event.dataTransfer?.setData(DRAG_MIME, task.id);
+        event.dataTransfer!.effectAllowed = "move";
+      }}
     >
       <div class="task-card-topline">
         <span class="task-id">{task.id}</span>
         {task.pending && <span class="task-saving">{t("kanban.saving")}</span>}
       </div>
-      <h3>{task.title}</h3>
-      {(task.latestSummary || task.body) && <p class="task-summary">{task.latestSummary ?? task.body}</p>}
+      <div
+        class="task-card-content"
+        role="button"
+        tabIndex={0}
+        aria-haspopup="dialog"
+        aria-label={t("kanban.detailOpenAria", { title: task.title })}
+        onPointerDown={(event) => {
+          detailGesture.current = { x: event.clientX, y: event.clientY, dragged: false };
+        }}
+        onPointerMove={(event) => {
+          const gesture = detailGesture.current;
+          if (!gesture || gesture.dragged) return;
+          const dx = event.clientX - gesture.x;
+          const dy = event.clientY - gesture.y;
+          if (dx * dx + dy * dy > DETAIL_CLICK_SLOP_PX * DETAIL_CLICK_SLOP_PX) gesture.dragged = true;
+        }}
+        onPointerUp={() => {
+          openDetailIfClick();
+          detailGesture.current = null;
+        }}
+        onPointerCancel={() => { detailGesture.current = null; }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setDetailOpen(true);
+          }
+        }}
+      >
+        <h3>{task.title}</h3>
+        {previewText && <p class="task-summary">{previewText}</p>}
+        {!previewText && <p class="task-summary task-summary--empty">{t("kanban.detailNoBody")}</p>}
+      </div>
+
+      {detailOpen && (
+        <TaskDetailModal
+          task={task}
+          assigneeName={assignee ? profileDisplayName(assignee) : t("kanban.unassigned")}
+          statusLabel={statusLabel ? t(statusLabel.label) : task.status}
+          onClose={() => setDetailOpen(false)}
+        />
+      )}
 
       <label class="task-assignee-select">
         <span>{t("kanban.assignee")}</span>
@@ -80,7 +167,7 @@ function TaskCard({ task }: { task: WorkTask }) {
           onChange={(event) => void assignTask(task.id, event.currentTarget.value || null)}
         >
           <option value="">{t("kanban.unassigned")}</option>
-          {selectableProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+          {selectableProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profileDisplayName(profile)}</option>)}
         </select>
       </label>
 
@@ -100,8 +187,18 @@ function TaskCard({ task }: { task: WorkTask }) {
       <footer>
         <span class="task-assignee">
           {assignee ? <i style={{ background: assignee.color }} /> : <i class="unassigned" />}
-          {assignee?.name ?? t("kanban.unassigned")}
+          {assignee ? profileDisplayName(assignee) : t("kanban.unassigned")}
         </span>
+        <button
+          type="button"
+          class="task-ask-assignee"
+          disabled={!canAskAssignee}
+          title={askDisabledReason}
+          aria-label={t("kanban.askAssigneeAria", { title: task.title })}
+          onClick={() => { askAssigneeAboutTask(task); }}
+        >
+          {t("kanban.askAssignee")}
+        </button>
         <button type="button" aria-expanded={expanded} onClick={() => void toggleTaskComments(task.id)}>
           {t("kanban.notes", { count: task.comments })}
         </button>
@@ -147,6 +244,157 @@ function TaskCard({ task }: { task: WorkTask }) {
   );
 }
 
+function TaskDetailModal({
+  task,
+  assigneeName,
+  statusLabel,
+  onClose,
+}: {
+  task: WorkTask;
+  assigneeName: string;
+  statusLabel: string;
+  onClose(): void;
+}) {
+  const overlay = useMobileOverlay<HTMLElement>({
+    kind: "modal",
+    open: true,
+    onClose,
+    viewport: "(min-width: 0px)",
+  });
+  const body = task.body?.trim() || "";
+  const summary = task.latestSummary?.trim() || "";
+  const showBoth = Boolean(body && summary && body !== summary);
+
+  return (
+    <div class="task-detail-modal-layer" data-modal-affordance="true">
+      <button class="task-detail-modal-scrim" type="button" aria-label={t("common.close")} onClick={onClose} />
+      <section
+        ref={overlay.ref}
+        class="task-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`task-detail-title-${task.id}`}
+        tabIndex={-1}
+      >
+        <header class="task-detail-modal-head">
+          <div>
+            <span class="task-id">{task.id}</span>
+            <h2 id={`task-detail-title-${task.id}`}>{task.title}</h2>
+          </div>
+          <button
+            type="button"
+            class="task-detail-modal-close"
+            data-mobile-overlay-initial-focus
+            onClick={onClose}
+            aria-label={t("common.close")}
+          >
+            ×
+          </button>
+        </header>
+        <dl class="task-detail-meta">
+          <div>
+            <dt>{t("kanban.status")}</dt>
+            <dd>{statusLabel}</dd>
+          </div>
+          <div>
+            <dt>{t("kanban.assignee")}</dt>
+            <dd>{assigneeName}</dd>
+          </div>
+          <div>
+            <dt>{t("kanban.detailPriority")}</dt>
+            <dd>{task.priority === "high" ? t("kanban.detailPriorityHigh") : t("kanban.detailPriorityNormal")}</dd>
+          </div>
+        </dl>
+        <div class="task-detail-modal-body">
+          {showBoth && (
+            <section class="task-detail-section">
+              <h3>{t("kanban.detailSummary")}</h3>
+              <p class="task-detail-text">{summary}</p>
+            </section>
+          )}
+          <section class="task-detail-section">
+            <h3>{showBoth ? t("kanban.detailBody") : t("kanban.detailContent")}</h3>
+            {body || summary
+              ? <p class="task-detail-text">{body || summary}</p>
+              : <p class="task-detail-empty">{t("kanban.detailNoBody")}</p>}
+          </section>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TaskCreateModal({
+  title,
+  titleRef,
+  busy,
+  onTitleChange,
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  titleRef: { current: HTMLInputElement | null };
+  busy: boolean;
+  onTitleChange(value: string): void;
+  onClose(): void;
+  onSubmit(event: SubmitEvent): void | Promise<void>;
+}) {
+  const overlay = useMobileOverlay<HTMLElement>({
+    kind: "modal",
+    open: true,
+    onClose,
+    viewport: "(min-width: 0px)",
+  });
+
+  return (
+    <div class="task-create-modal-layer" data-modal-affordance="true">
+      <button class="task-create-modal-scrim" type="button" aria-label={t("common.close")} onClick={onClose} disabled={busy} />
+      <section
+        ref={overlay.ref}
+        class="task-create-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-create-modal-title"
+        tabIndex={-1}
+      >
+        <header class="task-create-modal-head">
+          <h2 id="task-create-modal-title">{t("kanban.createTitle")}</h2>
+          <button
+            type="button"
+            class="task-create-modal-close"
+            data-mobile-overlay-initial-focus
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("common.close")}
+          >
+            ×
+          </button>
+        </header>
+        <form class="task-create-form" onSubmit={onSubmit}>
+          <label class="task-create-field">
+            <span>{t("kanban.newTask")}</span>
+            <input
+              ref={titleRef}
+              name="task-title"
+              value={title}
+              onInput={(event) => onTitleChange(event.currentTarget.value)}
+              aria-label={t("kanban.newTask")}
+              placeholder={t("kanban.newTaskPlaceholder")}
+              maxLength={240}
+              required
+              disabled={busy}
+            />
+          </label>
+          <footer class="task-create-actions">
+            <button type="button" class="quiet-button" onClick={onClose} disabled={busy}>{t("kanban.createCancel")}</button>
+            <button class="primary-button" type="submit" disabled={busy || !title.trim()}>{t("kanban.createSubmit")}</button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function UnconfirmedSubmissionNotice({
   detail,
   checked,
@@ -172,29 +420,114 @@ function UnconfirmedSubmissionNotice({
 }
 
 export function KanbanBoard() {
+  const [columnCollapse, setColumnCollapse] = useState<Partial<Record<TaskStatus, boolean>>>({});
+  const [dragOverColumn, setDragOverColumn] = useState<TaskStatus | null>(null);
+  const [columnVisibility, setColumnVisibility] = useState(loadKanbanColumnVisibility);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createTitle, setCreateTitle] = useState("");
+  const createTitleRef = useRef<HTMLInputElement>(null);
+
+  const closeCreateModal = () => {
+    if (taskCreationBusy.value) return;
+    setCreateOpen(false);
+  };
+
+  const openCreateModal = () => {
+    if (boardStateLoadingOrBusy()) return;
+    setCreateTitle("");
+    setCreateOpen(true);
+    requestAnimationFrame(() => createTitleRef.current?.focus());
+  };
+
   const submitTask = async (event: SubmitEvent) => {
     event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    const input = form.elements.namedItem("task-title") as HTMLInputElement;
-    if (await createTask(input.value) === "success") form.reset();
+    const title = createTitle.trim();
+    if (!title) return;
+    if (await createTask(title) === "success") {
+      setCreateTitle("");
+        setCreateOpen(false);
+    }
   };
+
+  function boardStateLoadingOrBusy(): boolean {
+    return kanbanState.value.state === "loading" || taskCreationBusy.value || Boolean(unconfirmedTaskCreation.value);
+  }
   const boardState = kanbanState.value;
+  const teamFilterId = kanbanTeamFilterId.value;
+  const filterTeam = teamFilterId ? teams.value.find((team) => team.id === teamFilterId) : undefined;
+  const memberIds = filterTeam ? new Set(filterTeam.memberProfileIds) : null;
+  const itemCountFor = (columnId: TaskStatus): number => tasks.value.reduce((count, task) => {
+    if (task.status !== columnId) return count;
+    if (memberIds && (task.assigneeId === undefined || !memberIds.has(task.assigneeId))) return count;
+    return count + 1;
+  }, 0);
+  const visibleColumns = paintKanbanColumns(columns, columnVisibility, itemCountFor);
+  const selectedStatusCount = visibleKanbanStatuses(columnVisibility).length;
+
+  const updateColumnVisibility = (next: KanbanColumnVisibility) => {
+    const sanitized: KanbanColumnVisibility = {
+      mode: next.mode === "selected" ? "selected" : "all",
+      selected: next.selected,
+      hideEmpty: next.hideEmpty === true,
+      layout: next.layout === "stream" ? "stream" : "columns",
+    };
+    setColumnVisibility(sanitized);
+    saveKanbanColumnVisibility(sanitized);
+  };
+
+
+  const toggleColumn = (columnId: TaskStatus, itemCount: number) => {
+    setColumnCollapse((current) => {
+      const nextCollapsed = !isKanbanColumnCollapsed(columnId, itemCount, current);
+      return { ...current, [columnId]: nextCollapsed };
+    });
+  };
+
+  const acceptDrop = (column: (typeof columns)[number], event: DragEvent) => {
+    const status = column.writable;
+    if (!status) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const taskId = event.dataTransfer?.getData(DRAG_MIME);
+    setDragOverColumn(null);
+    if (!taskId) return;
+    // Dropping onto a collapsed column expands it so the move is visible.
+    setColumnCollapse((current) => ({ ...current, [column.id]: false }));
+    void requestTaskMove(taskId, status);
+  };
 
   return (
     <section class="kanban-page">
       <header class="page-title-row">
-        <div>
-          <p class="eyebrow">{t("kanban.eyebrow")}</p>
+        <div class="heading-info-group">
           <h1>{t("kanban.title")}</h1>
+          <InfoTip text={t("kanban.boardHint")} align="start" side="bottom" />
         </div>
-        <div class={`kanban-sync state-${boardState.state}`} role={boardState.state === "error" ? "alert" : "status"}>
-          <span>{localizeRuntimeMessage(boardState.message)}</span>
-          <button type="button" onClick={() => void refreshKanbanBoard({ acknowledgeErrors: true })} disabled={boardState.state === "loading"}>{t("kanban.reload")}</button>
+        <div class="page-title-actions">
+          <div class={`kanban-sync state-${boardState.state}`} role={boardState.state === "error" ? "alert" : "status"}>
+            {(boardState.state === "loading" || boardState.state === "saving" || boardState.state === "error") && (
+              <span class="kanban-sync-message">{localizeRuntimeMessage(boardState.message)}</span>
+            )}
+            <button
+              type="button"
+              class="kanban-sync-reload"
+              onClick={() => void refreshKanbanBoard({ acknowledgeErrors: true })}
+              disabled={boardState.state === "loading"}
+              title={localizeRuntimeMessage(boardState.message)}
+              aria-label={t("kanban.reload")}
+            >
+              {t("kanban.reload")}
+            </button>
+          </div>
+          <button
+            class="primary-button"
+            type="button"
+            onClick={openCreateModal}
+            disabled={boardState.state === "loading" || taskCreationBusy.value || Boolean(unconfirmedTaskCreation.value)}
+          >
+            {t("kanban.add")}
+          </button>
         </div>
-        <form class="task-create" onSubmit={submitTask}>
-          <input name="task-title" aria-label={t("kanban.newTask")} placeholder={t("kanban.newTaskPlaceholder")} maxLength={240} required disabled={taskCreationBusy.value || Boolean(unconfirmedTaskCreation.value)} />
-          <button class="primary-button" type="submit" disabled={boardState.state === "loading" || taskCreationBusy.value || Boolean(unconfirmedTaskCreation.value)}>{t("kanban.add")}</button>
-        </form>
         {unconfirmedTaskCreation.value && (
           <UnconfirmedSubmissionNotice
             detail={t("kanban.unknown.task")}
@@ -206,29 +539,212 @@ export function KanbanBoard() {
         )}
       </header>
 
-      <div class="kanban-board">
-        {columns.map((column) => {
-          const items = tasks.value.filter((task) => task.status === column.id);
+      {createOpen && (
+        <TaskCreateModal
+          title={createTitle}
+          titleRef={createTitleRef}
+          busy={taskCreationBusy.value}
+          onTitleChange={setCreateTitle}
+          onClose={closeCreateModal}
+          onSubmit={submitTask}
+        />
+      )}
+
+      <div class="kanban-filters">
+        <div class="kanban-filter-card" role="region" aria-label={t("kanban.filters.label")}>
+          <div class="kanban-filter-row">
+            <label class="kanban-filter-field">
+              <span>{t("kanban.teamFilter")}</span>
+              <select
+                value={teamFilterId}
+                onChange={(event) => setKanbanTeamFilter(event.currentTarget.value)}
+                aria-label={t("kanban.teamFilter")}
+              >
+                <option value="">{t("kanban.teamFilterAll")}</option>
+                {teams.value.map((team) => (
+                  <option key={team.id} value={team.id}>{team.name}</option>
+                ))}
+              </select>
+            </label>
+            <div class="kanban-filter-modes" role="group" aria-label={t("kanban.columnFilter.label")}>
+              <span class="kanban-filter-kicker">
+                {t("kanban.columnFilter.label")}
+                <InfoTip
+                  text={[
+                    columnVisibility.mode === "selected"
+                      ? t("kanban.columnFilter.hint", { count: selectedStatusCount })
+                      : t("kanban.columnFilter.modeAll"),
+                    columnVisibility.hideEmpty
+                      ? t("kanban.columnFilter.hideEmptyHint", { shown: visibleColumns.length })
+                      : null,
+                  ].filter(Boolean).join(" · ")}
+                  align="start"
+                  side="bottom"
+                />
+              </span>
+              <label class={`kanban-mode-chip ${columnVisibility.mode === "all" ? "is-active" : ""}`}>
+                <input
+                  type="radio"
+                  name="kanban-column-mode"
+                  checked={columnVisibility.mode === "all"}
+                  onChange={() => updateColumnVisibility({ ...columnVisibility, mode: "all" })}
+                />
+                <span>{t("kanban.columnFilter.modeAll")}</span>
+              </label>
+              <label class={`kanban-mode-chip ${columnVisibility.mode === "selected" ? "is-active" : ""}`}>
+                <input
+                  type="radio"
+                  name="kanban-column-mode"
+                  checked={columnVisibility.mode === "selected"}
+                  onChange={() => updateColumnVisibility({ ...columnVisibility, mode: "selected" })}
+                />
+                <span>{t("kanban.columnFilter.modeSelected")}</span>
+              </label>
+            </div>
+            <div class="kanban-filter-modes" role="group" aria-label={t("kanban.layout.label")}>
+              <span class="kanban-filter-kicker">{t("kanban.layout.label")}</span>
+              <label class={`kanban-mode-chip ${columnVisibility.layout !== "stream" ? "is-active" : ""}`}>
+                <input
+                  type="radio"
+                  name="kanban-layout"
+                  checked={columnVisibility.layout !== "stream"}
+                  onChange={() => updateColumnVisibility({ ...columnVisibility, layout: "columns" })}
+                />
+                <span>{t("kanban.layout.columns")}</span>
+              </label>
+              <label class={`kanban-mode-chip ${columnVisibility.layout === "stream" ? "is-active" : ""}`}>
+                <input
+                  type="radio"
+                  name="kanban-layout"
+                  checked={columnVisibility.layout === "stream"}
+                  onChange={() => updateColumnVisibility({ ...columnVisibility, layout: "stream" })}
+                />
+                <span>{t("kanban.layout.stream")}</span>
+              </label>
+            </div>
+            <label class={`kanban-status-check kanban-hide-empty ${columnVisibility.hideEmpty ? "is-checked" : ""}`}>
+              <input
+                type="checkbox"
+                checked={columnVisibility.hideEmpty}
+                onChange={(event) => updateColumnVisibility({
+                  ...columnVisibility,
+                  hideEmpty: event.currentTarget.checked,
+                })}
+              />
+              <span>{t("kanban.columnFilter.hideEmpty")}</span>
+            </label>
+          </div>
+
+          {filterTeam && (
+            <small class="kanban-filter-hint">{t("kanban.teamFilterHint", { name: filterTeam.name, count: filterTeam.memberProfileIds.length })}</small>
+          )}
+
+          <div class={`kanban-column-checks ${columnVisibility.mode === "selected" ? "is-enabled" : "is-disabled"}`}>
+            {columns.map((column) => {
+              const checked = columnVisibility.selected.includes(column.id as KanbanBoardStatus);
+              const count = itemCountFor(column.id);
+              return (
+                <label key={column.id} class={`kanban-status-check ${checked ? "is-checked" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={columnVisibility.mode !== "selected"}
+                    onChange={() => {
+                      updateColumnVisibility({
+                        ...columnVisibility,
+                        mode: "selected",
+                        selected: toggleKanbanSelectedStatus(columnVisibility.selected, column.id as KanbanBoardStatus),
+                      });
+                    }}
+                  />
+                  <span>{t(column.label)}</span>
+                  <em aria-hidden="true">{count}</em>
+                </label>
+              );
+            })}
+          </div>
+
+        </div>
+      </div>
+
+      <div class={`kanban-board ${columnVisibility.mode === "selected" || columnVisibility.hideEmpty ? "is-focus-mode" : ""} ${columnVisibility.layout === "stream" ? "is-stream" : ""}`}>
+        {visibleColumns.length === 0 && (
+          <div class="kanban-board-empty" role="status">
+            <strong>{t("kanban.columnFilter.emptyTitle")}</strong>
+            <p>
+              {columnVisibility.hideEmpty
+                ? t("kanban.columnFilter.emptyHideEmpty")
+                : t("kanban.columnFilter.emptySelected")}
+            </p>
+          </div>
+        )}
+        {visibleColumns.map((column) => {
+          const items = tasks.value.filter((task) => {
+            if (task.status !== column.id) return false;
+            if (!memberIds) return true;
+            return task.assigneeId !== undefined && memberIds.has(task.assigneeId);
+          });
+          const collapsed = isKanbanColumnCollapsed(column.id, items.length, columnCollapse);
+          const dropActive = dragOverColumn === column.id && Boolean(column.writable);
           return (
             <section
-              class={`kanban-column column-${column.id} ${column.writable ? "is-writable" : "is-managed"}`}
+              class={`kanban-column column-${column.id} ${column.writable ? "is-writable" : "is-managed"} ${collapsed && columnVisibility.layout !== "stream" ? "is-collapsed" : ""} ${dropActive ? "is-drop-target" : ""}`}
               key={column.id}
-              onDragOver={(event) => { if (column.writable) event.preventDefault(); }}
-              onDrop={(event) => {
-                const taskId = event.dataTransfer?.getData("application/x-hermes-task");
-                if (taskId && column.writable) void requestTaskMove(taskId, column.writable);
+              data-column={column.id}
+              onDragEnter={(event) => {
+                if (!column.writable) return;
+                event.preventDefault();
+                setDragOverColumn(column.id);
               }}
+              onDragOver={(event) => {
+                if (!column.writable) return;
+                event.preventDefault();
+                if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                if (dragOverColumn !== column.id) setDragOverColumn(column.id);
+              }}
+              onDragLeave={(event) => {
+                const next = event.relatedTarget;
+                if (next instanceof Node && event.currentTarget.contains(next)) return;
+                if (dragOverColumn === column.id) setDragOverColumn(null);
+              }}
+              onDrop={(event) => acceptDrop(column, event)}
             >
-              <header>
-                <div>
-                  <b>{t(column.label)}</b>
-                  <span>{t(column.caption)}{!column.writable && ` · ${t("kanban.automatic")}`}</span>
-                </div>
-                <strong>{items.length}</strong>
+              <header class="kanban-column-head">
+                <button
+                  type="button"
+                  class="kanban-column-toggle"
+                  aria-expanded={columnVisibility.layout === "stream" ? true : !collapsed}
+                  aria-controls={`kanban-stack-${column.id}`}
+                  title={columnVisibility.layout === "stream" ? t(column.label) : (collapsed ? t("kanban.columnExpand") : t("kanban.columnCollapse"))}
+                  onClick={() => {
+                    if (columnVisibility.layout === "stream") return;
+                    toggleColumn(column.id, items.length);
+                  }}
+                >
+                  {columnVisibility.layout !== "stream" && (
+                    <span class="kanban-column-chevron" aria-hidden="true">{collapsed ? "›" : "▾"}</span>
+                  )}
+                  <span class="kanban-column-copy">
+                    <b>{t(column.label)}</b>
+                    {columnVisibility.layout !== "stream" && (
+                      <span>{t(column.caption)}{!column.writable && ` · ${t("kanban.automatic")}`}</span>
+                    )}
+                  </span>
+                  <strong aria-label={t("kanban.columnCount", { count: items.length })}>{items.length}</strong>
+                </button>
               </header>
-              <div class="task-stack">
+              <div
+                id={`kanban-stack-${column.id}`}
+                class="task-stack"
+                hidden={columnVisibility.layout !== "stream" && collapsed}
+                aria-hidden={columnVisibility.layout !== "stream" && collapsed}
+              >
                 {items.map((task) => <TaskCard key={task.id} task={task} />)}
-                {items.length === 0 && <p class="column-empty">{t("kanban.empty")}</p>}
+                {items.length === 0 && (
+                  <p class={`column-empty ${column.writable ? "is-droppable" : ""}`}>
+                    {column.writable ? t("kanban.emptyDrop") : t("kanban.empty")}
+                  </p>
+                )}
               </div>
             </section>
           );

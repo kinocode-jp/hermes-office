@@ -38,9 +38,9 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
-        name: "Hermes Office",
-        short_name: "Hermes Office",
-        description: "A visual control plane for Hermes Agent profiles.",
+        name: "Hermes Studio",
+        short_name: "Hermes Studio",
+        description: "AI Team Control Center — a visual control plane for Hermes Agent profiles.",
         theme_color: "#ffffff",
         background_color: "#ffffff",
         display: "standalone",
@@ -52,7 +52,23 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: "/index.html",
-        globPatterns: ["**/*.{js,css,html,svg,webp,woff2}"]
+        cleanupOutdatedCaches: true,
+        skipWaiting: true,
+        clientsClaim: true,
+        globPatterns: ["**/*.{js,css,html,svg,webp}"],
+        // Noto Sans JP ships as 124 unicode-range chunks; the browser fetches only
+        // the ranges a page actually renders, so cache them on demand instead of
+        // precaching the whole family.
+        runtimeCaching: [
+          {
+            urlPattern: /\/fonts\//,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "hermes-studio-fonts",
+              expiration: { maxEntries: 160, maxAgeSeconds: 60 * 60 * 24 * 365 }
+            }
+          }
+        ]
       }
     })
   ],

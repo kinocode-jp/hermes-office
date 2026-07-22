@@ -1,6 +1,6 @@
 import { signal } from "@preact/signals";
 
-export const APPEARANCE_STORAGE_KEY = "hermes-office:appearance:v1";
+export const APPEARANCE_STORAGE_KEY = "hermes-studio:appearance:v1";
 
 export const themes = ["paper", "mint", "midnight"] as const;
 export const fontScales = [1, 1.125, 1.25, 1.5] as const;
@@ -38,7 +38,7 @@ export function setFontScale(fontScale: FontScale): void {
 function readPreferences(): AppearancePreferences {
   if (typeof localStorage === "undefined") return defaults;
   try {
-    const candidate = JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? "null") as Partial<AppearancePreferences> | null;
+    const candidate = JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? localStorage.getItem("hermes-office:appearance:v1") ?? "null") as Partial<AppearancePreferences> | null;
     return {
       theme: isTheme(candidate?.theme) ? candidate.theme : defaults.theme,
       fontScale: normalizeFontScale(candidate?.fontScale),

@@ -1,0 +1,56 @@
+.host-apps {
+  --obsidian-violet: #8b5cf6;
+  --obsidian-lilac: #c4b5fd;
+  width: min(100%, 980px);
+  margin: 0 auto 16px;
+  padding: 16px;
+  border: 1px solid var(--ls-line);
+  background: linear-gradient(118deg, rgba(139, 92, 246, .11), rgba(27, 43, 67, .42) 52%);
+  box-shadow: var(--shadow-md);
+}
+
+.host-apps__header { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--ls-line); }
+.host-apps__header span { color: var(--obsidian-lilac); font: 800 var(--ls-text-xs)/1 ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
+.host-apps__header h2 { margin: 5px 0 0; font: 800 var(--ls-text-heading)/1.1 var(--font-display); }
+.host-apps__header button { min-height: 32px; padding: 0 11px; border: 1px solid var(--ls-line); color: var(--ls-paper); background: transparent; font: 700 var(--ls-text-xs)/1 ui-monospace, monospace; cursor: pointer; }
+.host-apps__header button:hover:not(:disabled) { color: var(--obsidian-lilac); border-color: var(--obsidian-violet); }
+.host-apps__header button:disabled { opacity: .45; cursor: default; }
+
+.host-apps__card { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 104px; padding: 14px; border: 1px solid rgba(196, 181, 253, .24); background: rgba(8, 12, 24, .46); }
+.host-apps__card.is-installed { border-color: rgba(85, 214, 190, .34); }
+.host-apps__card.is-failed,
+.host-apps__card.is-blocked { border-color: rgba(240, 106, 87, .42); }
+
+/* A small faceted “vault stone”: one branded moment, drawn without external assets. */
+.host-apps__sigil { position: relative; width: 56px; height: 64px; filter: drop-shadow(0 10px 18px rgba(139, 92, 246, .28)); }
+.host-apps__sigil i { position: absolute; inset: 0; background: var(--obsidian-violet); clip-path: polygon(48% 0, 88% 22%, 100% 73%, 54% 100%, 8% 76%, 0 27%); }
+.host-apps__sigil i:nth-child(2) { background: #6d42d8; clip-path: polygon(48% 0, 54% 100%, 8% 76%, 18% 30%); }
+.host-apps__sigil i:nth-child(3) { background: var(--obsidian-lilac); opacity: .68; clip-path: polygon(48% 0, 88% 22%, 62% 44%, 18% 30%); }
+
+.host-apps__copy { min-width: 0; }
+.host-apps__name-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.host-apps__name-row h3 { margin: 0; font: 850 calc(19px * var(--font-scale))/1.1 var(--font-display); }
+.host-apps__name-row span { padding: 4px 7px; border: 1px solid rgba(196, 181, 253, .32); color: var(--obsidian-lilac); font: 800 var(--ls-text-xxs)/1 ui-monospace, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.host-apps__card.is-installed .host-apps__name-row span { color: var(--ls-aqua); border-color: rgba(85, 214, 190, .38); }
+.host-apps__copy p { margin: 8px 0 5px; color: var(--ls-muted); font-size: var(--ls-text-body); line-height: 1.45; }
+.host-apps__copy small { color: rgba(196, 181, 253, .8); font: 600 var(--ls-text-xs)/1.3 ui-monospace, monospace; }
+.host-apps__action button { min-height: 40px; padding: 0 17px; border: 0; color: white; background: var(--obsidian-violet); font-weight: 850; cursor: pointer; }
+.host-apps__action button:hover:not(:disabled) { background: #9f7aea; }
+.host-apps__action button:disabled { color: var(--ls-muted); background: rgba(243, 232, 209, .08); cursor: default; }
+.host-apps__action strong { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid var(--ls-aqua); border-radius: 50%; color: var(--ls-aqua); font-size: 20px; }
+.host-apps__notice { margin: 12px 0 0; color: var(--ls-muted); font-size: var(--ls-text-sm); }
+.host-apps__notice.is-error { color: var(--ls-coral); }
+
+@media (max-width: 620px) {
+  .host-apps { padding: 13px; }
+  .host-apps__card { grid-template-columns: 50px minmax(0, 1fr); }
+  .host-apps__sigil { width: 44px; height: 52px; }
+  .host-apps__action { grid-column: 1 / -1; }
+  .host-apps__action button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .host-apps__card.is-installing .host-apps__sigil { animation: host-app-breathe 1.8s ease-in-out infinite; }
+}
+
+@keyframes host-app-breathe { 50% { opacity: .68; transform: translateY(-2px); } }

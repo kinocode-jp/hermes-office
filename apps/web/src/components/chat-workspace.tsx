@@ -1,16 +1,28 @@
-import { useMemo } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import type { ChatSession } from "../domain";
 import { chatSessionTitle, t } from "../i18n";
-import { activeSessionId, mobileInspectorOpen, mobileWorkspaceOpen, openSession, profileList, sessions, openSessionIds } from "../store";
+import {
+  activeSessionId,
+  closeMobileRoute,
+  mobileWorkspaceOpen,
+  openMobileInspector,
+  openMobileWorkspace,
+  openSession,
+  openSessionIds,
+  profileList,
+  sessions,
+} from "../store";
 import { ChatPane } from "./chat-pane";
 import { InfoTip } from "./info-tip";
 import { useMobileOverlay } from "./use-mobile-overlay";
+import { profileDisplayName } from "../profile-names";
 
 export function ChatWorkspace() {
+  const [dropActive, setDropActive] = useState(false);
   const mobileOverlay = useMobileOverlay<HTMLElement>({
     kind: "route",
     open: mobileWorkspaceOpen.value,
-    onClose: () => { mobileWorkspaceOpen.value = false; },
+    onClose: closeMobileRoute,
   });
   const openSessions = useMemo(
     () => openSessionIds.value
@@ -21,7 +33,17 @@ export function ChatWorkspace() {
 
   if (openSessions.length === 0) {
     return (
-      <section class="workspace-empty">
+      <section
+        class={`workspace-empty ${dropActive ? "is-drop-target" : ""}`}
+        onDragOver={(event) => { event.preventDefault(); setDropActive(true); }}
+        onDragLeave={(event) => { if (event.currentTarget === event.target) setDropActive(false); }}
+        onDrop={(event) => {
+          event.preventDefault();
+          const sessionId = event.dataTransfer?.getData("application/x-hermes-session");
+          setDropActive(false);
+          if (sessionId) { openSession(sessionId); openMobileWorkspace(); }
+        }}
+      >
         <span>{t("workspace.emptyKicker")}</span>
         <InfoTip text={t("workspace.empty")} />
       </section>
@@ -31,20 +53,29 @@ export function ChatWorkspace() {
   return (
     <section
       ref={mobileOverlay.ref}
-      class="chat-workspace-shell"
+      class={`chat-workspace-shell ${dropActive ? "is-drop-target" : ""}`}
       role={mobileOverlay.active ? "region" : undefined}
       aria-labelledby={mobileOverlay.active ? "mobile-workspace-title" : undefined}
       tabIndex={mobileOverlay.active ? -1 : undefined}
+      onDragOver={(event) => { event.preventDefault(); setDropActive(true); }}
+      onDragLeave={(event) => { if (event.currentTarget === event.target) setDropActive(false); }}
+      onDrop={(event) => {
+        event.preventDefault();
+        const sessionId = event.dataTransfer?.getData("application/x-hermes-session");
+        setDropActive(false);
+        if (sessionId) { openSession(sessionId); openMobileWorkspace(); }
+      }}
     >
       <header class="mobile-workspace-bar">
-        <button data-mobile-overlay-initial-focus onClick={() => { mobileWorkspaceOpen.value = false; }}>← {t("workspace.profiles")}</button>
+        <button data-mobile-overlay-initial-focus onClick={closeMobileRoute}>← {t("workspace.profiles")}</button>
         <b id="mobile-workspace-title">{t("workspace.chats", { count: openSessions.length })}</b>
-        <button onClick={() => { mobileInspectorOpen.value = true; mobileWorkspaceOpen.value = false; }}>{t("workspace.profileSettings")}</button>
+        <button onClick={openMobileInspector}>{t("workspace.profileSettings")}</button>
       </header>
       <nav class="mobile-chat-tabs" aria-label={t("workspace.switchChats")}>
         {openSessions.map((session) => {
           if (!session) return null;
-          const profileName = profileList.value.find((profile) => profile.id === session.profileId)?.name ?? session.profileId;
+          const profile = profileList.value.find((item) => item.id === session.profileId);
+          const profileName = profile ? profileDisplayName(profile) : session.profileId;
           const tab = mobileChatTabPresentation(session, profileName, openSessions);
           return (
             <button

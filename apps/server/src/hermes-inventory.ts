@@ -7,8 +7,8 @@ import type {
   OfficeInventoryPage,
   OfficeInventoryPagination,
   ProfileSummary,
-} from "@hermes-office/protocol";
-import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-office/protocol";
+} from "@hermes-studio/protocol";
+import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-studio/protocol";
 import { redactSecrets } from "./secret-scrubber.js";
 
 const UPSTREAM_PAGE_SIZE = 100;

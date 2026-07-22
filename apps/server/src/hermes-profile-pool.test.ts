@@ -172,7 +172,7 @@ async function createFixture(): Promise<{
   executable: string;
   close(): Promise<void>;
 }> {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-profile-pool-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-profile-pool-"));
   const executable = join(directory, "fake-hermes.mjs");
   await writeFile(executable, `#!/usr/bin/env node
 import { readdirSync, rmSync, writeFileSync } from "node:fs";

@@ -33,6 +33,31 @@ export type MemoryStatus = {
   };
 };
 
+export type BuiltinMemoryFileKey = "memory" | "user";
+
+export type BuiltinMemoryFile = {
+  key: BuiltinMemoryFileKey;
+  content: string;
+  exists: boolean;
+  bytes: number;
+  revision: string;
+};
+
+export type BuiltinMemoryFiles = {
+  profile: string;
+  memory: BuiltinMemoryFile;
+  user: BuiltinMemoryFile;
+};
+
+export type MemoryResetTarget = "all" | "memory" | "user";
+
+export type MemoryResetResult = {
+  ok: true;
+  target: MemoryResetTarget;
+  files: BuiltinMemoryFiles;
+  status: MemoryStatus;
+};
+
 export type MemoryFieldKind = "boolean" | "secret" | "select" | "text";
 
 export type MemoryProviderField = {
@@ -66,6 +91,108 @@ export type ProfileAgentSettings = {
   skills: SkillSettings[];
   memory: MemoryStatus;
   soul: ProfileSoul;
+};
+
+export type SubagentMode = "auto" | "manual";
+
+export type ProfileAgentBehavior = {
+  profile: string;
+  revision: number;
+  subagentMode: SubagentMode;
+  preferredSubagent: string;
+  updatedAt: string;
+};
+
+export type ProfileAgentBehaviorUpdate = {
+  expectedRevision: number;
+  subagentMode?: SubagentMode;
+  preferredSubagent?: string;
+};
+
+export type HermesConfigFieldType = "boolean" | "number" | "string" | "select" | "list";
+
+export type HermesConfigFieldOption = {
+  value: string;
+  label: string;
+};
+
+export type HermesConfigField = {
+  id: string;
+  category: string;
+  type: HermesConfigFieldType;
+  description: string;
+  options: HermesConfigFieldOption[];
+};
+
+export type HermesConfigScalar = boolean | number | string;
+export type HermesConfigValue = HermesConfigScalar | HermesConfigScalar[];
+
+export type ProfileHermesConfig = {
+  profile: string;
+  revision: string;
+  categories: string[];
+  fields: HermesConfigField[];
+  values: Record<string, HermesConfigValue>;
+  excludedCount: number;
+};
+
+export type ProfileHermesConfigUpdate = {
+  expectedRevision: string;
+  changes: Record<string, HermesConfigValue>;
+};
+
+export type HermesPrivilegedFieldType = HermesConfigFieldType | "json";
+export type PrivilegedConfigImpact = "new-session" | "restart" | "destructive";
+
+export type HermesPrivilegedField = {
+  id: string;
+  category: string;
+  type: HermesPrivilegedFieldType;
+  description: string;
+  options: HermesConfigFieldOption[];
+  impact: PrivilegedConfigImpact;
+  requiresConfirmation: boolean;
+};
+
+export type HermesPrivilegedConfigValue = HermesConfigValue | unknown;
+
+export type ProfilePrivilegedHermesConfig = {
+  profile: string;
+  revision: string;
+  categories: string[];
+  fields: HermesPrivilegedField[];
+  values: Record<string, HermesPrivilegedConfigValue>;
+  unsupportedCount: number;
+  secretFieldCount: number;
+};
+
+export type ProfilePrivilegedHermesConfigUpdate = {
+  expectedRevision: string;
+  changes: Record<string, HermesPrivilegedConfigValue>;
+  confirmed?: true;
+};
+
+export type HermesSecretSource = "env" | "config" | "memory-provider";
+
+export type HermesSecretFieldMeta = {
+  key: string;
+  source: HermesSecretSource;
+  label: string;
+  description: string;
+  category: string;
+  isSet: boolean;
+  isPassword: boolean;
+  /** Clear is safe from live metadata; server recomputes on clear regardless. */
+  canClear: boolean;
+  /** Present only for memory-provider secrets. */
+  provider?: string;
+  providerLabel?: string;
+};
+
+export type ProfileSecrets = {
+  profile: string;
+  revision: string;
+  fields: HermesSecretFieldMeta[];
 };
 
 export type GlobalAgentSettings = {
@@ -117,6 +244,28 @@ export async function loadSkills(profile: string): Promise<SkillSettings[]> {
   return value.map(validateSkill);
 }
 
+export type UsageKind = "skill" | "mcp" | "tool";
+
+export type UsageStatItem = {
+  kind: UsageKind;
+  name: string;
+  total: number;
+  lastUsedAt: string;
+  periodCount: number;
+};
+
+export type UsageStats = {
+  profile: string;
+  days: number;
+  items: UsageStatItem[];
+};
+
+/** Office-owned skill/MCP/tool usage stats for a profile (names + counts only). */
+export async function loadUsageStats(profile: string, days = 30): Promise<UsageStats> {
+  const params = new URLSearchParams({ profile, days: String(days) });
+  return validateUsageStats(await settingsRequest<unknown>(`/api/v1/stats/usage?${params.toString()}`));
+}
+
 export async function setSkillEnabled(
   profile: string,
   skill: string,
@@ -154,6 +303,83 @@ export async function updateProfileSoul(profile: string, content: string, expect
   }));
 }
 
+export async function loadAgentBehavior(profile: string): Promise<ProfileAgentBehavior> {
+  return validateAgentBehavior(await settingsRequest<unknown>(profilePath(profile, "agent-behavior")));
+}
+
+export async function updateAgentBehavior(
+  profile: string,
+  update: ProfileAgentBehaviorUpdate,
+): Promise<ProfileAgentBehavior> {
+  return validateAgentBehavior(await settingsRequest<unknown>(profilePath(profile, "agent-behavior"), {
+    method: "PUT",
+    body: update,
+  }));
+}
+
+export async function loadProfileHermesConfig(profile: string): Promise<ProfileHermesConfig> {
+  return validateHermesConfig(await settingsRequest<unknown>(profilePath(profile, "config")));
+}
+
+export async function updateProfileHermesConfig(
+  profile: string,
+  update: ProfileHermesConfigUpdate,
+): Promise<ProfileHermesConfig> {
+  return validateHermesConfig(await settingsRequest<unknown>(profilePath(profile, "config"), {
+    method: "PATCH",
+    body: update,
+  }));
+}
+
+export async function loadPrivilegedProfileConfig(profile: string): Promise<ProfilePrivilegedHermesConfig> {
+  return validatePrivilegedHermesConfig(await settingsRequest<unknown>(profilePath(profile, "privileged-config")));
+}
+
+export async function updatePrivilegedProfileConfig(
+  profile: string,
+  update: ProfilePrivilegedHermesConfigUpdate,
+): Promise<ProfilePrivilegedHermesConfig> {
+  return validatePrivilegedHermesConfig(await settingsRequest<unknown>(profilePath(profile, "privileged-config"), {
+    method: "PATCH",
+    body: update,
+  }));
+}
+
+export async function loadProfileSecrets(profile: string): Promise<ProfileSecrets> {
+  return validateProfileSecrets(await settingsRequest<unknown>(profilePath(profile, "secrets")));
+}
+
+/**
+ * Consume a desktop-native transfer. Browser request carries transferId + field
+ * metadata only — never the secret value.
+ */
+export async function consumeSecretTransfer(
+  profile: string,
+  input: {
+    transferId: string;
+    key: string;
+    source: HermesSecretSource;
+    provider?: string;
+    expectedRevision?: string;
+  },
+): Promise<ProfileSecrets> {
+  return validateProfileSecrets(await settingsRequest<unknown>(profilePath(profile, "secrets"), {
+    method: "POST",
+    body: {
+      transferId: input.transferId,
+      key: input.key,
+      source: input.source,
+      ...(input.provider === undefined ? {} : { provider: input.provider }),
+      ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
+    },
+  }));
+}
+
+/** Stable client key for write-only secret drafts (includes provider when present). */
+export function secretFieldDraftKey(field: Pick<HermesSecretFieldMeta, "source" | "key" | "provider">): string {
+  return `${field.source}:${field.provider ?? ""}:${field.key}`;
+}
+
 export async function loadMemoryStatus(profile: string): Promise<MemoryStatus> {
   return validateMemory(await settingsRequest<unknown>(profilePath(profile, "memory")));
 }
@@ -180,6 +406,27 @@ export async function updateMemoryProviderConfig(
 ): Promise<MemoryProviderConfig> {
   return validateProviderConfig(await settingsRequest<unknown>(profilePath(profile, `memory/providers/${encodeSegment(provider)}`), {
     method: "PATCH", body: { values, expectedRevision },
+  }));
+}
+
+export async function loadBuiltinMemoryFiles(profile: string): Promise<BuiltinMemoryFiles> {
+  return validateBuiltinMemoryFiles(await settingsRequest<unknown>(profilePath(profile, "memory/files")));
+}
+
+export async function updateBuiltinMemoryFile(
+  profile: string,
+  key: BuiltinMemoryFileKey,
+  content: string,
+  expectedRevision: string,
+): Promise<BuiltinMemoryFile> {
+  return validateBuiltinMemoryFile(await settingsRequest<unknown>(profilePath(profile, `memory/files/${encodeSegment(key)}`), {
+    method: "PUT", body: { content, expectedRevision },
+  }));
+}
+
+export async function resetBuiltinMemory(profile: string, target: MemoryResetTarget): Promise<MemoryResetResult> {
+  return validateMemoryResetResult(await settingsRequest<unknown>(profilePath(profile, "memory/reset"), {
+    method: "POST", body: { target },
   }));
 }
 
@@ -237,9 +484,240 @@ function validateMemory(value: unknown): MemoryStatus {
   return { activeProvider: value.activeProvider, providers, builtin: { memoryBytes: builtin.memoryBytes, userBytes: builtin.userBytes, hasMemory: builtin.hasMemory, hasUser: builtin.hasUser } };
 }
 
+function validateBuiltinMemoryFile(value: unknown): BuiltinMemoryFile {
+  if (
+    !isRecord(value)
+    || (value.key !== "memory" && value.key !== "user")
+    || typeof value.content !== "string"
+    || typeof value.exists !== "boolean"
+    || typeof value.bytes !== "number"
+    || typeof value.revision !== "string"
+  ) throw incompatible();
+  return {
+    key: value.key,
+    content: value.content,
+    exists: value.exists,
+    bytes: value.bytes,
+    revision: value.revision,
+  };
+}
+
+function validateBuiltinMemoryFiles(value: unknown): BuiltinMemoryFiles {
+  if (!isRecord(value) || typeof value.profile !== "string") throw incompatible();
+  return {
+    profile: value.profile,
+    memory: validateBuiltinMemoryFile(value.memory),
+    user: validateBuiltinMemoryFile(value.user),
+  };
+}
+
+function validateMemoryResetResult(value: unknown): MemoryResetResult {
+  if (!isRecord(value) || value.ok !== true || (value.target !== "all" && value.target !== "memory" && value.target !== "user")) {
+    throw incompatible();
+  }
+  return {
+    ok: true,
+    target: value.target,
+    files: validateBuiltinMemoryFiles(value.files),
+    status: validateMemory(value.status),
+  };
+}
+
 function validateSoul(value: unknown): ProfileSoul {
   if (!isRecord(value) || typeof value.profile !== "string" || typeof value.content !== "string" || typeof value.exists !== "boolean" || typeof value.redacted !== "boolean" || typeof value.revision !== "string") throw incompatible();
   return { profile: value.profile, content: value.content, exists: value.exists, redacted: value.redacted, revision: value.revision };
+}
+
+function validateAgentBehavior(value: unknown): ProfileAgentBehavior {
+  if (
+    !isRecord(value)
+    || typeof value.profile !== "string"
+    || !Number.isInteger(value.revision)
+    || (value.subagentMode !== "auto" && value.subagentMode !== "manual")
+    || typeof value.preferredSubagent !== "string"
+    || typeof value.updatedAt !== "string"
+  ) throw incompatible();
+  return {
+    profile: value.profile,
+    revision: value.revision as number,
+    subagentMode: value.subagentMode,
+    preferredSubagent: value.preferredSubagent,
+    updatedAt: value.updatedAt,
+  };
+}
+
+function validateHermesConfig(value: unknown): ProfileHermesConfig {
+  if (
+    !isRecord(value)
+    || typeof value.profile !== "string"
+    || typeof value.revision !== "string"
+    || !Array.isArray(value.categories)
+    || !Array.isArray(value.fields)
+    || !isRecord(value.values)
+    || typeof value.excludedCount !== "number"
+  ) throw incompatible();
+  const categories = value.categories.filter((item): item is string => typeof item === "string");
+  const fields = value.fields.map((item): HermesConfigField => {
+    if (
+      !isRecord(item)
+      || typeof item.id !== "string"
+      || typeof item.category !== "string"
+      || typeof item.description !== "string"
+      || !Array.isArray(item.options)
+    ) throw incompatible();
+    const type: HermesConfigFieldType =
+      item.type === "boolean" || item.type === "number" || item.type === "string"
+      || item.type === "select" || item.type === "list"
+        ? item.type
+        : (() => { throw incompatible(); })();
+    const options = item.options.map((option): HermesConfigFieldOption => {
+      if (!isRecord(option) || typeof option.value !== "string" || typeof option.label !== "string") throw incompatible();
+      return { value: option.value, label: option.label };
+    });
+    return { id: item.id, category: item.category, type, description: item.description, options };
+  });
+  const values: Record<string, HermesConfigValue> = {};
+  for (const [key, item] of Object.entries(value.values)) {
+    if (typeof item === "boolean" || typeof item === "number" || typeof item === "string") {
+      values[key] = item;
+      continue;
+    }
+    // List contract matches server: string rows only (no boolean/number coercion).
+    if (Array.isArray(item) && item.every((entry): entry is string => typeof entry === "string")) {
+      values[key] = [...item];
+      continue;
+    }
+    throw incompatible();
+  }
+  return {
+    profile: value.profile,
+    revision: value.revision,
+    categories,
+    fields,
+    values,
+    excludedCount: Math.max(0, Math.trunc(value.excludedCount)),
+  };
+}
+
+function validatePrivilegedHermesConfig(value: unknown): ProfilePrivilegedHermesConfig {
+  if (
+    !isRecord(value)
+    || typeof value.profile !== "string"
+    || typeof value.revision !== "string"
+    || !Array.isArray(value.categories)
+    || !Array.isArray(value.fields)
+    || !isRecord(value.values)
+    || typeof value.unsupportedCount !== "number"
+    || typeof value.secretFieldCount !== "number"
+  ) throw incompatible();
+  const categories = value.categories.filter((item): item is string => typeof item === "string");
+  const fields = value.fields.map((item): HermesPrivilegedField => {
+    if (
+      !isRecord(item)
+      || typeof item.id !== "string"
+      || typeof item.category !== "string"
+      || typeof item.description !== "string"
+      || !Array.isArray(item.options)
+      || typeof item.requiresConfirmation !== "boolean"
+    ) throw incompatible();
+    const type: HermesPrivilegedFieldType =
+      item.type === "boolean" || item.type === "number" || item.type === "string"
+      || item.type === "select" || item.type === "list" || item.type === "json"
+        ? item.type
+        : (() => { throw incompatible(); })();
+    const impact: PrivilegedConfigImpact =
+      item.impact === "restart" || item.impact === "destructive" || item.impact === "new-session"
+        ? item.impact
+        : "new-session";
+    const options = item.options.map((option): HermesConfigFieldOption => {
+      if (!isRecord(option) || typeof option.value !== "string" || typeof option.label !== "string") throw incompatible();
+      return { value: option.value, label: option.label };
+    });
+    return {
+      id: item.id,
+      category: item.category,
+      type,
+      description: item.description,
+      options,
+      impact,
+      requiresConfirmation: item.requiresConfirmation,
+    };
+  });
+  const values: Record<string, HermesPrivilegedConfigValue> = {};
+  for (const [key, item] of Object.entries(value.values)) {
+    if (typeof item === "boolean" || typeof item === "number" || typeof item === "string") {
+      values[key] = item;
+      continue;
+    }
+    if (Array.isArray(item) && item.every((entry): entry is string => typeof entry === "string")) {
+      values[key] = [...item];
+      continue;
+    }
+    // Bounded JSON leaves (objects / nested arrays) pass through as structured values.
+    if (item !== null && typeof item === "object") {
+      values[key] = item;
+      continue;
+    }
+    throw incompatible();
+  }
+  return {
+    profile: value.profile,
+    revision: value.revision,
+    categories,
+    fields,
+    values,
+    unsupportedCount: Math.max(0, Math.trunc(value.unsupportedCount)),
+    secretFieldCount: Math.max(0, Math.trunc(value.secretFieldCount)),
+  };
+}
+
+function validateProfileSecrets(value: unknown): ProfileSecrets {
+  if (
+    !isRecord(value)
+    || typeof value.profile !== "string"
+    || typeof value.revision !== "string"
+    || !Array.isArray(value.fields)
+  ) throw incompatible();
+  const fields = value.fields.map((item): HermesSecretFieldMeta => {
+    if (
+      !isRecord(item)
+      || typeof item.key !== "string"
+      || (item.source !== "env" && item.source !== "config" && item.source !== "memory-provider")
+      || typeof item.label !== "string"
+      || typeof item.description !== "string"
+      || typeof item.category !== "string"
+      || typeof item.isSet !== "boolean"
+      || typeof item.isPassword !== "boolean"
+      || typeof item.canClear !== "boolean"
+    ) throw incompatible();
+    // Fail closed: never accept a value property even if a buggy server sent one.
+    if ("value" in item || "redacted_value" in item || "redactedValue" in item) throw incompatible();
+    // Never accept env key names on memory-provider metadata.
+    if ("envKey" in item || "env_key" in item || "_env_key" in item) throw incompatible();
+    if (item.source === "memory-provider") {
+      if (typeof item.provider !== "string" || item.provider.length === 0) throw incompatible();
+      if (item.providerLabel !== undefined && typeof item.providerLabel !== "string") throw incompatible();
+    } else if (item.provider !== undefined || item.providerLabel !== undefined) {
+      throw incompatible();
+    }
+    return {
+      key: item.key,
+      source: item.source,
+      label: item.label,
+      description: item.description,
+      category: item.category,
+      isSet: item.isSet,
+      isPassword: item.isPassword,
+      canClear: item.canClear,
+      ...(item.source === "memory-provider"
+        ? {
+          provider: item.provider as string,
+          ...(typeof item.providerLabel === "string" ? { providerLabel: item.providerLabel } : {}),
+        }
+        : {}),
+    };
+  });
+  return { profile: value.profile, revision: value.revision, fields };
 }
 
 function validateProviderConfig(value: unknown): MemoryProviderConfig {
@@ -256,6 +734,25 @@ function validateProviderConfig(value: unknown): MemoryProviderConfig {
     return field;
   });
   return { name: value.name, label: value.label, fields, revision: value.revision };
+}
+
+function validateUsageStats(value: unknown): UsageStats {
+  if (!isRecord(value) || typeof value.profile !== "string" || typeof value.days !== "number" || !Array.isArray(value.items)) throw incompatible();
+  const items = value.items.map((item): UsageStatItem => {
+    if (!isRecord(item) || (item.kind !== "skill" && item.kind !== "mcp" && item.kind !== "tool")
+      || typeof item.name !== "string" || typeof item.total !== "number"
+      || typeof item.lastUsedAt !== "string" || typeof item.periodCount !== "number") {
+      throw incompatible();
+    }
+    return {
+      kind: item.kind,
+      name: item.name,
+      total: item.total,
+      lastUsedAt: item.lastUsedAt,
+      periodCount: item.periodCount,
+    };
+  });
+  return { profile: value.profile, days: value.days, items };
 }
 
 function isStringArray(value: unknown): value is string[] { return Array.isArray(value) && value.every((item) => typeof item === "string"); }

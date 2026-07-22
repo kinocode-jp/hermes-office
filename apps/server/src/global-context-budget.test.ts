@@ -11,7 +11,7 @@ import {
   GLOBAL_SETTINGS_MAX_SKILLS,
   globalContextUtf8Bytes,
   isGlobalContextWithinBudget,
-} from "@hermes-office/protocol";
+} from "@hermes-studio/protocol";
 import { WebSocketServer } from "ws";
 import { createHermesChatTransport, HermesChatTransportError } from "./hermes-chat.js";
 import type { HermesSettingsAdapter } from "./hermes-settings.js";
@@ -21,7 +21,7 @@ import { routeSettingsHttp } from "./settings-http.js";
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
 test("maximum global context saves over HTTP and seeds session.create within one wire budget", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-context-budget-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-context-budget-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new OfficeGlobalSettingsStore(join(directory, "global.json"));
   const received: string[] = [];
@@ -106,7 +106,7 @@ test("UTF-8 JSON escaping and one-byte-over context are rejected consistently", 
   assert.equal(isGlobalContextWithinBudget("x".repeat(GLOBAL_CONTEXT_MAX_UTF8_BYTES + 1)), false);
   assert.equal(isGlobalContextWithinBudget("\n".repeat((GLOBAL_CONTEXT_MAX_UTF8_BYTES / 2) + 1)), false);
 
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-context-over-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-context-over-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new OfficeGlobalSettingsStore(join(directory, "global.json"));
   await assert.rejects(store.update({

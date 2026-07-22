@@ -1,0 +1,92 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { HermesSettingsError } from "./hermes-settings.js";
+import {
+  OfficeAgentBehaviorStore,
+  buildSubagentSessionInstruction,
+  composeSessionCreateSystemSeed,
+} from "./office-agent-behavior.js";
+
+test("agent behavior store defaults, round-trips, and rejects stale revisions", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-agent-behavior-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "agent-behavior.json");
+  const store = new OfficeAgentBehaviorStore(file);
+
+  const initial = await store.read("coder");
+  assert.deepEqual(initial, {
+    profile: "coder",
+    revision: 0,
+    subagentMode: "manual",
+    preferredSubagent: "",
+    updatedAt: "1970-01-01T00:00:00.000Z",
+  });
+  assert.equal(await store.sessionCreateInstruction("coder"), undefined);
+
+  const saved = await store.update("coder", {
+    expectedRevision: 0,
+    subagentMode: "auto",
+    preferredSubagent: "research",
+  });
+  assert.equal(saved.revision, 1);
+  assert.equal(saved.subagentMode, "auto");
+  assert.equal(saved.preferredSubagent, "research");
+  assert.deepEqual(await store.read("coder"), saved);
+  assert.equal(
+    await store.sessionCreateInstruction("coder"),
+    "Use subagents proactively. Preferred subagent: research.",
+  );
+
+  const disk = JSON.parse(await readFile(file, "utf8")) as {
+    profiles: Record<string, unknown>;
+  };
+  assert.equal((disk.profiles.coder as { revision: number }).revision, 1);
+
+  await assert.rejects(
+    store.update("coder", { expectedRevision: 0, subagentMode: "manual" }),
+    (error: unknown) => error instanceof HermesSettingsError && error.code === "conflict",
+  );
+  assert.equal((await store.read("coder")).revision, 1);
+
+  const cleared = await store.update("coder", {
+    expectedRevision: 1,
+    subagentMode: "auto",
+    preferredSubagent: "",
+  });
+  assert.equal(await store.sessionCreateInstruction("coder"), "Use subagents proactively.");
+  assert.equal(cleared.preferredSubagent, "");
+});
+
+test("agent behavior store serializes concurrent updates for one revision", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-agent-behavior-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new OfficeAgentBehaviorStore(join(directory, "agent-behavior.json"));
+  const results = await Promise.allSettled([
+    store.update("coder", { expectedRevision: 0, subagentMode: "auto", preferredSubagent: "a" }),
+    store.update("coder", { expectedRevision: 0, subagentMode: "auto", preferredSubagent: "b" }),
+  ]);
+  assert.equal(results.filter((item) => item.status === "fulfilled").length, 1);
+  assert.equal(results.filter((item) => item.status === "rejected").length, 1);
+  assert.equal((await store.read("coder")).revision, 1);
+});
+
+test("buildSubagentSessionInstruction and composeSessionCreateSystemSeed are pure", () => {
+  assert.equal(buildSubagentSessionInstruction({ subagentMode: "manual", preferredSubagent: "x" }), undefined);
+  assert.equal(
+    buildSubagentSessionInstruction({ subagentMode: "auto", preferredSubagent: "" }),
+    "Use subagents proactively.",
+  );
+  assert.equal(
+    buildSubagentSessionInstruction({ subagentMode: "auto", preferredSubagent: "  coder  " }),
+    "Use subagents proactively. Preferred subagent: coder.",
+  );
+  assert.equal(composeSessionCreateSystemSeed(undefined, undefined), undefined);
+  assert.equal(composeSessionCreateSystemSeed("global", undefined), "global");
+  assert.equal(
+    composeSessionCreateSystemSeed("shared context", "Use subagents proactively."),
+    "shared context\n\nUse subagents proactively.",
+  );
+});

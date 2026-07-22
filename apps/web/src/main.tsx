@@ -3,7 +3,8 @@ import { App } from "./app";
 import { initializeAppearance } from "./appearance";
 import { connectChatApi } from "./chat-api";
 import { createKanbanApi } from "./kanban-api";
-import { connectOfficeApi, REMOTE_PROXY_CONFIGURATION_MESSAGE } from "./office-api";
+import { connectOfficeApi } from "./office-api";
+import { createTeamsApi, refreshTeams, registerTeamsRuntime } from "./teams-store";
 import { isLocalOfficeClient } from "./auth-state";
 import { notifyAccessAuditChanged, shouldRefreshAccessAudit } from "./audit-api";
 import { initializeI18n } from "./i18n";
@@ -12,6 +13,7 @@ import {
   applyChatGatewayEvent,
   applyChatHistory,
   applyOfficeSnapshot,
+  installMobileRouteHistory,
   requireDeviceLogin,
   registerChatRuntime,
   registerKanbanRuntime,
@@ -30,12 +32,16 @@ import {
   setOfficeError,
   setOfficeEventStream
 } from "./store";
+import "./fonts.css";
 import "./styles.css";
 import "./components/avatar-picker.css";
+import "./components/teams-panel.css";
+import "./components/profile-groups.css";
 import "./appearance.css";
 
 initializeAppearance();
 initializeI18n();
+installMobileRouteHistory();
 render(<App />, document.getElementById("app")!);
 
 let chatApi: ReturnType<typeof connectChatApi> | undefined;
@@ -45,6 +51,7 @@ function startAuthenticatedServices(): void {
   if (authenticatedServicesStarted) return;
   authenticatedServicesStarted = true;
   registerKanbanRuntime(createKanbanApi());
+  registerTeamsRuntime(createTeamsApi());
   chatApi = connectChatApi({
     onSocketState: setChatSocketState,
     onHistoryLoading: setChatHistoryLoading,
@@ -66,7 +73,12 @@ const officeApi = connectOfficeApi({
     initializeInventory(snapshot, identity);
     setOfficeAuthenticated(identity.serverUrl);
     startAuthenticatedServices();
-    if (snapshot.capabilities.runtime.state === "ready") void refreshKanbanBoard();
+    if (snapshot.capabilities.runtime.state === "ready") {
+      void refreshKanbanBoard();
+      void refreshTeams({ acknowledgeErrors: true });
+    } else if (!snapshot.capabilities.features.includes("demo")) {
+      void refreshTeams({ acknowledgeErrors: true });
+    }
   },
   onEventStream: setOfficeEventStream,
   onAuthRequired: requireDeviceLogin,
@@ -74,9 +86,9 @@ const officeApi = connectOfficeApi({
   onError(message, serverUrl) {
     setOfficeError(message, serverUrl);
     if (isLocalOfficeClient(location)) setOfficeAuthenticated(serverUrl);
-    else setOfficeAccessUnavailable(serverUrl, message === REMOTE_PROXY_CONFIGURATION_MESSAGE
-      ? message
-      : "Office Serverへ接続できませんでした。ネットワークを確認してください。");
+    // Keep the concrete server/client error when present so snapshot/auth
+    // incompatibilities are not remapped to a generic network outage.
+    else setOfficeAccessUnavailable(serverUrl, message.trim() || "Office Serverへ接続できませんでした。ネットワークを確認してください。");
   },
   onEvent(event) {
     if (event.topic === "kanban.changed" || event.topic === "resync.required") void refreshKanbanBoard();

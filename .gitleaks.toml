@@ -1,0 +1,57 @@
+title = "Hermes Studio secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignored dependencies, build output, and local scratch files"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+  '''(^|/)target/''',
+  '''^tmp/''',
+  '''^apps/desktop/src-tauri/resources/web/''',
+  '''^apps/desktop/src-tauri/resources/server/hermes-studio-server\.mjs$''',
+]
+
+# These tests deliberately contain structurally valid synthetic credentials to
+# prove that browser DTOs, logs, child environments, and diagnostics redact or
+# reject them. Limit exceptions to the matching default rules and exact files;
+# production paths remain fully scanned.
+[[allowlists]]
+description = "Synthetic provider credential fixtures"
+targetRules = [
+  "aws-access-token",
+  "github-fine-grained-pat",
+  "github-pat",
+  "openai-api-key",
+  "private-key",
+]
+paths = [
+  '''^apps/server/src/hermes-chat\.test\.ts$''',
+  '''^apps/server/src/hermes-settings\.test\.ts$''',
+  '''^apps/server/src/secret-scrubber\.test\.ts$''',
+]
+
+[[allowlists]]
+description = "Synthetic generic secret fixtures"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^apps/server/src/hermes-backend\.test\.ts$''',
+  '''^apps/server/src/hermes-chat\.test\.ts$''',
+  '''^apps/server/src/hermes-child-environment\.test\.ts$''',
+  '''^apps/server/src/hermes-config\.test\.ts$''',
+  '''^apps/server/src/global-context-budget\.test\.ts$''',
+  '''^apps/server/src/hermes-inventory-mapping\.test\.ts$''',
+  '''^apps/server/src/hermes-kanban\.test\.ts$''',
+  '''^apps/server/src/hermes-privileged-config\.test\.ts$''',
+  '''^apps/server/src/hermes-runtime\.test\.ts$''',
+  '''^apps/server/src/hermes-settings\.test\.ts$''',
+  '''^apps/server/src/kanban-http\.test\.ts$''',
+  '''^apps/server/src/office-auth\.test\.ts$''',
+  '''^apps/server/src/origin\.test\.ts$''',
+  '''^apps/server/src/remote-auth\.test\.ts$''',
+  '''^apps/server/src/secret-scrubber\.test\.ts$''',
+  '''^apps/server/src/server\.test\.ts$''',
+  '''^apps/server/src/settings-server\.test\.ts$''',
+]

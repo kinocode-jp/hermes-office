@@ -77,7 +77,7 @@ test("remote origins cannot claim local bootstrap even through a loopback proxy"
 });
 
 test("README remote configuration retains actual-loopback owner device revocation", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-readme-remote-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-readme-remote-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const server = createOfficeServer({
     port: 0,
@@ -155,10 +155,18 @@ test("one-time enrollment creates a revocable remote operator device without exp
       deviceName: "Travel phone",
       tier: "operator",
     });
-    const setCookie = login.headers.get("set-cookie") ?? "";
-    assert.match(setCookie, /HttpOnly/i);
-    assert.match(setCookie, /Secure/i);
-    assert.match(setCookie, /SameSite=Strict/i);
+    const setCookies = login.headers.getSetCookie?.()
+      ?? (login.headers.get("set-cookie") ?? "").split(/,(?=\s*hermes_office_)/).map((part) => part.trim());
+    assert.equal(setCookies.length, 2);
+    assert.match(setCookies[0]!, /^hermes_office_session=/);
+    assert.match(setCookies[1]!, /^hermes_office_device=/);
+    for (const cookieHeader of setCookies) {
+      assert.match(cookieHeader, /HttpOnly/i);
+      assert.match(cookieHeader, /Secure/i);
+      assert.match(cookieHeader, /SameSite=Strict/i);
+    }
+    assert.match(setCookies[0]!, /Path=\//);
+    assert.match(setCookies[1]!, /Path=\/api\/v1\/auth\/device/);
     const cookie = responseCookies(login);
     assert.match(cookie, /hermes_office_session=/);
     assert.match(cookie, /hermes_office_device=/);
@@ -246,8 +254,54 @@ test("one-time enrollment creates a revocable remote operator device without exp
   }
 });
 
+test("enrollment appends session cookie before durable device cookie so last-header retention can renew", async () => {
+  const server = createOfficeServer({
+    port: 0,
+    allowedOrigins: [REMOTE_ORIGIN],
+    remoteToken: REMOTE_TOKEN,
+    trustedProxyHops: 1,
+  });
+  const address = await server.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const login = await deviceLogin(base, REMOTE_TOKEN);
+    assert.equal(login.status, 200);
+    const setCookies = login.headers.getSetCookie?.()
+      ?? (login.headers.get("set-cookie") ?? "").split(/,(?=\s*hermes_office_)/).map((part) => part.trim());
+    assert.equal(setCookies.length, 2);
+    // First: short-lived session. Last: durable device credential.
+    // Proxies/browsers that keep only the final Set-Cookie still retain renewability.
+    assert.match(setCookies[0]!, /^hermes_office_session=/i);
+    assert.match(setCookies[0]!, /Path=\//i);
+    assert.match(setCookies[1]!, /^hermes_office_device=/i);
+    assert.match(setCookies[1]!, /Path=\/api\/v1\/auth\/device/i);
+    for (const header of setCookies) {
+      assert.match(header, /HttpOnly/i);
+      assert.match(header, /Secure/i);
+      assert.match(header, /SameSite=Strict/i);
+    }
+
+    const deviceOnly = setCookies[1]!.split(";", 1)[0]!;
+    assert.match(deviceOnly, /^hermes_office_device=/);
+    const renewal = await renewDevice(base, deviceOnly);
+    assert.equal(renewal.status, 200);
+    const renewed = await renewal.json() as { csrfToken: string; principal: { local: boolean } };
+    assert.equal(typeof renewed.csrfToken, "string");
+    assert.equal(renewed.principal.local, false);
+    assert.match(renewal.headers.get("set-cookie") ?? "", /hermes_office_session=/);
+
+    const sessionCookie = responseCookies(renewal);
+    const snapshot = await fetch(`${base}/api/v1/snapshot`, {
+      headers: { Origin: REMOTE_ORIGIN, Cookie: sessionCookie },
+    });
+    assert.equal(snapshot.status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
 test("device renewal is session-aware, IP/device limited, and a limited burst does not rewrite the registry", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-renew-limit-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-renew-limit-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRegistryPath = join(directory, "devices.json");
   const server = createOfficeServer({
@@ -293,7 +347,7 @@ test("device renewal is session-aware, IP/device limited, and a limited burst do
 });
 
 test("a debounced last-seen update is durable across an orderly restart", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-renew-durable-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-renew-durable-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRegistryPath = join(directory, "devices.json");
   const options = {
@@ -421,7 +475,7 @@ test("device authentication is disabled by default, bounded, strict, and rate li
 });
 
 test("device registry survives restart and token rotation replaces its generation", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-devices-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRegistryPath = join(directory, "devices.json");
   const options = {
@@ -467,7 +521,7 @@ test("device registry survives restart and token rotation replaces its generatio
 });
 
 test("device registry rejects every invalid enrollment-consumed representation and inconsistency", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-schema-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-devices-schema-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRegistryPath = join(directory, "devices.json");
   const options = {
@@ -508,7 +562,7 @@ test("device registry rejects every invalid enrollment-consumed representation a
 });
 
 test("malformed device registry fails closed without reopening enrollment", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-devices-corrupt-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-devices-corrupt-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const deviceRegistryPath = join(directory, "devices.json");
   await writeFile(deviceRegistryPath, "{not-json", { mode: 0o600 });
@@ -526,7 +580,7 @@ test("malformed device registry fails closed without reopening enrollment", asyn
 });
 
 test("host remote status is desktop-capability-only, secret-free, and blocks local browser or remote devices", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-host-remote-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-host-remote-"));
   const deviceRegistryPath = join(directory, "devices.json");
   const desktopCapability = "d".repeat(64);
   const server = createOfficeServer({

@@ -105,7 +105,7 @@ test("create, assignment, status, and comments send only bounded allowlisted JSO
   });
   assert.deepEqual(requests[1]?.body, { assignee: "" });
   assert.deepEqual(requests[2]?.body, { status: "blocked" });
-  assert.deepEqual(requests[3]?.body, { body: "Need input", author: "hermes-office" });
+  assert.deepEqual(requests[3]?.body, { body: "Need input", author: "hermes-studio" });
 });
 
 test("profile identities preserve case across assignment, board reads, and updates", async () => {

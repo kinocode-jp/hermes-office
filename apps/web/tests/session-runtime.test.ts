@@ -333,7 +333,7 @@ test("Office-owned chat titles, tool fallbacks, and transport copy switch locale
       type: "error", liveSessionId: "live", payload: { message: "端末の再認証が必要です。" },
     });
     assert.equal(localizeRuntimeMessage(collision.errorMessage!), "端末の再認証が必要です。");
-    assert.equal(localizeRuntimeMessage(officeRuntimeMessage("Office WebSocketへ再接続できませんでした。手動で再試行してください。")), "Unable to reconnect to the Office WebSocket. Retry manually.");
+    assert.equal(localizeRuntimeMessage(officeRuntimeMessage("Studio WebSocketへ再接続できませんでした。手動で再試行してください。")), "Unable to reconnect to the Studio WebSocket. Retry manually.");
   } finally { setLocale(previous); }
 });
 

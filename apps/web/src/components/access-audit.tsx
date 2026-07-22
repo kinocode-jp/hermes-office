@@ -15,6 +15,7 @@ const operationLabels: Partial<Record<AccessAuditEntry["operation"], Translation
   "auth.device": "audit.operation.device",
   "auth.logout": "audit.operation.logout",
   "audit.read": "audit.operation.read",
+  "host-app.install": "audit.operation.hostAppInstall",
 };
 
 const outcomeLabels: Record<AccessAuditEntry["outcome"], TranslationKey> = {
@@ -61,7 +62,6 @@ export function AccessAudit() {
       <header class="access-audit__gate">
         <div class={`access-audit__signal is-${accessMode.toLowerCase()}`} aria-hidden="true"><span /></div>
         <div class="access-audit__title">
-          <p>{t("audit.eyebrow")}</p>
           <div class="heading-info-group">
             <h2 id="access-audit-title">{t("audit.title")}</h2>
             <InfoTip text={t("audit.footer")} align="start" side="bottom" />

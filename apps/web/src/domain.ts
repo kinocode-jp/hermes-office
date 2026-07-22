@@ -1,4 +1,4 @@
-import type { Operation } from "@hermes-office/protocol";
+import type { Operation } from "@hermes-studio/protocol";
 import type { RuntimeMessage } from "./i18n";
 
 export type ProfileStatus = "working" | "waiting" | "idle" | "blocked";
@@ -6,6 +6,10 @@ export type ProfileStatus = "working" | "waiting" | "idle" | "blocked";
 export type Profile = {
   id: string;
   name: string;
+  /** Optional local display alias kept by the Office client. */
+  displayName?: string | undefined;
+  /** @deprecated Prefer displayName. Kept for demo data migration. */
+  nameJa?: string | undefined;
   role: string;
   status: ProfileStatus;
   color: string;
@@ -81,6 +85,9 @@ export type ChatSession = {
   title: string;
   /** Only local draft titles are translated at render time. Hermes titles remain verbatim. */
   titlePresentation?: "new-chat" | undefined;
+  createdAt?: string | undefined;
+  updatedAt?: string | undefined;
+  lastMessagePreview?: string | undefined;
   status: "streaming" | "ready" | "waiting";
   messages: ChatMessage[];
   /** Bounded local RPC evidence. It is deliberately separate from Hermes' durable transcript. */
@@ -98,6 +105,24 @@ export type ChatSession = {
   interruptPending?: boolean | undefined;
   interruptOperationId?: string | undefined;
   readOnly?: boolean;
+  /** Preferred model for session.create / display. */
+  model?: string | undefined;
+  /** Preferred provider for session.create / display. */
+  provider?: string | undefined;
+  /** Preferred reasoning_effort for new Hermes sessions (omit when empty/default). */
+  reasoningEffort?: string | undefined;
+  /** Local follow-up chips after the latest assistant reply. */
+  followUpSuggestions?: string[] | undefined;
+  /**
+   * Office client link: this chat was opened from a Kanban card ("Ask assignee").
+   * Not a Hermes durable identity; used for reuse and chrome only.
+   */
+  sourceCardId?: string | undefined;
+  sourceCardTitle?: string | undefined;
+  /** One-shot guard so the card seed prompt is not re-sent on reconnect. */
+  sourceCardSeeded?: boolean | undefined;
+  /** Queued first user prompt; cleared after a successful seed send. */
+  pendingCardSeed?: string | undefined;
 };
 
 export type TaskStatus = "triage" | "todo" | "scheduled" | "ready" | "running" | "blocked" | "review" | "done" | "archived";
@@ -126,9 +151,9 @@ export type TaskComment = {
 
 export type KanbanConnectionState = "idle" | "loading" | "ready" | "saving" | "error";
 
-export type Surface = "office" | "kanban" | "library" | "settings";
+export type Surface = "office" | "kanban" | "teams" | "library" | "settings";
 export type InspectorTab = "chat" | "profile" | "skills" | "memory";
-export type SettingsTab = "global" | "skills" | "soul" | "memory" | "host";
+export type SettingsTab = "global" | "skills" | "soul" | "memory" | "config" | "privileged" | "host";
 
 export type OfficeConnectionState = "demo" | "connecting" | "connected" | "degraded" | "error";
 export type OfficeAccessState = "checking" | "login-required" | "submitting" | "authenticated" | "unavailable";
@@ -193,10 +218,10 @@ export type OfficeSnapshot = {
       authentication: "desktop-capability" | "local-cookie" | "device-cookie" | "tailscale-identity" | "oidc";
       allowedOperations: Operation[];
     };
-    features: Array<"chat" | "profiles" | "skills" | "memory" | "kanban" | "global-inheritance" | "demo">;
+    features: Array<"chat" | "profiles" | "skills" | "memory" | "kanban" | "teams" | "global-inheritance" | "demo">;
   };
   profiles: OfficeSnapshotProfile[];
-  sessions: Array<{ id: string; profileId: string; title: string; activity: string }>;
+  sessions: Array<{ id: string; profileId: string; title: string; activity: string; createdAt?: string; updatedAt?: string; lastMessagePreview?: string }>;
   inventory: { profiles: OfficeInventoryPagination; sessions: OfficeInventoryPagination };
   boards: Array<{ id: string; name: string; cardCount: number }>;
 };

@@ -1,10 +1,11 @@
 import type { InspectorTab, SettingsTab } from "../domain";
 import {
-  activeSurface,
+  closeMobileRoute,
   createSession,
   inspectorTab,
   mobileInspectorOpen,
-  mobileWorkspaceOpen,
+  navigateToSurface,
+  openMobileWorkspace,
   openSession,
   selectedProfile,
   selectedProfileSessions,
@@ -14,11 +15,13 @@ import { StatusPill } from "./status-pill";
 import { CharacterPortrait } from "./character-portrait";
 import { AvatarPicker } from "./avatar-picker";
 import { InfoTip } from "./info-tip";
-import { useState } from "preact/hooks";
+import { TeamBadges } from "./team-badges";
+import { useEffect, useState } from "preact/hooks";
 import { chatSessionTitle, localizeRuntimeMessage, t, type TranslationKey } from "../i18n";
 import { loadMoreSessions, sessionInventoryState } from "../inventory";
 import { COMPACT_OVERLAY_VIEWPORT, useMobileOverlay } from "./use-mobile-overlay";
 import { inspectorTabIsSelected } from "../navigation-state";
+import { profileDisplayName, profileSecondaryName, profileStoredDisplayName, setProfileDisplayName } from "../profile-names";
 
 const tabs: { id: InspectorTab; label: TranslationKey }[] = [
   { id: "chat", label: "profile.chat" },
@@ -33,19 +36,16 @@ const settingsRoutes: Record<Exclude<InspectorTab, "chat">, SettingsTab> = {
   memory: "memory"
 };
 
-const routeCopy: Record<Exclude<InspectorTab, "chat">, { code: string; title: TranslationKey; description: TranslationKey }> = {
+const routeCopy: Record<Exclude<InspectorTab, "chat">, { title: TranslationKey; description: TranslationKey }> = {
   profile: {
-    code: "SOUL / LIVE",
     title: "settings.identity",
     description: "profile.identityDescription"
   },
   skills: {
-    code: "SKILLS / LIVE",
     title: "profile.skillsTitle",
     description: "profile.skillsDescription"
   },
   memory: {
-    code: "MEMORY / LIVE",
     title: "settings.memoryProvider",
     description: "profile.memoryDescription"
   }
@@ -54,16 +54,13 @@ const routeCopy: Record<Exclude<InspectorTab, "chat">, { code: string; title: Tr
 function openLiveSettings(tab: Exclude<InspectorTab, "chat">): void {
   inspectorTab.value = tab;
   settingsTab.value = settingsRoutes[tab];
-  activeSurface.value = "settings";
-  mobileInspectorOpen.value = false;
-  mobileWorkspaceOpen.value = false;
+  navigateToSurface("settings");
 }
 
 export function createProfileSession(profileId: string): boolean {
   const sessionId = createSession(profileId);
   if (sessionId === undefined) return false;
-  mobileInspectorOpen.value = false;
-  mobileWorkspaceOpen.value = true;
+  openMobileWorkspace();
   return true;
 }
 
@@ -76,7 +73,7 @@ function ChatList() {
       <button class="new-chat-button" onClick={() => createProfileSession(profile.id)}>{t("profile.newChat")}</button>
       <div class="session-list">
         {selectedProfileSessions.value.map((session) => (
-          <button key={session.id} onClick={() => { openSession(session.id); mobileInspectorOpen.value = false; mobileWorkspaceOpen.value = true; }}>
+          <button key={session.id} onClick={() => { openSession(session.id); openMobileWorkspace(); }}>
             <span>{chatSessionTitle(session)}</span>
             <small>{session.status === "streaming" ? t("profile.running") : t("profile.open")}</small>
           </button>
@@ -96,13 +93,12 @@ function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
   return (
     <div class="panel-section">
       <article class="profile-live-route">
-        <span>{copy.code}</span>
         <div class="heading-info-group">
           <h3>{t(copy.title)}</h3>
           <InfoTip text={`${t(copy.description)} ${t("profile.liveNote")}`} align="end" side="bottom" />
         </div>
         <dl>
-          <div><dt>{t("profile.target")}</dt><dd>{profile.name}</dd></div>
+          <div><dt>{t("profile.target")}</dt><dd>{profileDisplayName(profile)}</dd></div>
           <div><dt>{t("profile.id")}</dt><dd>{profile.id}</dd></div>
         </dl>
         <button type="button" onClick={() => openLiveSettings(tab)}>{t("profile.openLive")}</button>
@@ -113,14 +109,27 @@ function LiveSettingsRoute({ tab }: { tab: Exclude<InspectorTab, "chat"> }) {
 
 export function ProfilePanel() {
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
+  const [nameEditorOpen, setNameEditorOpen] = useState(false);
+  const [displayNameDraft, setDisplayNameDraft] = useState("");
   const mobileOverlay = useMobileOverlay<HTMLElement>({
     kind: "modal",
     open: mobileInspectorOpen.value,
-    onClose: () => { mobileInspectorOpen.value = false; },
+    onClose: closeMobileRoute,
     viewport: COMPACT_OVERLAY_VIEWPORT,
   });
   const profile = selectedProfile.value;
+  useEffect(() => {
+    setNameEditorOpen(false);
+    setDisplayNameDraft("");
+  }, [profile?.id]);
   if (!profile) return null;
+  const displayName = profileDisplayName(profile);
+  const secondaryName = profileSecondaryName(profile);
+  const savedDisplayName = profileStoredDisplayName(
+    profile.id,
+    profile.displayName?.trim() || profile.nameJa?.trim() || "",
+  );
+  const isDefaultProfile = profile.id === "default";
   const titleId = "mobile-profile-panel-title";
   return (
     <aside
@@ -133,14 +142,56 @@ export function ProfilePanel() {
       tabIndex={mobileOverlay.active ? -1 : undefined}
     >
       <header class="profile-panel-head">
-        <button class="mobile-close" data-mobile-overlay-initial-focus onClick={() => { mobileInspectorOpen.value = false; }} aria-label={t("common.close")}>←</button>
-        <button class="profile-avatar-button" type="button" onClick={() => setAvatarPickerOpen(true)} aria-label={t("profile.changeAvatar", { name: profile.name })}>
-          <CharacterPortrait profileId={profile.id} profileName={profile.name} class="character-portrait--panel" decorative />
+        <button class="mobile-close" data-mobile-overlay-initial-focus onClick={closeMobileRoute} aria-label={t("common.close")}>←</button>
+        <button class="profile-avatar-button" type="button" onClick={() => setAvatarPickerOpen(true)} aria-label={t("profile.changeAvatar", { name: displayName })}>
+          <CharacterPortrait profileId={profile.id} profileName={displayName} class="character-portrait--panel" decorative />
           <span>{t("profile.change")}</span>
         </button>
-        <div><h2 id={titleId}>{profile.name}</h2>{profile.role && <p>{profile.role}</p>}</div>
+        <div class="profile-panel-title">
+          <div class="profile-panel-title-row">
+            <h2 id={titleId}>{displayName}</h2>
+            <button
+              class="profile-name-edit"
+              type="button"
+              aria-label={t("profile.editName")}
+              title={isDefaultProfile ? `${t("profile.editName")} — ${t("profile.defaultIdNote")}` : t("profile.editName")}
+              onClick={() => { setDisplayNameDraft(savedDisplayName); setNameEditorOpen((current) => !current); }}
+            >✎</button>
+          </div>
+          {secondaryName && <small class="profile-name-secondary">{secondaryName}</small>}
+          {profile.role && <p>{profile.role}</p>}
+          <TeamBadges profileId={profile.id} />
+        </div>
         <StatusPill status={profile.status} />
       </header>
+      {nameEditorOpen && (
+        <form
+          class="profile-name-editor"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setProfileDisplayName(profile.id, displayNameDraft);
+            setNameEditorOpen(false);
+          }}
+        >
+          <label>
+            <span>{t("profile.displayName")}</span>
+            <input
+              autoFocus
+              type="text"
+              value={displayNameDraft}
+              maxLength={40}
+              placeholder={profile.name}
+              onInput={(event) => setDisplayNameDraft(event.currentTarget.value)}
+            />
+          </label>
+          <div>
+            <button type="submit">{t("profile.saveName")}</button>
+            <button type="button" onClick={() => setNameEditorOpen(false)}>{t("common.cancel")}</button>
+          </div>
+          <small>{t("profile.nameLocalNote")}</small>
+          {isDefaultProfile && <small>{t("profile.defaultIdNote")}</small>}
+        </form>
+      )}
       <nav class="panel-tabs" aria-label={t("profile.settings")}>
         {tabs.map((tab) => (
           <button
@@ -159,7 +210,7 @@ export function ProfilePanel() {
       {inspectorTab.value === "chat"
         ? <ChatList />
         : <LiveSettingsRoute tab={inspectorTab.value} />}
-      {avatarPickerOpen && <AvatarPicker profileId={profile.id} profileName={profile.name} onClose={() => setAvatarPickerOpen(false)} />}
+      {avatarPickerOpen && <AvatarPicker profileId={profile.id} profileName={displayName} onClose={() => setAvatarPickerOpen(false)} />}
     </aside>
   );
 }

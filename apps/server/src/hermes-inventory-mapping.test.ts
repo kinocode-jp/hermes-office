@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-office/protocol";
+import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-studio/protocol";
 import { collectHermesInventory, HermesInventoryCache, type HermesJsonResult } from "./hermes-inventory.js";
 
 const MAX_EPOCH_SECONDS = 8_640_000_000_000;

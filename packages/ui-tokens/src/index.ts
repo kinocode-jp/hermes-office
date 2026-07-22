@@ -1,5 +1,5 @@
 /**
- * Hermes Office shared visual tokens.
+ * Hermes Studio shared visual tokens.
  *
  * Values are framework-agnostic so the Tauri shell and PWA can consume the
  * same product language. Components should prefer semantic aliases over raw
@@ -174,6 +174,6 @@ export type PaletteToken = keyof typeof palette;
 export type ColorToken = keyof typeof color;
 export type StatusName = keyof typeof status;
 export type InheritanceLevel = keyof typeof inheritance;
-export type HermesOfficeTokens = typeof tokens;
+export type HermesStudioTokens = typeof tokens;
 
 export default tokens;

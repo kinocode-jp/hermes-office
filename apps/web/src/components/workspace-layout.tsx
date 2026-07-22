@@ -1,6 +1,7 @@
 import { Fragment, type ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { locale } from "../i18n";
+import { t } from "../i18n";
+import { ChatIcon, HomeIcon } from "./icons";
 import {
   WORKSPACE_RATIO_MAX,
   WORKSPACE_RATIO_MIN,
@@ -25,6 +26,7 @@ type WorkspaceLayoutProps = {
   main: ComponentChildren;
   workspace: ComponentChildren;
   hasChats: boolean;
+  surfaceVisible?: boolean;
 };
 
 type DragSource = "office" | "chat";
@@ -37,7 +39,7 @@ type ResizeGesture = {
   axisSize: number;
 };
 
-export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutProps) {
+export function WorkspaceLayout({ main, workspace, hasChats, surfaceVisible = true }: WorkspaceLayoutProps) {
   const host = useRef<HTMLDivElement>(null);
   const ratioRef = useRef(workspaceRatio.value);
   const effectiveRatioRef = useRef(workspaceRatio.value);
@@ -54,23 +56,17 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   const [layoutAnnouncement, setLayoutAnnouncement] = useState({ text: "", token: 0 });
   const placement = workspacePlacement.value;
   const preferredRatio = workspaceRatio.value;
-  const isJapanese = locale.value === "ja";
-  const copy = isJapanese ? {
-    separator: (position: string) => `オフィスとチャットのサイズを変更（チャットは${position}）`,
-    dockGroup: "ペインの配置を変更",
-    officeHandle: "オフィス画面をドラッグして配置を変更",
-    chatHandle: "チャット欄をドラッグして配置を変更",
-    handleTitle: "端へドラッグ、またはAlt＋矢印キーで配置",
-    placed: (position: string) => `チャットを${position}へ配置しました。`,
-    dropZone: (source: DragSource, edge: string) => `${source === "office" ? "オフィス" : "チャット"}: ${edge}`,
-  } : {
-    separator: (position: string) => `Resize office and chat (chat is ${position})`,
-    dockGroup: "Change pane placement",
-    officeHandle: "Drag the office pane to change placement",
-    chatHandle: "Drag the chat pane to change placement",
-    handleTitle: "Drag to an edge, or use Alt+Arrow keys",
-    placed: (position: string) => `Chat placed on the ${position}.`,
-    dropZone: (source: DragSource, edge: string) => `${source === "office" ? "Office" : "Chat"}: ${edge}`,
+  const copy = {
+    separator: (position: string) => t("layout.separator", { position }),
+    dockGroup: t("layout.dockGroup"),
+    officeHandle: t("layout.officeHandle"),
+    chatHandle: t("layout.chatHandle"),
+    handleTitle: t("layout.handleTitle"),
+    placed: (position: string) => t("layout.placed", { position }),
+    dropZone: (source: DragSource, edge: string) => t("layout.dropZone", {
+      source: t(source === "office" ? "layout.source.office" : "layout.source.chat"),
+      edge,
+    }),
   };
 
   useEffect(() => {
@@ -114,10 +110,10 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
       : preferredRatio);
   }, [placement, preferredRatio]);
 
-  const placementName = labelForPlacement(placement, isJapanese);
+  const placementName = labelForPlacement(placement);
   const announcePlacement = (next: WorkspacePlacement) => {
     setLayoutAnnouncement((current) => ({
-      text: copy.placed(labelForPlacement(next, isJapanese)),
+      text: copy.placed(labelForPlacement(next)),
       token: current.token + 1,
     }));
   };
@@ -249,10 +245,10 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
     if (shouldPersist) persistWorkspaceLayout();
   }, []);
 
-  const surfacePane = <div key="surface-pane" class="workspace-layout-surface">{main}</div>;
+  const surfacePane = surfaceVisible ? <div key="surface-pane" class="workspace-layout-surface">{main}</div> : null;
   const chatPane = <div key="chat-pane" class="workspace-layout-chat">{workspace}</div>;
-  const chatFirst = workspaceChatPrecedesSurface(placement, mobile, hasChats);
-  const desktopDivider = hasChats && !mobile ? (
+  const chatFirst = surfaceVisible && workspaceChatPrecedesSurface(placement, mobile, hasChats);
+  const desktopDivider = surfaceVisible && hasChats && !mobile ? (
     <Fragment key="desktop-divider">
       <div
         class="workspace-separator"
@@ -284,7 +280,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
           onPointerCancel={cancelDockDrag}
           onLostPointerCapture={(event) => cancelDockDrag(event)}
           onKeyDown={(event) => dockWithKeyboard("office", event)}
-        >O</button>
+        ><HomeIcon /></button>
         <span aria-hidden="true" />
         <button
           type="button"
@@ -298,7 +294,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
           onPointerCancel={cancelDockDrag}
           onLostPointerCapture={(event) => cancelDockDrag(event)}
           onKeyDown={(event) => dockWithKeyboard("chat", event)}
-        >C</button>
+        ><ChatIcon /></button>
       </div>
     </Fragment>
   ) : null;
@@ -306,7 +302,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
   return (
     <div
       ref={host}
-      class={`workspace-layout-host ${hasChats ? "has-chats" : "is-empty"} ${drag ? "is-docking" : ""}`}
+      class={`workspace-layout-host ${hasChats ? "has-chats" : "is-empty"} ${surfaceVisible ? "" : "surface-hidden"} ${drag ? "is-docking" : ""}`}
       data-workspace-placement={placement}
       style={`--workspace-ratio: ${effectiveRatio * 100}%`}
     >
@@ -322,7 +318,7 @@ export function WorkspaceLayout({ main, workspace, hasChats }: WorkspaceLayoutPr
         <div class="workspace-drop-zones" aria-hidden="true">
           {workspacePlacements.map((edge) => (
             <span key={edge} data-edge={edge} class={drag.candidate === chatPlacementForEdge(drag.source, edge) ? "is-target" : ""}>
-              {copy.dropZone(drag.source, labelForPlacement(edge, isJapanese))}
+              {copy.dropZone(drag.source, labelForPlacement(edge))}
             </span>
           ))}
         </div>
@@ -349,9 +345,11 @@ function resizeAxisCoordinate(placement: WorkspacePlacement, x: number, y: numbe
   return placement === "left" || placement === "right" ? x : y;
 }
 
-function labelForPlacement(placement: WorkspacePlacement, japanese: boolean): string {
-  if (japanese) return placement === "top" ? "上" : placement === "right" ? "右" : placement === "bottom" ? "下" : "左";
-  return placement;
+function labelForPlacement(placement: WorkspacePlacement): string {
+  return placement === "top" ? t("appearance.placement.top")
+    : placement === "right" ? t("appearance.placement.right")
+    : placement === "bottom" ? t("appearance.placement.bottom")
+    : t("appearance.placement.left");
 }
 
 function matchesMobile(): boolean {

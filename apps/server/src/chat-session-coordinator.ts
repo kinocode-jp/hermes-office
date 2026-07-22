@@ -123,6 +123,11 @@ export class ChatSessionCoordinator {
     return this.#live.get(sessionId)?.owner;
   }
 
+  /** Profile bound to a live Hermes session id, if Office currently owns the lease. */
+  profileForLive(sessionId: string): string | undefined {
+    return this.#live.get(sessionId)?.profile;
+  }
+
   /** Authorizes commands, so it is intentionally absent during close settlement. */
   liveLeaseToken(owner: ChatSessionOwner, liveSessionId: string): symbol | undefined {
     const lease = this.#live.get(liveSessionId);

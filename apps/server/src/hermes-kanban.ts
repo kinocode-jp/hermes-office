@@ -232,7 +232,7 @@ export class HermesKanbanAdapter {
     options: { board?: string } = {},
   ): Promise<void> {
     const id = validCardId(cardId);
-    const body = { body: boundedText(comment, "comment", 1, 16_000), author: "hermes-office" };
+    const body = { body: boundedText(comment, "comment", 1, 16_000), author: "hermes-studio" };
     assertRequestSize(body);
     const board = optionalBoard(options.board);
     const raw = record(await this.#request({
@@ -401,7 +401,7 @@ function writableStatus(value: unknown): HermesKanbanWritableStatus {
   if (typeof value !== "string" || !(WRITE_STATUSES as readonly string[]).includes(value)) {
     throw new KanbanValidationError(
       "UNSUPPORTED_STATUS",
-      "That status cannot be set directly by Hermes Office.",
+      "That status cannot be set directly by Hermes Studio.",
     );
   }
   return value as HermesKanbanWritableStatus;

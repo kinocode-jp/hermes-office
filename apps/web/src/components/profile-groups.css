@@ -1,0 +1,165 @@
+/* Team / profile grouping chrome for sidebar + today's office (not styles.css). */
+
+.profile-group-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-height: 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.profile-group-toggle button {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font: 700 var(--text-xs)/1 var(--font-sans);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.profile-group-toggle button + button {
+  border-left: 1px solid var(--line);
+}
+
+.profile-group-toggle button.is-active,
+.profile-group-toggle button[aria-pressed="true"] {
+  color: var(--paper);
+  background: rgba(85, 214, 190, 0.14);
+}
+
+.profile-group-toggle button:focus-visible {
+  outline: 2px solid var(--aqua);
+  outline-offset: -2px;
+  z-index: 1;
+}
+
+.profile-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 0 0 8px;
+}
+
+.profile-group-header {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.profile-group-header i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--team-color, var(--aqua));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.profile-group-header b {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--paper);
+  font: 700 var(--text-sm)/1.2 var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-group-header small {
+  color: var(--muted);
+  font: 600 var(--text-xs)/1 ui-monospace, monospace;
+  white-space: nowrap;
+}
+
+.profile-group--unassigned .profile-group-header {
+  border-style: dashed;
+}
+
+.profile-group--unassigned .profile-group-header i {
+  background: var(--muted);
+  opacity: 0.55;
+}
+
+.profile-group-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 2px;
+}
+
+.sidebar-section-head-tools {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.office-group-seg {
+  flex: 0 0 auto;
+}
+
+.office-group-list {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  padding: 4px 0 8px;
+  overflow-y: auto;
+}
+
+.office-wrap[data-view="scene"] .office-group-list {
+  display: none;
+}
+
+.office-group-list .profile-group-header {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+/* Narrow viewports and touch / coarse pointers (wide phones, foldables open). */
+@media (max-width: 767px), (hover: none) and (pointer: coarse) {
+  .profile-group-toggle {
+    min-height: 32px;
+  }
+
+  .profile-group-toggle button {
+    min-width: 36px;
+    min-height: 32px;
+    padding: 0 10px;
+    font-size: var(--text-sm);
+  }
+
+  .profile-group-header {
+    min-height: 34px;
+    padding: 6px 10px;
+  }
+
+  .sidebar-section-head-tools {
+    gap: 6px;
+  }
+}
+
+[data-sidebar-icon-only="true"] .profile-group-toggle,
+[data-sidebar-icon-only="true"] .profile-group-header b,
+[data-sidebar-icon-only="true"] .profile-group-header small {
+  display: none;
+}
+
+[data-sidebar-icon-only="true"] .profile-group-header {
+  grid-template-columns: 10px;
+  justify-content: center;
+  padding: 4px;
+}

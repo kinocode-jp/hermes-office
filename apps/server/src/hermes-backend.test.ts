@@ -308,7 +308,7 @@ test("an explicitly missing status route remains incompatible", async () => {
 });
 
 test("managed backend drains output beyond pipe capacity after readiness", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-backend-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-backend-"));
   const executable = join(directory, "fake-hermes.mjs");
   const donePath = join(directory, "output-drained.done");
   await writeFile(executable, `#!/usr/bin/env node
@@ -363,7 +363,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
 
 for (const transientStatus of [408, 425, 429]) {
   test(`initial managed start retries a transient ${transientStatus} status probe and succeeds`, async () => {
-    const directory = await mkdtemp(join(tmpdir(), "hermes-office-initial-transient-"));
+    const directory = await mkdtemp(join(tmpdir(), "hermes-studio-initial-transient-"));
     const executable = join(directory, "fake-hermes.mjs");
     const countPath = join(directory, "serve-count.txt");
     const crashPath = join(directory, "unused-crash");
@@ -383,7 +383,7 @@ for (const transientStatus of [408, 425, 429]) {
 }
 
 test("managed backend invalidates a crashed generation, recovers once, and never respawns during shutdown", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-recovery-"));
   const executable = join(directory, "fake-hermes.mjs");
   const countPath = join(directory, "serve-count.txt");
   const crashPath = join(directory, "crash-first");
@@ -421,7 +421,7 @@ test("managed backend invalidates a crashed generation, recovers once, and never
 });
 
 test("managed recovery retries a transient 503 status probe and reconnects", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-transient-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-recovery-transient-"));
   const executable = join(directory, "fake-hermes.mjs");
   const countPath = join(directory, "serve-count.txt");
   const crashPath = join(directory, "crash-first");
@@ -444,7 +444,7 @@ test("managed recovery retries a transient 503 status probe and reconnects", asy
 });
 
 test("initial start is single-flight and close prevents a delayed CLI probe from spawning Hermes", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-start-close-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-start-close-"));
   const executable = join(directory, "fake-hermes.mjs");
   const probePath = join(directory, "probe-started");
   const servePath = join(directory, "serve-started");
@@ -480,7 +480,7 @@ if (process.argv.includes("--version")) {
 });
 
 test("an older managed snapshot cannot overwrite a recovered generation when completion order reverses", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-snapshot-generation-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-snapshot-generation-"));
   const executable = join(directory, "fake-hermes.mjs");
   const countPath = join(directory, "serve-count.txt");
   const crashPath = join(directory, "crash-first");
@@ -518,7 +518,7 @@ test("an older managed snapshot cannot overwrite a recovered generation when com
 });
 
 test("managed recovery stops after its configured attempt bound", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hermes-office-recovery-bound-"));
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-recovery-bound-"));
   const executable = join(directory, "fake-hermes.mjs");
   const countPath = join(directory, "serve-count.txt");
   const crashPath = join(directory, "crash-first");

@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import type { ProtocolError } from "@hermes-office/protocol";
+import type { ProtocolError } from "@hermes-studio/protocol";
 import {
   HermesKanbanAdapter,
   HermesKanbanUpstreamError,

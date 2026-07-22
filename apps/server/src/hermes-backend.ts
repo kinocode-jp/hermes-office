@@ -1,7 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type {
   KanbanBoardSummary,
@@ -10,7 +8,8 @@ import type {
   OfficeInventoryMetadata,
   OfficeSnapshot,
   RuntimeStatus,
-} from "@hermes-office/protocol";
+} from "@hermes-studio/protocol";
+import { brandStatePath } from "./brand-env.js";
 import { OFFICE_PROTOCOL_VERSION } from "./demo-state.js";
 import { createHermesChatTransport, type HermesChatTransport } from "./hermes-chat.js";
 import { createHermesChildEnvironment, discardHermesChildOutput } from "./hermes-child-environment.js";
@@ -24,6 +23,9 @@ import {
   OfficeGlobalSettingsStore,
   type HermesSettingsAdapter,
 } from "./hermes-settings.js";
+import { createHermesModelsAdapter, type HermesModelsAdapter } from "./hermes-models.js";
+import { OfficeAgentBehaviorStore } from "./office-agent-behavior.js";
+import type { OfficeTeamSkillLayer } from "./office-teams.js";
 
 const START_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -39,9 +41,12 @@ export interface HermesBackendOptions {
   startTimeoutMs?: number;
   requestTimeoutMs?: number;
   globalSettingsPath?: string;
+  agentBehaviorPath?: string;
   maxProfileBackends?: number;
   managedRestartAttempts?: number;
   managedRestartBackoffMs?: number;
+  /** Middle inheritance tier: teams that contribute skills/context per profile. */
+  listTeamLayers?(): Promise<readonly OfficeTeamSkillLayer[]>;
 }
 
 export interface HermesRuntimeSource {
@@ -52,8 +57,10 @@ export interface HermesRuntimeSource {
   chat(options?: { maxEventBytes?: number }): HermesChatTransport;
   kanban(): HermesKanbanAdapter;
   settings?(): HermesSettingsAdapter;
+  models?(): HermesModelsAdapter;
   globalSettings?(): OfficeGlobalSettingsStore;
   globalInheritance?(): GlobalInheritanceCoordinator;
+  agentBehavior?(): OfficeAgentBehaviorStore;
   onStatusChange?(listener: (status: RuntimeStatus) => void): () => void;
 }
 
@@ -71,10 +78,12 @@ export class HermesBackend implements HermesRuntimeSource {
   #sequence = 0;
   readonly #profilePool: HermesProfileBackendPool;
   readonly #globalSettings: OfficeGlobalSettingsStore;
+  readonly #agentBehavior: OfficeAgentBehaviorStore;
   readonly #inventory = new HermesInventoryCache();
   #snapshotRefresh: SnapshotRefresh | undefined;
   #globalInheritance?: GlobalInheritanceCoordinator;
   #settingsAdapter?: HermesSettingsAdapter;
+  #modelsAdapter?: HermesModelsAdapter;
   #childGeneration = 0;
   #connectionGeneration = 0;
   #startFlight: Promise<RuntimeStatus> | undefined;
@@ -94,7 +103,10 @@ export class HermesBackend implements HermesRuntimeSource {
         .some((item) => item.name === profile),
     });
     this.#globalSettings = new OfficeGlobalSettingsStore(
-      options.globalSettingsPath ?? join(homedir(), ".hermes-office", "global-settings.json"),
+      options.globalSettingsPath ?? brandStatePath("global-settings.json"),
+    );
+    this.#agentBehavior = new OfficeAgentBehaviorStore(
+      options.agentBehaviorPath ?? brandStatePath("agent-behavior.json"),
     );
     this.#state = {
       mode: options.baseUrl === undefined ? "managed-sidecar" : "existing-local",
@@ -145,8 +157,23 @@ export class HermesBackend implements HermesRuntimeSource {
     return this.#settingsAdapter;
   }
 
+  models(): HermesModelsAdapter {
+    this.#modelsAdapter ??= createHermesModelsAdapter({
+      resolveProfileBackend: async (profile) => {
+        if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+        return await this.#profilePool.resolve(profile);
+      },
+      ...(this.#options.requestTimeoutMs === undefined ? {} : { timeoutMs: this.#options.requestTimeoutMs }),
+    });
+    return this.#modelsAdapter;
+  }
+
   globalSettings(): OfficeGlobalSettingsStore {
     return this.#globalSettings;
+  }
+
+  agentBehavior(): OfficeAgentBehaviorStore {
+    return this.#agentBehavior;
   }
 
   globalInheritance(): GlobalInheritanceCoordinator {
@@ -155,6 +182,9 @@ export class HermesBackend implements HermesRuntimeSource {
       settings: this.settings(),
       listProfiles: async () => recordArray(await this.#requestJson("/api/profiles"), "profiles")
         .flatMap((profile) => typeof profile.name === "string" ? [profile.name] : []),
+      ...(this.#options.listTeamLayers === undefined
+        ? {}
+        : { listTeamLayers: this.#options.listTeamLayers }),
     });
     return this.#globalInheritance;
   }
@@ -609,7 +639,7 @@ function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: Office
     capabilities: {
       protocolVersion: OFFICE_PROTOCOL_VERSION, serverVersion: "0.2.0", runtime,
       access: { deviceId: "local-desktop", tier: "owner", exposure: "loopback", authentication: "desktop-capability", allowedOperations: ["state.read"] },
-      features: ["chat", "profiles", "skills", "memory", "kanban", "global-inheritance"],
+      features: ["chat", "profiles", "skills", "memory", "kanban", "teams", "global-inheritance"],
     },
     globalSettings: { sharedContextEnabled: true, sharedSkillsEnabled: true, revision: 1 },
     profiles, sessions, inventory, boards,
