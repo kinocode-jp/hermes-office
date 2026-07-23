@@ -4,9 +4,6 @@ import { redactSecrets } from "./secret-scrubber.js";
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_CLI_OUTPUT_BYTES = 8 * 1024;
-const SUPPORTED_HERMES_MAJOR = 0;
-const SUPPORTED_HERMES_MINOR = 18;
-
 export type HermesRuntimeState = "incompatible" | "ready" | "unavailable";
 export type HermesCliState = "available" | "incompatible" | "not_configured" | "unavailable";
 
@@ -171,22 +168,20 @@ export async function probeHermesCli(
         finish({ state: "unavailable" });
         return;
       }
-      finish(isSupportedHermesVersion(match[1])
+      finish(isRecognizedHermesVersion(match[1])
         ? { state: "available", version: match[1] }
-        : { state: "incompatible", version: match[1] });
+        : { state: "unavailable" });
     });
   });
 }
 
-export function isSupportedHermesVersion(version: string): boolean {
+export function isRecognizedHermesVersion(version: string): boolean {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version);
   if (match === null) return false;
   const major = Number(match[1]);
   const minor = Number(match[2]);
   const patch = Number(match[3]);
-  return Number.isSafeInteger(major) && Number.isSafeInteger(minor) && Number.isSafeInteger(patch)
-    && major === SUPPORTED_HERMES_MAJOR
-    && minor === SUPPORTED_HERMES_MINOR;
+  return Number.isSafeInteger(major) && Number.isSafeInteger(minor) && Number.isSafeInteger(patch);
 }
 
 function createVersionProbeEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -228,7 +223,7 @@ async function probeStatus(
 
     const status = parseHermesStatus(body);
     if (status === undefined) return { state: "incompatible", reason: "invalid_response" };
-    if (!isSupportedHermesVersion(status.version)) {
+    if (!isRecognizedHermesVersion(status.version)) {
       return { state: "incompatible", reason: "unsupported_version" };
     }
 

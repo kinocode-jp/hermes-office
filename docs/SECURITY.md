@@ -156,7 +156,9 @@ invalid-digest registry fails closed and does not reopen enrollment.
 
 The desktop shell canonicalizes local Node/Hermes executable paths, rejects
 group/world-writable or unexpected-owner files on Unix, bounds version probes,
-and requires Node 22.x plus Hermes Agent 0.18.x. These executables are not yet
+and requires Node 22.x plus an installed Hermes Agent with a valid semantic
+version. Hermes releases are not pinned; Studio instead validates the API
+response contracts it consumes. These executables are not yet
 verified against a project-signed digest manifest. Treat the local installation
 and user account as part of the trusted computing base.
 

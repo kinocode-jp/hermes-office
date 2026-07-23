@@ -154,7 +154,7 @@ impl StartupNoticeKind {
                 "The listener on port 4317 returned the compatible health shape, but its Web UI probe did not respond in time. Its identity is not authenticated."
             }
             Self::OwnedManagedRuntimeUnavailable => {
-                "The desktop launcher could not find or validate the managed Node.js 22.x and Hermes Agent 0.18.x runtimes required to start its Office server. These are not bundled with the app."
+                "The desktop launcher could not find or validate the managed Node.js 22.x runtime and an installed Hermes Agent required to start its Office server. These are not bundled with the app."
             }
             Self::OwnedBundledResourceUnavailable => {
                 "The desktop launcher could not locate the bundled Office server resources required to start its own server."
@@ -211,7 +211,7 @@ impl StartupNoticeKind {
             ],
             Self::OwnedManagedRuntimeUnavailable => &[
                 "Install Node.js 22.x for your user account (the launcher prefers ~/.hermes/node/bin/node).",
-                "Install Hermes Agent 0.18.x so `hermes --version` reports Hermes Agent v0.18.x (for example via the official Hermes install, which places the binary under ~/.local/bin/hermes).",
+                "Install Hermes Agent so `hermes --version` reports a valid Hermes Agent version (for example via the official Hermes install, which places the binary under ~/.local/bin/hermes).",
                 "Optional overrides: HERMES_STUDIO_NODE and HERMES_STUDIO_HERMES_EXECUTABLE may point at absolute, user-owned executables.",
                 "Repair or reinstall the managed runtime, free port 4317 if needed, then start Hermes Studio again.",
             ],
@@ -227,7 +227,7 @@ impl StartupNoticeKind {
             Self::OwnedServerReadinessFailed => &[
                 "Close Hermes Studio normally, then start it again.",
                 "Open the diagnostic log and office-server stderr log listed below for the child process exit reason.",
-                "Confirm Node 22.x and Hermes Agent 0.18.x work from a terminal, and that port 4317 is free before retrying.",
+                "Confirm Node 22.x and Hermes Agent work from a terminal, and that port 4317 is free before retrying.",
                 "Repair or reinstall the managed runtime or Hermes Studio application bundle if the server still does not become ready.",
             ],
             Self::InternalStateUnavailable => &[

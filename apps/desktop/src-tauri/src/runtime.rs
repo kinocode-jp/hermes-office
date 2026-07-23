@@ -9,8 +9,7 @@ use std::{
 };
 
 use crate::constants::{
-    CHILD_POLL_INTERVAL, MAX_VERSION_OUTPUT, SUPPORTED_HERMES_MAJOR, SUPPORTED_HERMES_MINOR,
-    SUPPORTED_NODE_MAJOR, VERSION_TIMEOUT,
+    CHILD_POLL_INTERVAL, MAX_VERSION_OUTPUT, SUPPORTED_NODE_MAJOR, VERSION_TIMEOUT,
 };
 /// Prefer HERMES_STUDIO_* ; fall back to deprecated HERMES_OFFICE_* .
 fn brand_env(suffix: &str) -> Option<OsString> {
@@ -50,11 +49,11 @@ pub(crate) fn resolve_managed_runtime() -> Result<(PathBuf, PathBuf), String> {
     let hermes = find_compatible_executable_branded(
         "HERMES_EXECUTABLE",
         &hermes_paths,
-        hermes_version_is_compatible,
+        hermes_agent_is_detected,
     )?
     .ok_or_else(|| {
         format!(
-            "Hermes Agent 0.18.x was not found. Checked: {}.",
+            "Hermes Agent was not found. Checked: {}.",
             summarize_candidates(&hermes_paths)
         )
     })?;
@@ -267,13 +266,11 @@ pub(crate) fn node_version_is_compatible(output: &str) -> bool {
         .is_some_and(|(major, _, _)| major == SUPPORTED_NODE_MAJOR)
 }
 
-pub(crate) fn hermes_version_is_compatible(output: &str) -> bool {
+pub(crate) fn hermes_agent_is_detected(output: &str) -> bool {
     let Some(version) = output.lines().find_map(|line| line.strip_prefix("Hermes Agent v")) else {
         return false;
     };
-    parse_leading_version(version).is_some_and(|(major, minor, _)| {
-        major == SUPPORTED_HERMES_MAJOR && minor == SUPPORTED_HERMES_MINOR
-    })
+    parse_leading_version(version).is_some()
 }
 
 pub(crate) fn parse_leading_version(value: &str) -> Option<(u64, u64, u64)> {

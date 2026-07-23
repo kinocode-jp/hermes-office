@@ -71,7 +71,7 @@ docs                     Design and integration documentation
 ## Requirements
 
 - Node.js/npm versions from `.node-version` and `package.json` (**Node.js 22.x** is required for the desktop launcher’s managed Office Server)
-- Hermes Agent **0.18.x** installed for the same OS user (`hermes --version` should print `Hermes Agent v0.18.…`). The desktop shell looks for absolute, user-owned binaries under paths such as `~/.hermes/node/bin/node`, `~/.local/bin/hermes`, Homebrew, nvm/fnm/asdf Node 22 installs, and optional overrides `HERMES_STUDIO_NODE` / `HERMES_STUDIO_HERMES_EXECUTABLE`
+- Hermes Agent installed for the same OS user (`hermes --version` must report a valid Hermes Agent semantic version). Studio does not pin a particular Hermes Agent release; API response shapes are still validated at runtime. The desktop shell looks for absolute, user-owned binaries under paths such as `~/.hermes/node/bin/node`, `~/.local/bin/hermes`, Homebrew, nvm/fnm/asdf Node 22 installs, and optional overrides `HERMES_STUDIO_NODE` / `HERMES_STUDIO_HERMES_EXECUTABLE`
 - Rust toolchain from `rust-toolchain.toml` and the Tauri host prerequisites
   when developing the desktop shell
 
@@ -186,7 +186,7 @@ You should not need a separate terminal or `npm start` for normal desktop use.
 | Office Server JS | Yes (`resources/server/hermes-studio-server.mjs`) | No |
 | Optional same-origin web copy for browser use of `:4317` | Yes when built via `npm run build:desktop-assets` (`resources/web`) | No |
 | Node.js **22.x** | **No** (not redistributed) | **Yes** — preferred `~/.hermes/node/bin/node` |
-| Hermes Agent **0.18.x** | **No** (not redistributed) | **Yes** — preferred `~/.local/bin/hermes` |
+| Hermes Agent | **No** (not redistributed) | **Yes** — preferred `~/.local/bin/hermes`; no release pin |
 
 **Why Node/Hermes are not bundled:** there is no official signed Hermes Studio
 binary release yet (`docs/RELEASING.md`); Hermes Agent is a separate install with
@@ -228,7 +228,7 @@ port 4317.
 - **Missing Node/Hermes, missing bundle resources, spawn failure, or readiness
   timeout:** the window stays open on a cause-specific notice with **Details**,
   a **Diagnostic log** path (`desktop-startup.log`), recovery steps (install Node
-  22.x / Hermes 0.18.x, free the port, reinstall the app), and no process kill.
+  Node 22.x / installed Hermes Agent, free the port, reinstall the app), and no process kill.
 - **Incompatible, malformed, timing-out, non-Hermes, or Web-UI-missing listener:**
   fail closed with a fixed notice; never take over the port or kill the process.
 

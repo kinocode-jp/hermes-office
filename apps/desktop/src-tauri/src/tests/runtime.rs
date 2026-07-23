@@ -6,7 +6,7 @@ use std::{
 
 use crate::hex_util::random_desktop_capability;
 use crate::runtime::{
-    hermes_candidates, hermes_version_is_compatible, inherit_office_remote_environment,
+    hermes_agent_is_detected, hermes_candidates, inherit_office_remote_environment,
     node_candidates, node_version_is_compatible, validated_local_executable,
 };
 
@@ -25,9 +25,11 @@ fn runtime_versions_are_fail_closed() {
     assert!(!node_version_is_compatible("v24.0.1"));
     assert!(!node_version_is_compatible("v21.9.0"));
     assert!(!node_version_is_compatible("not-node"));
-    assert!(hermes_version_is_compatible("Hermes Agent v0.18.2"));
-    assert!(!hermes_version_is_compatible("Hermes Agent v0.19.0"));
-    assert!(!hermes_version_is_compatible("0.18.2"));
+    assert!(hermes_agent_is_detected("Hermes Agent v0.18.2"));
+    assert!(hermes_agent_is_detected("Hermes Agent v0.19.0"));
+    assert!(hermes_agent_is_detected("Hermes Agent v1.0.0"));
+    assert!(!hermes_agent_is_detected("Hermes Agent development build"));
+    assert!(!hermes_agent_is_detected("0.18.2"));
 }
 
 #[test]

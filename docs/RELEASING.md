@@ -14,8 +14,9 @@ A Tauri production package includes:
   in a normal browser while the desktop-owned server is running.
 
 It does **not** currently ship Node.js or Hermes Agent. Local builds and any
-future official binary must document the supported managed runtimes (Node 22.x
-and Hermes Agent 0.18.x) until a signed runtime redistribution plan is approved.
+future official binary must document the managed runtime requirements (Node
+22.x and a separately installed Hermes Agent). Studio does not pin a Hermes
+Agent release; it validates the API response contracts it consumes.
 Desktop diagnostic logs for launcher failures live under
 `~/Library/Logs/HermesStudio/` on macOS (or `~/.hermes-studio/logs/` elsewhere)
 and must never contain remote enrollment tokens or desktop capabilities.

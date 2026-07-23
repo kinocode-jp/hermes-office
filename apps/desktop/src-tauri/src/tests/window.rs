@@ -105,7 +105,7 @@ fn startup_notices_use_cause_specific_fixed_recovery_instructions() {
 
     let runtime = startup_notice_html_kind(StartupNoticeKind::OwnedManagedRuntimeUnavailable);
     assert!(runtime.contains("Node.js 22.x"));
-    assert!(runtime.contains("Hermes Agent 0.18.x"));
+    assert!(runtime.contains("installed Hermes Agent"));
     assert!(runtime.contains("not bundled"));
 
     // Keep data URL helper callable without detail.

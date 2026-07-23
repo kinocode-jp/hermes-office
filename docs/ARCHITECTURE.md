@@ -129,7 +129,7 @@ Managed mode starts a user-installed Hermes executable and supervises it. The
 desktop shell starts the bundled Office Server JavaScript using a Node runtime
 available on the machine. These are local runtime integrations, not bundled,
 signed Hermes or Node distributions. The desktop launcher discovers absolute,
-user-owned Node 22.x and Hermes Agent 0.18.x binaries (including common
+user-owned Node 22.x and Hermes Agent binaries (including common
 Homebrew/nvm/fnm/asdf layouts and `HERMES_STUDIO_NODE` /
 `HERMES_STUDIO_HERMES_EXECUTABLE` overrides), writes a secret-scrubbed diagnostic
 log under `~/Library/Logs/HermesStudio/` (macOS) or `~/.hermes-studio/logs/`, and
@@ -150,7 +150,8 @@ and waits for any in-flight attempt before terminating the current child, so a
 managed process is never respawned after shutdown begins.
 
 The desktop launcher canonicalizes and validates executable ownership/mode and
-requires Node 22.x/Hermes 0.18.x. A source `npm run dev` launch uses the explicit
+requires Node 22.x and an installed Hermes Agent without pinning its release. A
+source `npm run dev` launch uses the explicit
 Hermes executable value; its default bare `hermes` name is resolved through the
 allowlisted `PATH` and does not receive the desktop path ownership/mode check.
 

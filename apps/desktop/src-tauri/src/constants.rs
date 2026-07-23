@@ -22,5 +22,3 @@ pub(crate) const DESKTOP_PROOF_DOMAIN: &str = "hermes-office-desktop-readiness";
 pub(crate) const DESKTOP_PROOF_VERSION: &str = "1";
 pub(crate) const DESKTOP_PROOF_NONCE_BYTES: usize = 32;
 pub(crate) const SUPPORTED_NODE_MAJOR: u64 = 22;
-pub(crate) const SUPPORTED_HERMES_MAJOR: u64 = 0;
-pub(crate) const SUPPORTED_HERMES_MINOR: u64 = 18;

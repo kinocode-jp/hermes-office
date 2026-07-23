@@ -17,7 +17,7 @@ import { collectHermesInventory, HermesInventoryCache, type CollectedHermesInven
 import { createHermesKanbanHttpRequester, HermesKanbanAdapter } from "./hermes-kanban.js";
 import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import { HermesProfileBackendPool } from "./hermes-profile-pool.js";
-import { isSupportedHermesVersion, probeHermesCli } from "./hermes-runtime.js";
+import { isRecognizedHermesVersion, probeHermesCli } from "./hermes-runtime.js";
 import {
   createHermesSettingsAdapter,
   OfficeGlobalSettingsStore,
@@ -370,7 +370,7 @@ export class HermesBackend implements HermesRuntimeSource {
     const raw = await this.#requestJson("/api/status", false);
     const version = readString(raw, "version");
     if (version === undefined) throw new IncompatibleHermesError("Hermes status contract is unavailable.");
-    if (!isSupportedHermesVersion(version)) throw new IncompatibleHermesError("Hermes API version is unsupported.");
+    if (!isRecognizedHermesVersion(version)) throw new IncompatibleHermesError("Hermes API version is invalid.");
     return version;
   }
 
