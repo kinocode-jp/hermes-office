@@ -74,6 +74,7 @@ fn office_remote_environment_allowlist_is_exact_when_host_values_present() {
     lookup.insert("HERMES_STUDIO_REMOTE_TOKEN", OsString::from("office-token"));
     lookup.insert("HERMES_STUDIO_ALLOWED_ORIGINS", OsString::from("https://office.example"));
     lookup.insert("HERMES_STUDIO_TRUSTED_PROXY_HOPS", OsString::from("1"));
+    lookup.insert("HERMES_STUDIO_REMOTE_PRIVILEGED", OsString::from("true"));
     let mut command = Command::new("/bin/sh");
     command.env_clear();
     inherit_office_remote_environment(&mut command, |key| lookup.get(key).cloned());
@@ -86,7 +87,8 @@ fn office_remote_environment_allowlist_is_exact_when_host_values_present() {
     assert!(envs.contains(&("HERMES_STUDIO_REMOTE_TOKEN".to_string(), "office-token".to_string())));
     assert!(envs.contains(&("HERMES_STUDIO_ALLOWED_ORIGINS".to_string(), "https://office.example".to_string())));
     assert!(envs.contains(&("HERMES_STUDIO_TRUSTED_PROXY_HOPS".to_string(), "1".to_string())));
-    assert_eq!(envs.len(), 3, "only the three allowed Office keys may be forwarded");
+    assert!(envs.contains(&("HERMES_STUDIO_REMOTE_PRIVILEGED".to_string(), "true".to_string())));
+    assert_eq!(envs.len(), 4, "only the four allowed Office keys may be forwarded");
 }
 
 #[test]

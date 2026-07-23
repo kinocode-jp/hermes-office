@@ -312,6 +312,7 @@ pub(crate) fn inherit_office_remote_environment(
         "REMOTE_TOKEN",
         "ALLOWED_ORIGINS",
         "TRUSTED_PROXY_HOPS",
+        "REMOTE_PRIVILEGED",
     ] {
         if let Some(value) = brand_env_lookup(suffix, &lookup) {
             command.env(format!("HERMES_STUDIO_{suffix}"), value);
