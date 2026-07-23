@@ -68,14 +68,9 @@ export default async function Home() {
           </div>
           <p className="note">{t.note}</p>
         </div>
-        <div className="hero-roster" aria-hidden>
-          {SPRITE_IDS.map((id, i) => (
-            <div className="desk" key={id}>
-              <Sprite row={i} />
-              <span className="desk-name">{t.spriteNames[i]}</span>
-              <span className="desk-id">{id}</span>
-            </div>
-          ))}
+        <div className="hero-art">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/lp/hero-characters.png" alt={t.heroArtAlt} />
         </div>
       </section>
 

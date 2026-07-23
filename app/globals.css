@@ -165,10 +165,11 @@ body {
 }
 
 /* roster */
-.hero-roster {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
+.hero-art img {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: auto;
 }
 .desk {
   background: var(--card);

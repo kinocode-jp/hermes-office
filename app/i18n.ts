@@ -32,6 +32,7 @@ export type Dict = {
   whyGoodTitle: string;
   whyGood: string[];
   screensTitle: string;
+  heroArtAlt: string;
   screenKanbanAlt: string;
   screenKanbanCap: string;
   screenChatAlt: string;
@@ -75,6 +76,7 @@ const ja: Dict = {
     "最大4つのチャットを並べて同時に進行",
   ],
   screensTitle: "実際の画面",
+  heroArtAlt: "Hermes Studio のピクセルキャラクターたち — チャット・カンバン・チーム・タスクを担当",
   screenKanbanAlt:
     "Hermes Studio のタスクボード画面。ステータス列で並んだカンバンと、左のプロファイルロスター",
   screenKanbanCap: "タスクボード — 担当 Profile・状態・コメントをライブに反映",
@@ -152,6 +154,7 @@ const en: Dict = {
     "Run up to four chats side by side",
   ],
   screensTitle: "Real screens",
+  heroArtAlt: "Hermes Studio pixel characters handling chat, Kanban, teams, and tasks",
   screenKanbanAlt:
     "Hermes Studio task board with status columns and the profile roster on the left",
   screenKanbanCap: "Task board — assignees, status, and comments update live",
