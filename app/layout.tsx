@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { detectLocale, getDict } from "./i18n";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -18,9 +19,10 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = h.get("host") ?? "localhost:3000";
   const proto = host.startsWith("localhost") || host.startsWith("127.") ? "http" : "https";
   const base = `${proto}://${host}`;
-  const title = "Hermes Studio — 強力な Hermes エージェントを、誰でもカンタンに";
-  const description =
-    "ターミナル操作なしで、強力な Hermes Agent をだれでも直感的に。エージェントはピクセルオフィスのキャラクターとして現れ、チャット・カンバン・チーム設定をクリックひとつで扱えます。";
+  const locale = await detectLocale();
+  const dict = getDict(locale);
+  const title = dict.metaTitle;
+  const description = dict.metaDescription;
   return {
     title,
     description,
@@ -43,13 +45,14 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const locale = await detectLocale();
   return (
-    <html lang="ja">
+    <html lang={locale}>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
