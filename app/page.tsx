@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Hermes Studio — Hermesエージェントが働くピクセルオフィス",
+  title: "Hermes Studio — 強力な Hermes エージェントを、誰でもカンタンに",
   description:
-    "チャット・カンバン・チーム設定をひとつのレスポンシブUIで。Hermes Agent のための実験的ビジュアルインターフェース。",
+    "ターミナル操作なしで、強力な Hermes Agent をだれでも直感的に。チャット・カンバン・チーム設定をひとつのビジュアルUIで扱えます。",
 };
 
 const SPRITES = [
@@ -92,16 +92,15 @@ export default function Home() {
         <div className="hero-copy">
           <span className="eyebrow">実験的・コミュニティプロジェクト</span>
           <h1>
-            あなたの Hermes エージェントが、
-            <span className="hl">ピクセルオフィス</span>で働く。
+            強力な Hermes エージェントを、
+            <span className="hl">誰でもカンタンに</span>。
           </h1>
           <p className="sub">
-            Hermes Studio は{" "}
             <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noreferrer">
               Hermes Agent
             </a>{" "}
-            のためのスタンドアロンなビジュアルインターフェース。Hermes Profile
-            はオフィスのキャラクターとして現れ、チャット・設定・カンバンのタスクをひとつのレスポンシブUIから開けます。
+            は強力ですが、ターミナルと設定ファイルの世界。Hermes Studio
+            はそれをピクセルオフィスのビジュアルUIに変えます。エージェントはオフィスで働くキャラクターとして現れ、チャット・設定・カンバンのタスクをクリックひとつで開けます。コマンドを覚える必要はありません。
           </p>
           <div className="cta-row">
             <a className="cta" href="#start">
@@ -123,6 +122,30 @@ export default function Home() {
               <span className="desk-id">{s.en}</span>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="why">
+        <div className="why-inner">
+          <div className="why-col bad">
+            <h3>これまで</h3>
+            <ul>
+              <li>ターミナルでセッションを起動・切替</li>
+              <li>タスクの状況はログを追って把握</li>
+              <li>複数エージェントの並行作業が見えない</li>
+            </ul>
+          </div>
+          <div className="why-arrow" aria-hidden>
+            →
+          </div>
+          <div className="why-col good">
+            <h3>Hermes Studio なら</h3>
+            <ul>
+              <li>キャラクターをクリックして会話を開始</li>
+              <li>カンバンで担当・状態・コメントがひと目でわかる</li>
+              <li>最大4つのチャットを並べて同時に進行</li>
+            </ul>
+          </div>
         </div>
       </section>
 

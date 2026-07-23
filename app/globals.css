@@ -203,6 +203,65 @@ section h2 {
 .screens {
   padding: 40px 0;
 }
+
+/* why: before/after */
+.why {
+  padding: 12px 0 40px;
+}
+.why-inner {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 26px;
+  align-items: stretch;
+}
+.why-col {
+  border-radius: 16px;
+  padding: 26px 28px;
+  border: 1px solid var(--line);
+  background: var(--card);
+}
+.why-col.bad h3 {
+  color: var(--ink-soft);
+}
+.why-col.good {
+  border-color: rgba(14, 122, 108, 0.35);
+  background: var(--teal-soft);
+}
+.why-col.good h3 {
+  color: var(--teal-dark);
+}
+.why-col h3 {
+  font-size: 16px;
+  font-weight: 800;
+  margin-bottom: 12px;
+}
+.why-col ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.why-col.bad li::before {
+  content: "✕ ";
+  color: #c25555;
+  font-weight: 700;
+}
+.why-col.good li {
+  color: var(--ink);
+}
+.why-col.good li::before {
+  content: "✓ ";
+  color: var(--teal);
+  font-weight: 700;
+}
+.why-arrow {
+  align-self: center;
+  font-size: 30px;
+  font-weight: 800;
+  color: var(--teal);
+}
 .shots {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -311,6 +370,13 @@ section h2 {
   .hero {
     grid-template-columns: 1fr;
     gap: 36px;
+  }
+  .why-inner {
+    grid-template-columns: 1fr;
+  }
+  .why-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
   }
   .shots,
   .start-inner {

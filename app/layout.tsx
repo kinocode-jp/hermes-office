@@ -18,9 +18,9 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = h.get("host") ?? "localhost:3000";
   const proto = host.startsWith("localhost") || host.startsWith("127.") ? "http" : "https";
   const base = `${proto}://${host}`;
-  const title = "Hermes Studio — Hermesエージェントが働くピクセルオフィス";
+  const title = "Hermes Studio — 強力な Hermes エージェントを、誰でもカンタンに";
   const description =
-    "Hermes Studio は Hermes Agent のための実験的なビジュアルインターフェース。プロファイルはオフィスのキャラクターとして現れ、チャット・カンバン・チーム設定をひとつのレスポンシブUIで扱えます。";
+    "ターミナル操作なしで、強力な Hermes Agent をだれでも直感的に。エージェントはピクセルオフィスのキャラクターとして現れ、チャット・カンバン・チーム設定をクリックひとつで扱えます。";
   return {
     title,
     description,
