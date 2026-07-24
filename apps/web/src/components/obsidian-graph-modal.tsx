@@ -73,7 +73,7 @@ export function ObsidianGraphModal({ open, onClose }: { open: boolean; onClose: 
         return null;
       })
       .then((next) => {
-        if (active) setGraph(next);
+        if (active) setGraph(next ?? null);
       })
       .catch(() => {
         if (active) setError(t("obsidianGraph.loadFailed"));

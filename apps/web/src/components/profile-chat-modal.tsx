@@ -467,7 +467,7 @@ export function ProfileChatModal() {
             key={handle.edge}
             class={`profile-chat-modal-resize ${handle.className}`}
             role="separator"
-            aria-orientation={handle.edge === "n" || handle.edge === "s" ? "horizontal" : handle.edge === "e" || handle.edge === "w" ? "vertical" : "both"}
+            aria-orientation={handle.edge === "n" || handle.edge === "s" ? "horizontal" : handle.edge === "e" || handle.edge === "w" ? "vertical" : undefined}
             aria-label={t("profile.chatModalResize")}
             title={t("profile.chatModalResize")}
             onPointerDown={beginResize(handle.edge)}

@@ -552,10 +552,9 @@ export function ensureSessionConnection(sessionId: string): void {
   if (!session) return;
   selectedProfileId.value = session.profileId;
   prefetchSelectedProfileSettings(session.profileId);
+  // connectionState !== "ready" already covers "error" and "disconnected".
   const needsEnsure = session.connectionState !== "ready"
     || session.historyState === "error"
-    || session.connectionState === "error"
-    || session.connectionState === "disconnected"
     || session.historyState === "unloaded";
   if (!needsEnsure) return;
   const target = chatTarget(session);
@@ -580,11 +579,10 @@ export function openSession(sessionId: string, options?: { workspace?: boolean; 
   if (session) {
     selectedProfileId.value = session.profileId;
   prefetchSelectedProfileSettings(session.profileId);
+    // connectionState !== "ready" already covers "error" and "disconnected".
     const needsEnsure = (addToWorkspace && !wasOpen)
       || session.connectionState !== "ready"
       || session.historyState === "error"
-      || session.connectionState === "error"
-      || session.connectionState === "disconnected"
       || session.historyState === "unloaded";
     if (needsEnsure) {
       const target = chatTarget(session);

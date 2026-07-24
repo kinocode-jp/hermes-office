@@ -19,7 +19,7 @@ export type PrefetchedProfileSettings = {
 type CacheEntry<T> = {
   value?: T;
   error?: unknown;
-  promise?: Promise<T>;
+  promise?: Promise<T> | undefined;
   fetchedAt: number;
 };
 

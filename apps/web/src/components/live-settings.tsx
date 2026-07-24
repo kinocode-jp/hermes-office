@@ -2302,7 +2302,7 @@ function SkillContentModal({
 }: {
   profileId: string;
   skillName: string;
-  skillMeta?: SkillSettings;
+  skillMeta?: SkillSettings | undefined;
   canEdit: boolean;
   onClose(): void;
 }) {

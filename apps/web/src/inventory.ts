@@ -174,7 +174,6 @@ function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void 
   const pageSeen = new Set<string>();
   const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
   for (const live of rows) {
-    if (isScheduledSessionHidden({ profileId: live.profileId, title: live.title, titlePresentation: undefined })) continue;
     if (pageSeen.has(live.id)) continue;
     pageSeen.add(live.id);
     seen?.add(live.id);

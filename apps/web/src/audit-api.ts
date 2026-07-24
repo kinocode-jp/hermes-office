@@ -29,6 +29,7 @@ const PROTOCOL_AUDIT_OPERATIONS: Record<Operation, true> = {
   "global-settings.update": true, "profile-config.update": true,
   "privileged-config.read": true, "privileged-config.update": true,
   "host-app.install": true,
+  "host-fs.read": true, "obsidian.vault.read": true, "hermes-agent.update": true,
   "runtime.start": true, "runtime.stop": true,
   "runtime.configure": true, "secret.write": true, "device.revoke": true, "audit.read": true,
 };
