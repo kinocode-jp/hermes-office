@@ -21,7 +21,7 @@ import { InfoTip } from "./info-tip";
 const INITIAL_VISIBLE_SESSIONS = 3;
 const VISIBLE_SESSION_STEP = 10;
 
-export function ScheduledSessionsPanel() {
+export function ScheduledSessionsPanel({ hideTitle = false }: { hideTitle?: boolean } = {}) {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [visibleByGroup, setVisibleByGroup] = useState<Record<string, number>>({});
@@ -96,10 +96,14 @@ export function ScheduledSessionsPanel() {
   };
 
   return (
-    <section class="scheduled-sessions-page" aria-labelledby="scheduled-sessions-title">
-      <header class="page-title-row scheduled-sessions-page-head">
+    <section
+      class="scheduled-sessions-page"
+      aria-label={hideTitle ? t("scheduled.title") : undefined}
+      aria-labelledby={hideTitle ? undefined : "scheduled-sessions-title"}
+    >
+      <header class={`page-title-row scheduled-sessions-page-head ${hideTitle ? "is-title-hidden" : ""}`}>
         <div class="heading-info-group">
-          <h1 id="scheduled-sessions-title">{t("scheduled.title")}</h1>
+          {!hideTitle && <h1 id="scheduled-sessions-title">{t("scheduled.title")}</h1>}
           <InfoTip text={`${t("scheduled.subtitle", { count: total })} ${t("scheduled.note")} ${t("scheduled.deleteNote")}`} align="start" side="bottom" />
         </div>
       </header>

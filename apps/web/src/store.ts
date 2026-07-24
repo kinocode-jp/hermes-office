@@ -58,6 +58,7 @@ import {
   setRuntimeDataSource,
 } from "./store-state";
 import { persistUiNavPreferences } from "./ui-nav-prefs";
+import { addPanelToActiveDashboard, removePanel, activeDashboard } from "./dashboard-layout";
 
 export {
   MAX_OPEN_CHAT_SESSIONS,
@@ -150,16 +151,24 @@ registerKanbanProfileTaskUpdater((counts) => {
   profileList.value = profileList.value.map((profile) => ({ ...profile, taskCount: counts.get(profile.id) ?? 0 }));
 });
 
+/**
+ * Legacy navigation shim. Surfaces no longer exist as exclusive views;
+ * navigating to one now adds (or focuses) the matching panel on the active
+ * dashboard. Settings still opens as the header modal.
+ */
 export function navigateToSurface(surface: Surface): void {
-  // Settings is a header modal, not a main surface.
   if (surface === "settings" || surface === "library") {
     openSettingsModal(surface === "library" ? "global" : settingsTab.value);
     return;
   }
+  const kind = surface === "office" ? "studio"
+    : surface === "kanban" ? "kanban"
+    : surface === "teams" ? "teams"
+    : "scheduled";
+  addPanelToActiveDashboard(kind);
   activeSurface.value = surface;
-  // Leaving another surface closes the settings modal so the floor stays primary.
   settingsModalOpen.value = false;
-  if (activeSurface.value === "office") setOfficeWindowOpen(true);
+  if (surface === "office") setOfficeWindowOpen(true);
   clearMobileRoutes();
   persistNavigationState();
 }
@@ -433,11 +442,12 @@ export function selectProfile(profileId: string, options?: { openWorkspace?: boo
 
 
 export function openScheduledSessions(): void {
-  navigateToSurface("scheduled");
+  addPanelToActiveDashboard("scheduled");
 }
 
 export function closeScheduledSessions(): void {
-  if (activeSurface.value === "scheduled") navigateToSurface("office");
+  const panel = activeDashboard.value.panels.find((item) => item.kind === "scheduled");
+  if (panel) removePanel(panel.id);
 }
 
 export function openSettingsModal(tab: SettingsTab = "global"): void {

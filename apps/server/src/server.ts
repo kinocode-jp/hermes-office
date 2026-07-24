@@ -17,6 +17,7 @@ import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
 import { routeInventoryHttp } from "./inventory-http.js";
 import { handleSessionDelete, isSessionResourcePath } from "./sessions-http.js";
+import { handleProfilesHttp, isProfilesHttpPath, isProfilesMutation, profilesOperation } from "./profiles-http.js";
 import { isModelsHttpPath, routeModelsHttp } from "./models-http.js";
 import { StaticWebAssets } from "./static-web.js";
 import {
@@ -663,6 +664,13 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         runtimeSource?.models === undefined ? undefined : runtimeSource.models(),
       );
       writeJson(response, result.status, result.body, maxResponseJsonBytes, result.headers ?? {});
+      return;
+    }
+
+    if (isProfilesHttpPath(requestUrl.pathname)) {
+      const access = auth.authorizeOperation(request, profilesOperation(request.method), isProfilesMutation(request.method));
+      if (!access.allowed) { request.resume(); writeAuthorizationError(response, access.reason, maxJsonBytes); return; }
+      await handleProfilesHttp(request, response, requestUrl, runtimeSource, maxJsonBytes, maxResponseJsonBytes);
       return;
     }
 

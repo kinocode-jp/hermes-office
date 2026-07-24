@@ -1,14 +1,11 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { ComponentType } from "preact";
-import type { Surface, Profile } from "../domain";
+import type { Profile } from "../domain";
 import { chatSessionTitle, t, type TranslationKey } from "../i18n";
 import { loadMoreProfiles, profileInventoryState } from "../inventory";
 import { tasks } from "../kanban-store";
 import { profileDisplayName, profileDisplayNameMap, profileSecondaryName } from "../profile-names";
 import {
   activeSessionId,
-  activeSurface,
-  navigateToSurface,
   openMobileWorkspace,
   openProfileChatModal,
   openSession,
@@ -21,6 +18,17 @@ import {
   clearWorkspaceSessionDropPreview,
   profileChatModalId,
 } from "../store";
+import {
+  activeDashboard,
+  activeDashboardId,
+  createDashboard,
+  dashboards,
+  deleteDashboard,
+  renameDashboard,
+  MAX_DASHBOARDS,
+  type DashboardPanelKind,
+} from "../dashboard-layout";
+import { activateDashboard, addDashboardPanel } from "../dashboard-actions";
 import {
   SIDEBAR_ICON_THRESHOLD,
   SIDEBAR_MAX_WIDTH,
@@ -37,7 +45,7 @@ import {
   toggleSidebarProfileOpen,
 } from "../sidebar-layout";
 import { CharacterPortrait } from "./character-portrait";
-import { CardsIcon, ChatIcon, GroupIcon, ListIcon, ScheduleIcon, UsersIcon } from "./icons";
+import { BoardIcon, CardsIcon, ChatIcon, GroupIcon, HomeIcon, ListIcon, ScheduleIcon, UsersIcon } from "./icons";
 import { StatusPill } from "./status-pill";
 import { TeamBadges } from "./team-badges";
 import { teams } from "../teams-store";
@@ -73,14 +81,18 @@ function sidebarTaskAssigneeName(assigneeId: string, profiles: readonly Profile[
   return profile ? profileDisplayName(profile) : assigneeId;
 }
 
-export type SideRailNavItem = { id: Surface; icon: ComponentType; label: TranslationKey };
+/** Panel-add entries shown in the nav area. Clicking adds the panel to the active dashboard. */
+const panelNavItems: { kind: DashboardPanelKind; icon: typeof HomeIcon; label: TranslationKey }[] = [
+  { kind: "studio", icon: HomeIcon, label: "nav.office" },
+  { kind: "kanban", icon: BoardIcon, label: "nav.kanban" },
+  { kind: "teams", icon: UsersIcon, label: "nav.teams" },
+  { kind: "profiles", icon: GroupIcon, label: "dashboard.panel.profiles" },
+];
 
-type SideRailProps = {
-  navItems: readonly SideRailNavItem[];
-};
-
-export function SideRail({ navItems }: SideRailProps) {
+export function SideRail() {
   const resizePointerId = useRef<number | null>(null);
+  const [renamingDashboardId, setRenamingDashboardId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const {
     menu,
     menuRef,
@@ -410,38 +422,138 @@ export function SideRail({ navItems }: SideRailProps) {
       data-mobile-profiles-open={phoneViewport && sidebarProfilesOpen.value ? "true" : "false"}
       data-sidebar-group={groupMode}
     >
-      <div class="side-rail-nav">
-        {navItems.map((item) => (
+      <section class="sidebar-dashboards" aria-label={t("dashboard.listAria")}>
+        <header class="sidebar-section-head">
+          <b class="sidebar-dashboards-title">{iconOnly ? "" : t("dashboard.list")}</b>
           <button
-            key={item.id}
+            class="sidebar-dashboard-add"
             type="button"
-            class={activeSurface.value === item.id ? "is-active" : ""}
-            aria-current={activeSurface.value === item.id ? "page" : undefined}
-            title={t(item.label)}
-            aria-label={t(item.label)}
+            disabled={dashboards.value.length >= MAX_DASHBOARDS}
+            aria-label={t("dashboard.create")}
+            title={t("dashboard.create")}
             onClick={() => {
-              navigateToSurface(item.id);
-              if (phoneViewport) closeMobileProfiles();
+              const id = createDashboard();
+              if (id) activateDashboard(id);
             }}
-          >
-            <span aria-hidden="true"><item.icon /></span>
-            {!iconOnly && <b>{t(item.label)}</b>}
-          </button>
-        ))}
-      </div>
+          >＋</button>
+        </header>
+        <div class="sidebar-dashboard-list" role="listbox" aria-label={t("dashboard.listAria")}>
+          {dashboards.value.map((dashboard, index) => {
+            const isActive = dashboard.id === activeDashboardId.value;
+            const name = dashboard.name || t("dashboard.unnamed", { index: index + 1 });
+            if (renamingDashboardId === dashboard.id) {
+              return (
+                <form
+                  key={dashboard.id}
+                  class="sidebar-dashboard-rename"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    renameDashboard(dashboard.id, renameDraft);
+                    setRenamingDashboardId(null);
+                  }}
+                >
+                  <input
+                    value={renameDraft}
+                    aria-label={t("dashboard.rename")}
+                    // eslint-disable-next-line jsx-a11y/no-autofocus -- inline rename field
+                    autoFocus
+                    onInput={(event) => setRenameDraft(event.currentTarget.value)}
+                    onBlur={() => {
+                      renameDashboard(dashboard.id, renameDraft);
+                      setRenamingDashboardId(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setRenamingDashboardId(null);
+                    }}
+                  />
+                </form>
+              );
+            }
+            return (
+              <div key={dashboard.id} class={`sidebar-dashboard-row ${isActive ? "is-active" : ""}`}>
+                <button
+                  class="sidebar-dashboard-button"
+                  type="button"
+                  role="option"
+                  aria-selected={isActive}
+                  aria-current={isActive ? "page" : undefined}
+                  title={name}
+                  onClick={() => {
+                    activateDashboard(dashboard.id);
+                    if (phoneViewport) closeMobileProfiles();
+                  }}
+                  onDblClick={() => {
+                    if (phoneViewport) return;
+                    setRenameDraft(dashboard.name);
+                    setRenamingDashboardId(dashboard.id);
+                  }}
+                >
+                  <span aria-hidden="true"><CardsIcon /></span>
+                  {!iconOnly && <b>{name}</b>}
+                </button>
+                {!iconOnly && !phoneViewport && (
+                  <button
+                    class="sidebar-item-menu-trigger sidebar-dashboard-rename-trigger"
+                    type="button"
+                    aria-label={t("dashboard.rename")}
+                    title={t("dashboard.rename")}
+                    onClick={() => {
+                      setRenameDraft(dashboard.name);
+                      setRenamingDashboardId(dashboard.id);
+                    }}
+                  >✎</button>
+                )}
+                {!iconOnly && !phoneViewport && dashboards.value.length > 1 && (
+                  <button
+                    class="sidebar-item-menu-trigger sidebar-dashboard-delete"
+                    type="button"
+                    aria-label={t("dashboard.delete")}
+                    title={t("dashboard.delete")}
+                    onClick={() => {
+                      if (window.confirm(t("dashboard.deleteConfirm", { name }))) deleteDashboard(dashboard.id);
+                    }}
+                  >×</button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
 
       <div class="side-rail-rule" aria-hidden="true" />
 
+      <div class="side-rail-nav" role="group" aria-label={t("dashboard.addPanelGroup")}>
+        {panelNavItems.map((item) => {
+          const present = activeDashboard.value.panels.some((panel) => panel.kind === item.kind);
+          return (
+            <button
+              key={item.kind}
+              type="button"
+              class={present ? "is-active" : ""}
+              aria-pressed={present}
+              title={t("dashboard.addPanel", { label: t(item.label) })}
+              aria-label={t("dashboard.addPanel", { label: t(item.label) })}
+              onClick={() => {
+                addDashboardPanel(item.kind);
+                if (phoneViewport) closeMobileProfiles();
+              }}
+            >
+              <span aria-hidden="true"><item.icon /></span>
+              {!iconOnly && <b>{t(item.label)}</b>}
+            </button>
+          );
+        })}
+      </div>
+
       <button
-        class={`sidebar-scheduled-trigger ${activeSurface.value === "scheduled" ? "is-active" : ""}`}
+        class={`sidebar-scheduled-trigger ${activeDashboard.value.panels.some((panel) => panel.kind === "scheduled") ? "is-active" : ""}`}
         type="button"
-        aria-current={activeSurface.value === "scheduled" ? "page" : undefined}
         onClick={() => {
-          navigateToSurface("scheduled");
+          addDashboardPanel("scheduled");
           if (phoneViewport) closeMobileProfiles();
         }}
-        title={t("nav.scheduled")}
-        aria-label={t("nav.scheduled")}
+        title={t("dashboard.addPanel", { label: t("nav.scheduled") })}
+        aria-label={t("dashboard.addPanel", { label: t("nav.scheduled") })}
       >
         <span aria-hidden="true"><ScheduleIcon /></span>
         {!iconOnly && <b>{t("nav.scheduled")}</b>}
@@ -487,7 +599,7 @@ export function SideRail({ navItems }: SideRailProps) {
             aria-expanded="true"
             aria-label={t("sidebar.tasks")}
             title={t("sidebar.tasks")}
-            onClick={() => navigateToSurface("kanban")}
+            onClick={() => addDashboardPanel("kanban")}
           >
             <b>{t("sidebar.tasks")}</b>
             <small>{t("sidebar.taskCount", { count: activeSidebarTasks.length })}</small>
@@ -502,7 +614,7 @@ export function SideRail({ navItems }: SideRailProps) {
               type="button"
               class="sidebar-task-button"
               onClick={() => {
-                navigateToSurface("kanban");
+                addDashboardPanel("kanban");
                 if (task.assigneeId) selectProfile(task.assigneeId);
               }}
               title={task.title}

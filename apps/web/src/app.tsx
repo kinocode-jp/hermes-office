@@ -1,37 +1,18 @@
-import { ChatWorkspace } from "./components/chat-workspace";
-import { KanbanBoard } from "./components/kanban-board";
-import { OfficeScene } from "./components/office-scene";
-import { TeamsPanel } from "./components/teams-panel";
 import { DeviceLogin } from "./components/device-login";
 import { AppearanceSettings } from "./components/appearance-settings";
 import { ProfileCommand } from "./components/profile-command";
 import { ProfileSettingsModal } from "./components/profile-settings-modal";
 import { SettingsModal } from "./components/settings-modal";
 import { ProfileChatModal } from "./components/profile-chat-modal";
-import { ScheduledSessionsPanel } from "./components/scheduled-sessions-panel";
-import { SideRail, type SideRailNavItem } from "./components/side-rail";
-import { WorkspaceLayout } from "./components/workspace-layout";
-import { locale, localizeRuntimeMessage, setLocale, t, type TranslationKey } from "./i18n";
-import { BoardIcon, HomeIcon, SettingsIcon, UsersIcon } from "./components/icons";
-import type { Surface } from "./domain";
-import { officeWindowOpen } from "./office-window";
+import { DashboardView } from "./components/dashboard-view";
+import { SideRail } from "./components/side-rail";
+import { locale, localizeRuntimeMessage, setLocale, t } from "./i18n";
+import { SettingsIcon } from "./components/icons";
 import { sidebarWidth } from "./sidebar-layout";
-import { activeSurface, mobileWorkspaceOpen, navigateToSurface, officeAccess, officeConnection, openSessionIds, closeSettingsModal, openSettingsModal, profileList, retryOfficeServer, selectedProfile, settingsModalOpen, settingsTab, workspaceSessionDropPreview } from "./store";
-import { rememberSurfaceScroll, restoreSurfaceScroll, type SurfaceScrollPosition } from "./surface-scroll";
-import { useLayoutEffect, useRef } from "preact/hooks";
-
-const navItems: { id: Surface; icon: SideRailNavItem["icon"]; label: TranslationKey }[] = [
-  { id: "office", icon: HomeIcon, label: "nav.office" },
-  { id: "kanban", icon: BoardIcon, label: "nav.kanban" },
-  { id: "teams", icon: UsersIcon, label: "nav.teams" },
-];
+import { officeAccess, officeConnection, openSessionIds, closeSettingsModal, openSettingsModal, retryOfficeServer, settingsModalOpen, settingsTab, workspaceSessionDropPreview } from "./store";
+import { addDashboardPanel } from "./dashboard-actions";
 
 export function App() {
-  const mainStageRef = useRef<HTMLElement>(null);
-  const surfaceScrollPositions = useRef(new Map<Surface, SurfaceScrollPosition>());
-  useLayoutEffect(() => {
-    if (mainStageRef.current) restoreSurfaceScroll(surfaceScrollPositions.current, activeSurface.value, mainStageRef.current);
-  }, [activeSurface.value]);
   if (officeAccess.value.state !== "authenticated") return <DeviceLogin />;
   const hasChats = openSessionIds.value.length > 0 || workspaceSessionDropPreview.value;
   const connection = officeConnection.value;
@@ -46,7 +27,7 @@ export function App() {
       style={{ "--sidebar-width": `${sidebarWidth.value}px` }}
     >
       <header class="topbar" data-mobile-route-chrome>
-        <a class="brand" href="#" aria-label={t("app.home")} title={t("app.home")} onClick={(event) => { event.preventDefault(); navigateToSurface("office"); }}>
+        <a class="brand" href="#" aria-label={t("app.home")} title={t("app.home")} onClick={(event) => { event.preventDefault(); addDashboardPanel("studio"); }}>
           <span class="brand-mark" aria-hidden="true">H</span>
         </a>
         <div
@@ -85,35 +66,20 @@ export function App() {
         </div>
       </header>
 
-      <SideRail navItems={navItems.filter((item) => item.id !== "office" || officeWindowOpen.value)} />
+      <SideRail />
 
-      <WorkspaceLayout
-        hasChats={hasChats}
-        surfaceVisible={officeWindowOpen.value || activeSurface.value !== "office"}
-        main={(
-          <main
-            ref={mainStageRef}
-            class="main-stage"
-            onScroll={(event) => rememberSurfaceScroll(surfaceScrollPositions.current, activeSurface.value, event.currentTarget)}
-          >
-            {connection.state === "error" && (
-              <div class="runtime-error-banner" role="alert">
-                <span>{localizeRuntimeMessage(connection.message)}</span>
-                <button type="button" onClick={retryOfficeServer}>{t("connection.retry")}</button>
-              </div>
-            )}
-            {activeSurface.value === "office" && officeWindowOpen.value && <OfficeScene profiles={profileList.value} />}
-            {activeSurface.value === "kanban" && <KanbanBoard />}
-            {activeSurface.value === "teams" && <TeamsPanel />}
-            {activeSurface.value === "scheduled" && <ScheduledSessionsPanel />}
-          </main>
+      <main class="main-stage main-stage--dashboard">
+        {connection.state === "error" && (
+          <div class="runtime-error-banner" role="alert">
+            <span>{localizeRuntimeMessage(connection.message)}</span>
+            <button type="button" onClick={retryOfficeServer}>{t("connection.retry")}</button>
+          </div>
         )}
-        workspace={<div class={`workspace-drawer ${openSessionIds.value.length === 0 ? "is-empty" : ""} ${mobileWorkspaceOpen.value ? "is-mobile-open" : ""} ${workspaceSessionDropPreview.value ? "is-drop-preview" : ""}`}><ChatWorkspace /></div>}
-      />
+        <DashboardView />
+      </main>
       <ProfileSettingsModal />
       <SettingsModal />
       <ProfileChatModal />
     </div>
   );
 }
-

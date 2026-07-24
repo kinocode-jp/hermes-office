@@ -1068,12 +1068,18 @@ export function Office3D({
       />
       {kanbanOverlayOpen.value && (
         <div class="office-3d-kanban-overlay" onPointerDown={(e) => { if (e.target === e.currentTarget) kanbanOverlayOpen.value = false; }}>
-          <div class="office-3d-kanban-header">
-            <h2>{t("kanban.title")}</h2>
-            <button type="button" class="office-3d-kanban-close" onClick={() => { kanbanOverlayOpen.value = false; }}>×</button>
-          </div>
+          {/* Kanban's own page-title-row already carries the title, filters,
+              sync, and add-task actions; only the close affordance lives
+              in the overlay chrome to avoid a duplicate "Task board" heading. */}
+          <button
+            type="button"
+            class="office-3d-kanban-close"
+            aria-label={t("common.close")}
+            title={t("common.close")}
+            onClick={() => { kanbanOverlayOpen.value = false; }}
+          >×</button>
           <div class="office-3d-kanban-body">
-            <KanbanBoard />
+            <KanbanBoard hideTitle />
           </div>
         </div>
       )}

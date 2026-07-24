@@ -393,7 +393,7 @@ function OfficeGroupedList({
   );
 }
 
-export function OfficeScene({ profiles }: { profiles: Profile[] }) {
+export function OfficeScene({ profiles, embedded = false }: { profiles: Profile[]; embedded?: boolean }) {
   const working = profiles.filter((profile) => profile.status === "working").length;
   const attention = profiles.filter((profile) => profile.status === "waiting" || profile.status === "blocked").length;
   const world = useMemo(
@@ -428,12 +428,20 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
   };
 
   return (
-    <section class="office-wrap" aria-labelledby="office-title" data-view={effectiveView} data-office-group={groupMode}>
+    <section
+      class={`office-wrap ${embedded ? "office-wrap--embedded" : ""}`}
+      aria-label={embedded ? t("office.title") : undefined}
+      aria-labelledby={embedded ? undefined : "office-title"}
+      data-view={effectiveView}
+      data-office-group={groupMode}
+    >
       <header class="office-heading">
-        <div class="heading-info-group">
-          <h1 id="office-title">{t("office.title")}</h1>
-          <InfoTip text={t("office.hint")} align="start" side="bottom" />
-        </div>
+        {!embedded && (
+          <div class="heading-info-group">
+            <h1 id="office-title">{t("office.title")}</h1>
+            <InfoTip text={t("office.hint")} align="start" side="bottom" />
+          </div>
+        )}
         <div class="office-heading-actions">
         <div class="office-toolbar">
           <div class="shift-readout" aria-label={t("office.summary")}>
@@ -487,13 +495,15 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
             </>
           )}
         </div>
-        <button
-          type="button"
-          class="office-collapse-button"
-          aria-label={t("office.remove")}
-          title={t("office.remove")}
-          onClick={() => setOfficeWindowOpen(false)}
-        ><CloseIcon width={18} height={18} /></button>
+        {!embedded && (
+          <button
+            type="button"
+            class="office-collapse-button"
+            aria-label={t("office.remove")}
+            title={t("office.remove")}
+            onClick={() => setOfficeWindowOpen(false)}
+          ><CloseIcon width={18} height={18} /></button>
+        )}
         </div>
       </header>
 

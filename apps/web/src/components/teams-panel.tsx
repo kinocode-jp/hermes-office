@@ -73,7 +73,7 @@ function parseSkillLines(value: string): string[] {
   return [...new Set(value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))];
 }
 
-export function TeamsPanel() {
+export function TeamsPanel({ hideTitle = false }: { hideTitle?: boolean } = {}) {
   const board = teamsState.value;
   const list = teams.value;
   const profiles = profileList.value;
@@ -220,11 +220,17 @@ export function TeamsPanel() {
   );
 
   return (
-    <section class="teams-page" aria-labelledby="teams-title">
-      <header class="page-title-row teams-page-head">
-        <div>
-          <h1 id="teams-title">{t("teams.title")}</h1>
-        </div>
+    <section
+      class="teams-page"
+      aria-label={hideTitle ? t("teams.title") : undefined}
+      aria-labelledby={hideTitle ? undefined : "teams-title"}
+    >
+      <header class={`page-title-row teams-page-head ${hideTitle ? "is-title-hidden" : ""}`}>
+        {!hideTitle && (
+          <div>
+            <h1 id="teams-title">{t("teams.title")}</h1>
+          </div>
+        )}
         <div class={`teams-sync state-${board.state}`} role={board.state === "error" ? "alert" : "status"}>
           <span>{localizeRuntimeMessage(board.message)}</span>
           <button type="button" onClick={() => void refreshTeams({ acknowledgeErrors: true })} disabled={board.state === "loading" || busy} aria-label={t("teams.reload")} title={t("teams.reload")}>

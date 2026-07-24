@@ -56,6 +56,10 @@ export interface HermesRuntimeSource {
   inventoryPage?(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage>;
   /** Permanently delete a durable Hermes session. Absent ids are treated as success. */
   deleteSession?(profile: string, sessionId: string): Promise<void>;
+  /** Create a durable Hermes profile (proxied to upstream POST /api/profiles). */
+  createProfile?(name: string, options?: { cloneFromDefault?: boolean; description?: string }): Promise<void>;
+  /** Permanently delete a Hermes profile and its local state. */
+  deleteProfile?(name: string): Promise<void>;
   close(): Promise<void>;
   chat(options?: { maxEventBytes?: number }): HermesChatTransport;
   kanban(): HermesKanbanAdapter;
@@ -310,6 +314,30 @@ export class HermesBackend implements HermesRuntimeSource {
     this.#snapshotRefresh = undefined;
   }
 
+  async createProfile(name: string, options?: { cloneFromDefault?: boolean; description?: string }): Promise<void> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    const safeName = requireProfile(name);
+    await this.#requestJson("/api/profiles", true, undefined, undefined, {
+      method: "POST",
+      body: {
+        name: safeName,
+        clone_from_default: options?.cloneFromDefault !== false,
+        ...(options?.description === undefined ? {} : { description: options.description }),
+      },
+    });
+    this.#inventory.clear();
+    this.#snapshotRefresh = undefined;
+  }
+
+  async deleteProfile(name: string): Promise<void> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    const safeName = requireProfile(name);
+    if (safeName === "default") throw new Error("The default profile cannot be deleted.");
+    await this.#requestJson(`/api/profiles/${encodeURIComponent(safeName)}`, true, undefined, undefined, { method: "DELETE" });
+    this.#inventory.clear();
+    this.#snapshotRefresh = undefined;
+  }
+
   async #collectSnapshotData(connection: ConnectionGeneration): Promise<SnapshotCollection> {
     const current = this.#snapshotRefresh;
     if (current?.generation === connection.generation) return await current.promise;
@@ -491,7 +519,7 @@ export class HermesBackend implements HermesRuntimeSource {
     authenticated = true,
     timeoutLimitMs?: number,
     connection?: ConnectionGeneration,
-    init?: { method?: "GET" | "DELETE"; body?: Record<string, unknown> },
+    init?: { method?: "GET" | "POST" | "DELETE"; body?: Record<string, unknown> },
   ): Promise<unknown> {
     return (await this.#requestJsonResult(path, authenticated, timeoutLimitMs, connection, init)).value;
   }
@@ -501,7 +529,7 @@ export class HermesBackend implements HermesRuntimeSource {
     authenticated = true,
     timeoutLimitMs?: number,
     connection?: ConnectionGeneration,
-    init?: { method?: "GET" | "DELETE"; body?: Record<string, unknown> },
+    init?: { method?: "GET" | "POST" | "DELETE"; body?: Record<string, unknown> },
   ): Promise<HermesJsonResult> {
     const baseUrl = connection?.baseUrl ?? this.#baseUrl;
     if (baseUrl === undefined) throw new Error("Hermes backend is not configured.");

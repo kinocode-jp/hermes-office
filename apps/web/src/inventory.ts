@@ -55,6 +55,17 @@ export function registerInventorySnapshotRefresh(action: SnapshotRefresh | undef
   refreshSnapshot = action;
 }
 
+/** Force a fresh snapshot (e.g. after profile create/delete) so lists update promptly. */
+export async function requestInventorySnapshotRefresh(): Promise<void> {
+  const identity = inventoryIdentity;
+  if (!refreshSnapshot || !identity) return;
+  try {
+    await refreshSnapshot({ serverUrl: identity.serverUrl, connectionGeneration: identity.connectionGeneration });
+  } catch {
+    // The periodic snapshot cycle will converge eventually.
+  }
+}
+
 export async function loadMoreProfiles(): Promise<void> { await loadMore("profiles"); }
 export async function loadMoreSessions(): Promise<void> { await loadMore("sessions"); }
 

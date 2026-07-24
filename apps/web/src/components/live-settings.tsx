@@ -119,7 +119,10 @@ export function LiveSettings({ profileId, profileLabel, scope = "all", initialTa
   const [memoryFiles, setMemoryFiles] = useState<BuiltinMemoryFiles | null>(null);
   const [globalContext, setGlobalContext] = useState("");
   const [globalSkills, setGlobalSkills] = useState("");
-  const [globalSkillOptions, setGlobalSkillOptions] = useState<string[]>([]);
+  const [globalSkillOptions, setGlobalSkillOptions] = useState<SkillSettings[]>([]);
+  /** Profile the current globalSkillOptions detail (usage, description) was sourced from. */
+  const [globalSkillCatalogSource, setGlobalSkillCatalogSource] = useState<string | null>(null);
+  const [globalSkillDetailName, setGlobalSkillDetailName] = useState<string | null>(null);
   const [globalSkillDraft, setGlobalSkillDraft] = useState("");
   const [sharedContext, setSharedContext] = useState(true);
   const [sharedSkills, setSharedSkills] = useState(true);
@@ -380,10 +383,7 @@ export function LiveSettings({ profileId, profileLabel, scope = "all", initialTa
         setGlobal(cachedGlobal);
         setGlobalContext(cachedGlobal.context);
         setGlobalSkills(cachedGlobal.skills.join("\n"));
-        setGlobalSkillOptions((current) => {
-          const merged = new Set([...current, ...cachedGlobal.skills]);
-          return [...merged].sort((left, right) => left.localeCompare(right));
-        });
+        setGlobalSkillOptions((current) => mergeGlobalSkillOptions(current, [], cachedGlobal.skills));
         setSharedContext(cachedGlobal.sharedContextEnabled);
         setSharedSkills(cachedGlobal.sharedSkillsEnabled);
       }
@@ -430,10 +430,7 @@ export function LiveSettings({ profileId, profileLabel, scope = "all", initialTa
         setGlobal(nextGlobal);
         setGlobalContext(nextGlobal.context);
         setGlobalSkills(nextGlobal.skills.join("\n"));
-        setGlobalSkillOptions((current) => {
-          const merged = new Set([...current, ...nextGlobal.skills]);
-          return [...merged].sort((left, right) => left.localeCompare(right));
-        });
+        setGlobalSkillOptions((current) => mergeGlobalSkillOptions(current, [], nextGlobal.skills));
         setSharedContext(nextGlobal.sharedContextEnabled);
         setSharedSkills(nextGlobal.sharedSkillsEnabled);
       } else {
@@ -841,22 +838,16 @@ export function LiveSettings({ profileId, profileLabel, scope = "all", initialTa
     for (const candidate of candidates) {
       try {
         const settings = await loadProfileSettings(candidate);
-        const names = settings.skills.map((skill) => skill.name).filter(Boolean);
-        if (names.length > 0) {
-          setGlobalSkillOptions((current) => {
-            const merged = new Set([...current, ...names, ...parseSkillLines(globalSkills)]);
-            return [...merged].sort((left, right) => left.localeCompare(right));
-          });
+        if (settings.skills.length > 0) {
+          setGlobalSkillCatalogSource(candidate);
+          setGlobalSkillOptions((current) => mergeGlobalSkillOptions(current, settings.skills, parseSkillLines(globalSkills)));
           return;
         }
       } catch {
         // Try the next profile; global skills remain editable as free-form names.
       }
     }
-    setGlobalSkillOptions((current) => {
-      const merged = new Set([...current, ...parseSkillLines(globalSkills)]);
-      return [...merged].sort((left, right) => left.localeCompare(right));
-    });
+    setGlobalSkillOptions((current) => mergeGlobalSkillOptions(current, [], parseSkillLines(globalSkills)));
   }, [globalSkills, profileId, snapshot?.profiles]);
 
   useEffect(() => {
@@ -869,7 +860,7 @@ export function LiveSettings({ profileId, profileLabel, scope = "all", initialTa
     if (enabled) selected.add(name);
     else selected.delete(name);
     setGlobalSkills([...selected].join("\n"));
-    setGlobalSkillOptions((current) => current.includes(name) ? current : [...current, name].sort((left, right) => left.localeCompare(right)));
+    setGlobalSkillOptions((current) => mergeGlobalSkillOptions(current, [], [name]));
   };
 
   const addGlobalSkillDraft = () => {
@@ -1219,21 +1210,37 @@ export function LiveSettings({ profileId, profileLabel, scope = "all", initialTa
               <div class="settings-global-skill-picker" role="group" aria-label={t("settings.globalSkills")} aria-invalid={!globalSkillsValid}>
                 {globalSkillOptions.length === 0 ? (
                   <p class="settings-empty">{t("settings.globalSkillsEmpty")}</p>
-                ) : globalSkillOptions.map((name) => {
-                  const checked = parsedGlobalSkills.includes(name);
+                ) : globalSkillOptions.map((skill) => {
+                  const checked = parsedGlobalSkills.includes(skill.name);
+                  const hasDetail = skill.category !== "" || skill.description !== "" || skill.provenance !== "unknown";
                   return (
-                    <label class={`settings-global-skill-option ${checked ? "is-checked" : ""}`} key={name}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={!mutationAccess.global || (!checked && parsedGlobalSkills.length >= GLOBAL_SETTINGS_MAX_SKILLS)}
-                        onChange={(event) => toggleGlobalSkill(name, event.currentTarget.checked)}
-                      />
-                      <span>{name}</span>
-                    </label>
+                    <span class={`settings-global-skill-option ${checked ? "is-checked" : ""}`} key={skill.name}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!mutationAccess.global || (!checked && parsedGlobalSkills.length >= GLOBAL_SETTINGS_MAX_SKILLS)}
+                          onChange={(event) => toggleGlobalSkill(skill.name, event.currentTarget.checked)}
+                        />
+                        <span>{skill.name}</span>
+                      </label>
+                      {hasDetail && (
+                        <InfoTip
+                          text={[
+                            skill.description || t("settings.noDescription"),
+                            [skill.category, skill.provenance !== "unknown" ? skill.provenance : ""].filter(Boolean).join(" · "),
+                            skill.usage > 0 ? t("settings.usage.hermesOnly", { count: skill.usage }) : t("settings.usage.none"),
+                          ].filter(Boolean).join(" — ")}
+                          align="center"
+                        />
+                      )}
+                    </span>
                   );
                 })}
               </div>
+              {globalSkillCatalogSource && globalSkillOptions.some((skill) => skill.category !== "" || skill.description !== "") && (
+                <small class="settings-global-skill-source">{t("settings.globalSkillsSource", { profile: globalSkillCatalogSource })}</small>
+              )}
               <div class="settings-global-skill-add">
                 <input
                   type="text"
@@ -2563,6 +2570,26 @@ function valuesFromConfig(config: MemoryProviderConfig): Record<string, boolean 
 
 function parseSkillLines(value: string): string[] {
   return [...new Set(value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean))];
+}
+
+/**
+ * Merges known-detail skills (from a loaded profile catalog) and bare names
+ * (already-selected global skills, or a free-form addition) into one sorted
+ * list. A name that only exists as a plain string (no catalog match) still
+ * gets a minimal placeholder entry so it renders in the picker.
+ */
+function mergeGlobalSkillOptions(
+  current: SkillSettings[],
+  detailed: readonly SkillSettings[],
+  bareNames: readonly string[],
+): SkillSettings[] {
+  const byName = new Map(current.map((skill) => [skill.name, skill]));
+  for (const skill of detailed) byName.set(skill.name, skill);
+  for (const name of bareNames) {
+    if (!name || byName.has(name)) continue;
+    byName.set(name, { name, category: "", description: "", enabled: false, provenance: "unknown", usage: 0 });
+  }
+  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function collectConfigChanges<T>(

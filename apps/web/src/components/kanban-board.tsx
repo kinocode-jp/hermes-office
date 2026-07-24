@@ -748,7 +748,7 @@ function UnconfirmedSubmissionNotice({
   );
 }
 
-export function KanbanBoard() {
+export function KanbanBoard({ hideTitle = false }: { hideTitle?: boolean } = {}) {
   const [columnCollapse, setColumnCollapse] = useState<Partial<Record<TaskStatus, boolean>>>({});
   const [dragOverColumn, setDragOverColumn] = useState<TaskStatus | null>(null);
   const [columnVisibility, setColumnVisibility] = useState(loadKanbanColumnVisibility);
@@ -828,11 +828,13 @@ export function KanbanBoard() {
 
   return (
     <section class="kanban-page">
-      <header class="page-title-row">
-        <div class="heading-info-group">
-          <h1>{t("kanban.title")}</h1>
-          <InfoTip text={t("kanban.boardHint")} align="start" side="bottom" />
-        </div>
+      <header class={`page-title-row ${hideTitle ? "is-title-hidden" : ""}`}>
+        {!hideTitle && (
+          <div class="heading-info-group">
+            <h1>{t("kanban.title")}</h1>
+            <InfoTip text={t("kanban.boardHint")} align="start" side="bottom" />
+          </div>
+        )}
         <div class="page-title-actions">
           <div class="kanban-filter-toolbar">
             <button

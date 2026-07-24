@@ -2,6 +2,7 @@ import { render } from "preact";
 import { selectedProfileId, applyChatGatewayEvent, applyChatHistory, applyOfficeSnapshot, installMobileRouteHistory, requireDeviceLogin, registerChatRuntime, registerKanbanRuntime, registerOfficeRetry, refreshKanbanBoard, setOfficeAccessUnavailable, setOfficeAuthenticated, setChatHistoryError, setChatHistoryLoading, setChatSessionConnecting, setChatSessionDisconnected, setChatSessionError, setChatSessionReady, setChatSocketState, setOfficeConnecting, setOfficeError, setOfficeEventStream } from "./store";
 import { App } from "./app";
 import { initializeAppearance } from "./appearance";
+import { installDashboardWiring } from "./dashboard-actions";
 import { connectChatApi } from "./chat-api";
 import { createKanbanApi } from "./kanban-api";
 import { connectOfficeApi } from "./office-api";
@@ -21,6 +22,7 @@ import "./appearance.css";
 initializeAppearance();
 initializeI18n();
 installMobileRouteHistory();
+installDashboardWiring();
 render(<App />, document.getElementById("app")!);
 
 let chatApi: ReturnType<typeof connectChatApi> | undefined;

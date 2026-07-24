@@ -715,6 +715,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .kicker { margin: 0 0 4px; color: var(--aqua); font: 700 var(--text-xs)/1.3 var(--font-sans); letter-spacing: .04em; text-transform: uppercase; }
 .eyebrow { margin: 0 0 4px; color: var(--aqua); font: 700 var(--text-xs)/1.3 var(--font-sans); letter-spacing: .04em; text-transform: uppercase; }
 .page-title-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; min-height: 0; }
+.page-title-row.is-title-hidden { justify-content: flex-end; }
 .page-title-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; justify-content: flex-end; min-width: 0; }
 
 .page-title-row h1, .placeholder-page h1, .office-heading h1, .live-settings__mast h1 {
@@ -743,18 +744,37 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .info-tip { position: relative; display: inline-flex; vertical-align: 2px; }
 .info-tip > .info-tip__trigger { display: grid; place-items: center; width: 18px; height: 18px; min-width: 0; min-height: 0 !important; padding: 0; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); background: transparent; font: 700 italic var(--text-sm)/1 var(--font-sans); cursor: help; }
 .info-tip > .info-tip__trigger:hover, .info-tip > .info-tip__trigger:focus-visible { border-color: var(--aqua); color: var(--aqua); }
-.info-tip__bubble { position: absolute; bottom: calc(100% + 8px); left: 50%; z-index: 120; width: max-content; max-width: min(300px, 72vw); padding: 9px 11px; transform: translateX(-50%); border: 1px solid var(--line); color: var(--paper); background: var(--surface-raised, var(--surface)); box-shadow: var(--shadow-sm); font: 400 var(--text-label, 12px)/1.6 var(--font-sans); letter-spacing: 0; text-align: left; text-transform: none; white-space: normal; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
-.info-tip--start .info-tip__bubble { left: -9px; transform: none; }
-.info-tip--end .info-tip__bubble { left: auto; right: -9px; transform: none; }
-.info-tip--bottom .info-tip__bubble { bottom: auto; top: calc(100% + 8px); }
-/* The narrow inspector panel clips anchored bubbles; span the route card instead. */
-.profile-live-route .info-tip { position: static; }
-.profile-live-route .info-tip__bubble { inset: 42px 10px auto 10px; transform: none; width: auto; max-width: none; }
-/* Click toggles the bubble; hover is a convenience preview on pointer devices only. */
-.info-tip.is-open .info-tip__bubble { opacity: 1; pointer-events: auto; }
-@media (hover: hover) and (pointer: fine) {
-  .info-tip:hover .info-tip__bubble { opacity: 1; }
+/*
+ * The bubble is rendered through a portal to document.body and positioned by
+ * JS (see info-tip.tsx) using `position: fixed` with viewport-clamped
+ * top/left inline styles. This keeps it fully visible even when the trigger
+ * lives inside a scrollable or overflow-clipped container (modals, panels,
+ * narrow columns) where a container-relative absolute bubble would be cut
+ * off. `.is-positioned` only gates the fade-in until JS has computed real
+ * coordinates, avoiding a one-frame flash at the default (0,0) position.
+ */
+.info-tip__bubble--portal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1200;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 20px));
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  color: var(--paper);
+  background: var(--surface-raised, var(--surface));
+  box-shadow: var(--shadow-sm);
+  font: 400 var(--text-label, 12px)/1.6 var(--font-sans);
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
+.info-tip__bubble--portal.is-positioned { opacity: 1; pointer-events: auto; }
 
 /* Profile inspector pane removed; profile details/settings use modals. */
 .profile-panel,
@@ -1118,7 +1138,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 0;
   border: 0;
 }
-.profile-settings-modal-body .settings-actions span {
+.profile-settings-modal-body .settings-actions > span {
   display: none;
 }
 .profile-settings-modal-body .settings-actions button {
@@ -1332,6 +1352,270 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   filter: saturate(0.88);
 }
 .chat-workspace-shell { height: 100%; min-height: 0; overflow: hidden; position: relative; }
+
+/* ---------- Dashboard grid ---------- */
+.main-stage--dashboard { display: grid; min-width: 0; min-height: 0; overflow: hidden; padding: 0; }
+.dashboard-view {
+  position: relative;
+  display: grid;
+  grid-auto-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--line);
+}
+/* Rows are explicit elements; each row lays out its panels with inline fr
+   templates (resizable). Separator tracks are 6px and rendered as elements. */
+.dashboard-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: var(--line);
+}
+/* Inline templates include 1px separator tracks that render as the hairline. */
+.dashboard-resize {
+  position: relative;
+  z-index: 4;
+  background: var(--line);
+  touch-action: none;
+  user-select: none;
+}
+.dashboard-resize--col { cursor: col-resize; }
+.dashboard-resize--row { cursor: row-resize; }
+/* The visual line is 1px; ::before extends the hit area to ~9px above content. */
+.dashboard-resize::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.dashboard-resize--col::before { left: -4px; right: -4px; cursor: col-resize; }
+.dashboard-resize--row::before { top: -4px; bottom: -4px; cursor: row-resize; }
+.dashboard-resize::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
+  opacity: 0;
+  transition: opacity .12s ease;
+  pointer-events: none;
+}
+.dashboard-resize--col::after { width: 3px; height: 34px; }
+.dashboard-resize--row::after { width: 34px; height: 3px; }
+.dashboard-resize:hover::after,
+.dashboard-resize:active::after { opacity: 1; }
+/* The transient limit note floats over the grid instead of taking a cell. */
+.dashboard-view > .workspace-drop-note {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 6;
+  transform: translateX(-50%);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
+.dashboard-view.is-empty {
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  background: var(--surface);
+}
+.dashboard-empty-copy { display: grid; justify-items: center; gap: 6px; color: var(--muted); text-align: center; }
+.dashboard-empty-copy b { font: 700 var(--text-md)/1.3 var(--font-sans); }
+.dashboard-empty-copy small { font: 500 var(--text-sm)/1.4 var(--font-sans); }
+.dashboard-panel {
+  position: relative;
+  display: grid;
+  grid-template-rows: 34px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+.dashboard-panel-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  cursor: grab;
+  user-select: none;
+}
+.dashboard-panel-head:active { cursor: grabbing; }
+.dashboard-panel-head.is-dragging { opacity: .6; }
+.dashboard-panel-kind { color: var(--muted); font: 700 var(--text-xs)/1 var(--font-sans); text-transform: uppercase; letter-spacing: .04em; }
+.dashboard-panel-title { overflow: hidden; color: var(--muted); font: 500 var(--text-xs)/1 var(--font-sans); text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-panel-close { min-width: 28px; min-height: 28px; }
+.dashboard-panel-body { display: grid; min-width: 0; min-height: 0; overflow: auto; }
+.dashboard-panel-body > * { min-width: 0; }
+.dashboard-panel--chat .dashboard-panel-body { overflow: hidden; }
+.dashboard-panel--chat .chat-pane { border-right: 0; min-width: 0; }
+.dashboard-panel--studio .dashboard-panel-body,
+.dashboard-panel--kanban .dashboard-panel-body,
+.dashboard-panel--teams .dashboard-panel-body,
+.dashboard-panel--scheduled .dashboard-panel-body { padding: 0; }
+.dashboard-panel-missing { margin: 0; padding: 16px; color: var(--muted); font: 500 var(--text-sm)/1.4 var(--font-sans); }
+
+/* ---------- Profiles panel ---------- */
+.profiles-panel { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); align-content: start; min-height: 0; }
+.profiles-panel-toolbar { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.profiles-panel-search { flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--paper); background: var(--surface); font: 500 var(--text-sm)/1 var(--font-sans); }
+.profiles-panel-add { min-width: 34px; min-height: 34px; padding: 0; font: 700 var(--text-md)/1 var(--font-sans); }
+.profiles-panel-create { display: flex; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--aqua) 4%, transparent); }
+.profiles-panel-create input { flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 0 10px; border: 1px solid var(--aqua); border-radius: var(--radius-sm); color: var(--paper); background: var(--surface); font: 600 var(--text-sm)/1 var(--font-sans); }
+.profiles-panel-error { margin: 0; padding: 6px 10px; color: var(--coral); background: color-mix(in srgb, var(--coral) 8%, transparent); font: 600 var(--text-xs)/1.4 var(--font-sans); }
+.profiles-panel-empty { margin: 0; padding: 16px 10px; color: var(--muted); font: 500 var(--text-sm)/1.4 var(--font-sans); }
+.profiles-panel-list { display: grid; align-content: start; gap: 1px; min-height: 0; overflow-y: auto; background: var(--line); }
+.profiles-panel-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 2px; padding: 0 6px 0 0; background: var(--surface); }
+.profiles-panel-main { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-width: 0; min-height: 46px; padding: 4px 8px; border: 0; color: var(--ink); background: transparent; text-align: left; cursor: pointer; }
+.profiles-panel-main:hover { background: color-mix(in srgb, var(--aqua) 6%, transparent); }
+.profiles-panel-copy { display: grid; min-width: 0; }
+.profiles-panel-copy b { overflow: hidden; font: 700 var(--text-sm)/1.3 var(--font-sans); text-overflow: ellipsis; white-space: nowrap; }
+.profiles-panel-copy small { overflow: hidden; color: var(--muted); font: 500 var(--text-xs)/1.3 var(--font-sans); text-overflow: ellipsis; white-space: nowrap; }
+.profiles-panel-meta { display: inline-flex; align-items: center; gap: 7px; }
+.profiles-panel-meta small { color: var(--muted); font: 600 var(--text-xs)/1 var(--font-sans); white-space: nowrap; }
+.profiles-panel-row .icon-button { min-width: 32px; min-height: 32px; }
+.profiles-panel-delete:not(:disabled):hover { color: var(--coral); }
+.profiles-panel-delete:disabled { opacity: .35; }
+
+/* ---------- Kanban inside a dashboard panel ---------- */
+/* The panel body is a size container so the board can adapt to panel width
+   instead of the viewport. */
+.dashboard-panel--kanban .dashboard-panel-body {
+  container-type: inline-size;
+  container-name: kanban-panel;
+}
+.dashboard-panel--kanban .kanban-page {
+  min-height: 100%;
+  padding: 8px 10px 14px;
+  overflow: visible; /* keep one scroll context (panel body) so sticky heads work */
+}
+/* Column headers stay visible while the panel scrolls vertically. */
+.dashboard-panel--kanban .kanban-column-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--surface-2);
+}
+.dashboard-panel--kanban .kanban-board.is-stream .kanban-column-head {
+  background: var(--bg);
+}
+/* Horizontal column scrolling snaps per column for readability. */
+.dashboard-panel--kanban .kanban-board {
+  min-width: 0;
+  scroll-snap-type: x proximity;
+}
+.dashboard-panel--kanban .kanban-column {
+  scroll-snap-align: start;
+  min-height: 320px;
+}
+/* Narrow panel: single-column stream, compact cards (title + assignee badge +
+   comment count). Editing moves to the task detail modal, which the card
+   already opens on click. */
+@container kanban-panel (max-width: 620px) {
+  .kanban-board {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    min-width: 0;
+    overflow: visible;
+    scroll-snap-type: none;
+  }
+  .kanban-column,
+  .kanban-board.is-focus-mode .kanban-column:not(.is-collapsed) {
+    flex: none;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    min-height: 0;
+  }
+  .kanban-column.is-collapsed {
+    width: auto;
+    min-width: 0;
+    min-height: 0;
+  }
+  .task-card .task-assignee-select,
+  .task-card .task-status-select,
+  .task-card > .task-status-info {
+    display: none;
+  }
+  .task-card { padding: 9px 10px; }
+  .task-card-content { margin-bottom: 4px; }
+}
+/* Embedded panels: their own chrome collapses to the toolbar only. */
+.office-wrap--embedded .office-heading { justify-content: flex-end; }
+.teams-page-head.is-title-hidden,
+.scheduled-sessions-page-head.is-title-hidden { min-height: 0; }
+/* Narrow panels: let the scheduled group header wrap instead of forcing overflow. */
+.dashboard-panel--scheduled .scheduled-session-group > header {
+  flex-wrap: wrap;
+}
+.dashboard-panel--scheduled .scheduled-session-group-actions {
+  flex-wrap: wrap;
+  white-space: normal;
+  min-width: 0;
+}
+.dashboard-panel--scheduled .scheduled-session-group-toggle { min-width: 0; }
+.dashboard-panel--scheduled .scheduled-session-group-title { min-width: 0; }
+.dashboard-panel--scheduled .scheduled-session-group-title b,
+.dashboard-panel--scheduled .scheduled-session-group-title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dashboard-panel.has-drop-before > .workspace-drop-line { left: -3px; }
+.dashboard-panel.has-drop-after > .workspace-drop-line.is-after { right: -3px; }
+
+/* Sidebar: dashboard switcher */
+.sidebar-dashboards { display: grid; gap: 2px; flex: 0 0 auto; }
+.sidebar-dashboards .sidebar-section-head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px; }
+.sidebar-dashboards-title { color: var(--muted); font: 700 var(--text-xs)/1.6 var(--font-sans); text-transform: uppercase; letter-spacing: .05em; }
+.sidebar-dashboard-add { min-width: 26px; min-height: 26px; border: 0; border-radius: var(--radius-sm); color: var(--muted); background: transparent; font: 700 var(--text-sm)/1 var(--font-sans); cursor: pointer; }
+.sidebar-dashboard-add:hover:not(:disabled) { color: var(--paper); background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.sidebar-dashboard-add:disabled { opacity: .4; cursor: default; }
+.sidebar-dashboard-list { display: grid; gap: 2px; }
+.sidebar-dashboard-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
+.sidebar-dashboard-row .sidebar-item-menu-trigger { opacity: 0; }
+.sidebar-dashboard-row:hover .sidebar-item-menu-trigger,
+.sidebar-dashboard-row:focus-within .sidebar-item-menu-trigger { opacity: 1; }
+.sidebar-dashboard-button { display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 9px; min-width: 0; min-height: 36px; padding: 0 11px; border: 0; color: var(--muted); background: transparent; font: 600 var(--text-sm)/1 var(--font-sans); text-align: left; cursor: pointer; }
+.sidebar-dashboard-button > span { display: grid; place-items: center; }
+.sidebar-dashboard-button > b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-dashboard-button:hover { color: var(--paper); background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.sidebar-dashboard-row.is-active .sidebar-dashboard-button { color: var(--night); background: var(--paper); }
+.sidebar-dashboard-rename { padding: 2px 8px; }
+.sidebar-dashboard-rename input { width: 100%; min-height: 30px; padding: 0 8px; border: 1px solid var(--aqua); border-radius: var(--radius-sm); color: var(--paper); background: var(--surface); font: 600 var(--text-sm)/1 var(--font-sans); }
+
+@media (max-width: 768px) {
+  .dashboard-view {
+    display: block;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .dashboard-row {
+    display: grid;
+    grid-auto-flow: row;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-auto-columns: unset;
+    grid-auto-rows: minmax(320px, auto);
+  }
+  .dashboard-resize { display: none; }
+  .dashboard-panel { min-height: 320px; }
+  .sidebar-dashboards { display: flex; flex: 1 1 auto; min-width: 0; overflow-x: auto; }
+  .sidebar-dashboards .sidebar-section-head { padding: 0 2px; }
+  .sidebar-dashboards-title { display: none; }
+  .sidebar-dashboard-list { display: flex; gap: 2px; }
+  .sidebar-dashboard-row { grid-template-columns: minmax(0, 1fr); }
+  .sidebar-dashboard-row .sidebar-item-menu-trigger { display: none; }
+  .sidebar-dashboard-button { grid-template-columns: 1fr; justify-items: center; min-height: 56px; min-width: 56px; padding: 4px 6px; }
+  .sidebar-dashboard-button > b { display: none; }
+}
+
 .chat-workspace-shell.is-drop-target { background: color-mix(in srgb, var(--aqua) 4%, transparent); }
 .workspace-drop-hint,
 .workspace-drop-banner,
@@ -1440,6 +1724,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .chat-workspace.panes-3 { --pane-count: 3; }
 .chat-workspace.panes-4 { --pane-count: 4; }
 .chat-pane { display: grid; grid-template-rows: 43px minmax(0, 1fr) auto; min-width: 280px; min-height: 0; overflow: hidden; border-right: 1px solid var(--line); border-top: 1px solid var(--session-color, var(--line)); background: var(--surface); }
+/* Headerless panes (dashboard panels, task-detail): no 43px header row, so the
+   transcript takes the flexible row and the composer keeps its content height. */
+.chat-pane.is-headerless { grid-template-rows: minmax(0, 1fr) auto; }
 .chat-pane.is-active { box-shadow: var(--shadow-sm); }
 .chat-header { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto auto 34px; align-items: center; gap: 9px; padding: 0 7px 0 11px; border-bottom: 1px solid var(--line); cursor: grab; user-select: none; touch-action: none; }
 .chat-header:active { cursor: grabbing; }
