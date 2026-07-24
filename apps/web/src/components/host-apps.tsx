@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { HostAppStatus } from "@hermes-studio/protocol";
 import { installObsidian, loadObsidianStatus } from "../host-apps-api";
 import { locale, t, type TranslationKey } from "../i18n";
+import { CheckIcon, GraphIcon, PlusIcon, RefreshIcon } from "./icons";
+import { InfoTip } from "./info-tip";
+import { ObsidianGraphModal } from "./obsidian-graph-modal";
 import "./host-apps.css";
 
 const PHASE_LABELS: Record<HostAppStatus["phase"], TranslationKey> = {
@@ -20,12 +23,13 @@ const FAILURE_LABELS: Record<NonNullable<HostAppStatus["failure"]>, TranslationK
   install_timeout: "hostApps.failure.installTimeout",
 };
 
-export function HostApps({ permitted }: { permitted: boolean }) {
+export function HostApps({ permitted, vaultAccess }: { permitted: boolean; vaultAccess: boolean }) {
   const [status, setStatus] = useState<HostAppStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const generation = useRef(0);
   const [, setLocaleRevision] = useState(0);
+  const [graphOpen, setGraphOpen] = useState(false);
 
   const reload = useCallback(async (showLoading = true) => {
     const currentGeneration = ++generation.current;
@@ -80,7 +84,9 @@ export function HostApps({ permitted }: { permitted: boolean }) {
           <span>{t("hostApps.eyebrow")}</span>
           <h2 id="host-apps-title">{t("hostApps.title")}</h2>
         </div>
-        <button type="button" onClick={() => void reload()} disabled={loading}>{t("hostApps.reload")}</button>
+        <button type="button" onClick={() => void reload()} disabled={loading} aria-label={t("hostApps.reload")} title={t("hostApps.reload")}>
+          <RefreshIcon />
+        </button>
       </header>
 
       <article class={`host-apps__card is-${phase}`}>
@@ -88,21 +94,36 @@ export function HostApps({ permitted }: { permitted: boolean }) {
         <div class="host-apps__copy">
           <div class="host-apps__name-row">
             <h3>Obsidian</h3>
-            <span>{status ? t(PHASE_LABELS[status.phase]) : t("hostApps.status.checking")}</span>
+            <span class="host-apps__status">
+              <i class="host-apps__status-dot" aria-hidden="true" />
+              <InfoTip text={`${status ? t(PHASE_LABELS[status.phase]) : t("hostApps.status.checking")} · ${detail}`} align="start" />
+            </span>
           </div>
-          <p>{detail}</p>
           <small>{t("hostApps.method")}</small>
         </div>
         <div class="host-apps__action">
           {status?.installed ? (
-            <strong aria-label={t("hostApps.status.installed")}>✓</strong>
+            <>
+              <strong aria-label={t("hostApps.status.installed")} title={t("hostApps.status.installed")}><CheckIcon /></strong>
+              <button
+                type="button"
+                disabled={!vaultAccess}
+                onClick={() => setGraphOpen(true)}
+                aria-label={t("obsidianGraph.open")}
+                title={t("obsidianGraph.open")}
+              >
+                <GraphIcon />
+              </button>
+            </>
           ) : (
             <button
               type="button"
               onClick={() => void beginInstall()}
               disabled={loading || !permitted || status?.canInstall !== true || phase === "installing"}
+              aria-label={phase === "installing" ? t("hostApps.installing") : t("hostApps.install")}
+              title={phase === "installing" ? t("hostApps.installing") : t("hostApps.install")}
             >
-              {phase === "installing" ? t("hostApps.installing") : t("hostApps.install")}
+              <PlusIcon />
             </button>
           )}
         </div>
@@ -110,6 +131,7 @@ export function HostApps({ permitted }: { permitted: boolean }) {
 
       {!permitted && <p class="host-apps__notice">{t("hostApps.ownerRequired")}</p>}
       {error && <p class="host-apps__notice is-error" role="alert">{t("hostApps.loadFailed")}</p>}
+      <ObsidianGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} />
     </section>
   );
 }

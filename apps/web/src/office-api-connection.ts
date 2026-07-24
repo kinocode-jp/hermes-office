@@ -125,11 +125,11 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       snapshotRequestsAwaitingSession.add(identity.requestGeneration);
       try { await ensureOfficeSession(serverUrl); } finally { snapshotRequestsAwaitingSession.delete(identity.requestGeneration); }
       const health = await officeFetchJson<HealthResponse>("/api/v1/health", {}, serverUrl);
-      if (!isHealthResponse(health)) throw new Error("Office Server health response is incompatible.");
+      if (!isHealthResponse(health)) throw new Error("Studio Server health response is incompatible.");
       const snapshot = await officeFetchJson<OfficeSnapshot>("/api/v1/snapshot", {}, serverUrl);
-      if (!isOfficeSnapshot(snapshot)) throw new Error("Office Server snapshot is incompatible.");
+      if (!isOfficeSnapshot(snapshot)) throw new Error("Studio Server snapshot is incompatible.");
       if (snapshot.capabilities.protocolVersion !== health.protocolVersion) {
-        throw new Error("Office Server protocol versions do not match.");
+        throw new Error("Studio Server protocol versions do not match.");
       }
       if (!isCurrentSnapshotRequest(identity)) return undefined;
       clearSnapshotRetry();
@@ -239,7 +239,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
         reportRecoveryUnavailable(errorMessage(error));
         if (error instanceof OfficeSessionUnavailableError && !error.retryAutomatically) return;
         const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
-        if (!scheduleEventReconnect(retryAfterMs)) reportRecoveryUnavailable("Office Serverへ再接続できませんでした。手動で再試行してください。");
+        if (!scheduleEventReconnect(retryAfterMs)) reportRecoveryUnavailable("Studio Serverへ再接続できませんでした。手動で再試行してください。");
       }
       return;
     }
@@ -290,14 +290,14 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       reportEventStream("closed");
       if (stopped) return;
       if (!socketOpened && recoveryEventOpenRevision !== undefined) {
-        rejectOfficeSynchronization(serverUrl, recoveryEventOpenRevision, "Office event stream did not open.");
+        rejectOfficeSynchronization(serverUrl, recoveryEventOpenRevision, "Studio event stream did not open.");
         recoveryEventOpenRevision = undefined;
         recoveryEventOpenGeneration = undefined;
-        reportRecoveryUnavailable("Office event stream did not open.");
+        reportRecoveryUnavailable("Studio event stream did not open.");
         return;
       }
       if (ambiguousPreOpenFailure && preOpenFailureCount >= MAX_PREOPEN_WEBSOCKET_FAILURES) {
-        reportRecoveryUnavailable("Office WebSocketへ接続できませんでした。再接続をお試しください。");
+        reportRecoveryUnavailable("Studio WebSocketへ接続できませんでした。再接続をお試しください。");
         return;
       }
       if (!needsAuthentication || rejectedRevision === undefined) {
@@ -323,7 +323,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
           reportRecoveryUnavailable(errorMessage(error));
           if (error instanceof OfficeSessionUnavailableError && !error.retryAutomatically) return;
           const retryAfterMs = error instanceof OfficeSessionUnavailableError ? error.retryAfterMs : 0;
-          if (!scheduleEventReconnect(retryAfterMs)) reportRecoveryUnavailable("Office Serverへ再接続できませんでした。手動で再試行してください。");
+          if (!scheduleEventReconnect(retryAfterMs)) reportRecoveryUnavailable("Studio Serverへ再接続できませんでした。手動で再試行してください。");
         },
       );
     });
@@ -364,7 +364,7 @@ export function connectOfficeApi(callbacks: OfficeApiCallbacks, configuredServer
       connectionGeneration = allocateOfficeConnectionGeneration();
       latestSnapshotRequestGeneration = 0;
       recoverySynchronizationGeneration = undefined;
-      if (recoverySynchronizationRevision !== undefined) rejectOfficeSynchronization(serverUrl, recoverySynchronizationRevision, "Office recovery was stopped.");
+      if (recoverySynchronizationRevision !== undefined) rejectOfficeSynchronization(serverUrl, recoverySynchronizationRevision, "Studio recovery was stopped.");
       recoverySynchronizationRevision = undefined;
       rearmEventsAfterRecovery = false;
       recoveryEventOpenRevision = undefined;

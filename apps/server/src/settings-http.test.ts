@@ -324,6 +324,80 @@ function makeAdapter(calls: Array<{ method: string; args: unknown[] }>): HermesS
   } as HermesSettingsAdapter;
 }
 
+test("profile projects routes proxy the official Hermes projects adapter", async (t) => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const record = <T>(method: string, value: T) => async (...args: unknown[]): Promise<T> => { calls.push({ method, args }); return value; };
+  const project = {
+    id: "p1",
+    slug: "web",
+    name: "Web",
+    description: null,
+    icon: null,
+    color: null,
+    boardSlug: null,
+    primaryPath: "/repo",
+    archived: false,
+    createdAt: 1,
+    folders: [{ path: "/repo", label: null, isPrimary: true, addedAt: 1 }],
+  };
+  const projects = {
+    listProjects: record("listProjects", { projects: [project], activeId: null }),
+    createProject: record("createProject", { project }),
+    updateProject: record("updateProject", { project }),
+    deleteProject: record("deleteProject", { projects: [], activeId: null }),
+    addFolder: record("addFolder", { project }),
+    removeFolder: record("removeFolder", { project }),
+  };
+  const directory = await mkdtemp(join(tmpdir(), "hermes-studio-http-projects-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const server = createServer(async (request, response) => {
+    const result = await routeSettingsHttp(
+      request,
+      new URL(request.url ?? "/", "http://office.local"),
+      {
+        settings: makeAdapter([]),
+        globalSettings: new OfficeGlobalSettingsStore(join(directory, "global.json")),
+        projects,
+      },
+      4_096,
+    );
+    response.writeHead(result.status, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(result.body));
+  });
+  const origin = await listen(server);
+  t.after(() => server.close());
+
+  const listed = await jsonFetch(`${origin}/api/v1/profiles/coder/projects`, "GET", undefined);
+  assert.equal(listed.status, 200);
+  assert.equal((listed.body as { projects: unknown[] }).projects.length, 1);
+
+  const created = await jsonFetch(`${origin}/api/v1/profiles/coder/projects`, "POST", { name: "Web", path: "/repo", isPrimary: true });
+  assert.equal(created.status, 200);
+  assert.deepEqual(calls.at(-1), { method: "createProject", args: ["coder", { name: "Web", path: "/repo", isPrimary: true }] });
+
+  const renamed = await jsonFetch(`${origin}/api/v1/profiles/coder/projects/p1`, "PATCH", { name: "Web 2" });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(calls.at(-1), { method: "updateProject", args: ["coder", "p1", { name: "Web 2" }] });
+
+  const added = await jsonFetch(`${origin}/api/v1/profiles/coder/projects/p1/folders`, "POST", { path: "/repo2" });
+  assert.equal(added.status, 200);
+  assert.deepEqual(calls.at(-1), { method: "addFolder", args: ["coder", "p1", { path: "/repo2" }] });
+
+  const unbound = await jsonFetch(`${origin}/api/v1/profiles/coder/projects/p1/folders`, "DELETE", { path: "/repo2" });
+  assert.equal(unbound.status, 200);
+  assert.deepEqual(calls.at(-1), { method: "removeFolder", args: ["coder", "p1", "/repo2"] });
+
+  const deleted = await jsonFetch(`${origin}/api/v1/profiles/coder/projects/p1`, "DELETE", undefined);
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(calls.at(-1), { method: "deleteProject", args: ["coder", "p1"] });
+
+  const invalid = await jsonFetch(`${origin}/api/v1/profiles/coder/projects`, "POST", { name: "Web", bogus: true });
+  assert.equal(invalid.status, 400);
+
+  const missingName = await jsonFetch(`${origin}/api/v1/profiles/coder/projects`, "POST", { path: "/repo" });
+  assert.equal(missingName.status, 400);
+});
+
 async function listen(server: ReturnType<typeof createServer>): Promise<string> {
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const address = server.address() as AddressInfo;

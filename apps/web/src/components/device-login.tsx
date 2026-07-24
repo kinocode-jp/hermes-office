@@ -10,7 +10,7 @@ import {
 } from "../store";
 import { classifyDeviceLoginFailure, shouldShowDeviceEnrollmentForm } from "../auth-state";
 
-/* ── WebGL nebula shader ── */
+/* ── WebGL bright-lab shader ── */
 const VERT = `attribute vec2 a_pos;void main(){gl_Position=vec4(a_pos,0,1);}`;
 const FRAG = `
 precision mediump float;
@@ -32,30 +32,30 @@ void main(){
   float n2=fbm(p*3.0-t*vec2(.4,.6)+3.7);
   float n3=fbm(p*1.8+t*vec2(-.3,.5)+7.1);
 
-  vec3 c1=vec3(.02,.08,.12);
-  vec3 c2=vec3(.04,.22,.20);
-  vec3 c3=vec3(.06,.10,.22);
-  vec3 c4=vec3(.15,.06,.10);
+  vec3 c1=vec3(.965,.975,.985);
+  vec3 c2=vec3(.86,.945,.925);
+  vec3 c3=vec3(.90,.94,.98);
+  vec3 c4=vec3(.98,.90,.88);
 
   vec3 col=mix(c1,c2,smoothstep(.3,.7,n1));
   col=mix(col,c3,smoothstep(.4,.8,n2)*.6);
-  col=mix(col,c4,u_error*smoothstep(.3,.6,n3)*.5);
-  col+=vec3(.01,.04,.04)*u_connect*n1;
+  col=mix(col,c4,u_error*smoothstep(.3,.6,n3)*.6);
+  col-=vec3(.02,.05,.045)*u_connect*n1;
 
   float vig=1.-dot(p*.8,p*.8);
   vig=smoothstep(0.,.9,vig);
-  col*=vig;
+  col=mix(col*.94,col,vig);
 
   vec2 grid=abs(fract(p*8.)-.5);
   float line=min(grid.x,grid.y);
   float gridAlpha=smoothstep(.0,.02,line);
-  col=mix(col+vec3(.02,.06,.05),col,gridAlpha)*mix(1.,.85,gridAlpha);
+  col=mix(col-vec3(.03,.05,.05),col,gridAlpha);
 
-  float spot=smoothstep(.62,.65,n1*n2)*.15;
-  col+=vec3(.1,.35,.3)*spot;
+  float spot=smoothstep(.62,.65,n1*n2)*.12;
+  col-=vec3(.05,.10,.09)*spot;
 
   float scan=smoothstep(.003,0.,abs(fract(uv.y-t*2.)-.5)-.498);
-  col+=vec3(.05,.15,.12)*scan*.3;
+  col-=vec3(.04,.07,.06)*scan*.3;
 
   gl_FragColor=vec4(col,1);
 }`;
@@ -188,9 +188,10 @@ export function DeviceLogin() {
         class="dl-lang"
         type="button"
         aria-label={t("language.label")}
+        title={t("language.label")}
         onClick={() => setLocale(locale.value === "ja" ? "en" : "ja")}
       >
-        {locale.value === "ja" ? "EN" : "日本語"}
+        <span aria-hidden="true">{locale.value === "ja" ? "A" : "文"}</span>
       </button>
 
       {/* Content */}

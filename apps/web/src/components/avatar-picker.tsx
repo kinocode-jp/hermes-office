@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useRef, useState, useMemo } from "preact/hooks";
 import { avatarForProfile, beginCustomAvatarChange, DEFAULT_CHARACTER_COUNT, isAvatarChangeCurrent, resetProfileAvatar, setCreatureAvatar, setCustomAvatar } from "../avatar-preferences";
 import { CharacterPortrait } from "./character-portrait";
 import { InfoTip } from "./info-tip";
+import { CloseIcon, ResetIcon, UploadIcon } from "./icons";
 import { t } from "../i18n";
+import { appModalSizes, createModalResizeHandlers, getAppModalSize, shouldIgnoreModalOutsideClose } from "../app-modal-layout";
 import { canRestoreModalFocus, isTopmostModal, registerModal } from "../modal-layer";
 
 type AvatarPickerProps = {
@@ -78,6 +80,11 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
     return () => { unregister?.(); document.removeEventListener("keydown", handleKeyDown); if (canRestoreModalFocus(previousFocus)) previousFocus?.focus(); };
   }, []);
 
+  const _avatarSizes = appModalSizes.value;
+  const modalSize = getAppModalSize("avatar-picker");
+  const resize = useMemo(() => createModalResizeHandlers("avatar-picker"), []);
+  useEffect(() => () => resize.dispose(), [resize]);
+
   async function loadCustomImage(file?: File): Promise<void> {
     setError(null);
     if (!file || file.size > MAX_FILE_BYTES || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
@@ -109,8 +116,17 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
   }
 
   return (
-    <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (!busy && event.currentTarget === event.target) onClose(); }}>
-      <section ref={dialogRef} class="avatar-picker" role="dialog" aria-modal="true" aria-labelledby="avatar-picker-title" aria-describedby="avatar-picker-description" tabIndex={-1}>
+    <div class="avatar-picker-backdrop" role="presentation" onClick={(event) => { if (shouldIgnoreModalOutsideClose()) return; if (!busy && event.currentTarget === event.target) onClose(); }}>
+      <section
+        ref={dialogRef}
+        class="avatar-picker"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="avatar-picker-title"
+        aria-describedby="avatar-picker-description"
+        tabIndex={-1}
+        style={{ width: `${modalSize.width}px`, height: `${modalSize.height}px` }}
+      >
         <header>
           <div>
             <small>{t("avatar.kicker")}</small>
@@ -119,7 +135,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
               <InfoTip text={`${t("avatar.description")} ${t("avatar.note")}`} align="end" />
             </div>
           </div>
-          <button ref={closeButtonRef} type="button" disabled={busy} onClick={onClose} aria-label={t("common.close")}>×</button>
+          <button ref={closeButtonRef} type="button" disabled={busy} onClick={onClose} aria-label={t("common.close")} title={t("common.close")}><CloseIcon /></button>
         </header>
         <p id="avatar-picker-description" class="visually-hidden">{t("avatar.description")}</p>
         <div class="avatar-choice-grid">
@@ -130,6 +146,7 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
               class={selected.kind === "creature" && selected.index === index ? "is-selected" : ""}
               disabled={uploading || resetting}
               aria-label={t("avatar.creature", { number: index + 1 })}
+              title={t("avatar.creature", { number: index + 1 })}
               aria-pressed={selected.kind === "creature" && selected.index === index}
               onClick={() => { setCreatureAvatar(profileId, index); onClose(); }}
             >
@@ -144,10 +161,20 @@ export function AvatarPicker({ profileId, profileName, onClose }: AvatarPickerPr
         </div>
         <div class="avatar-picker-actions">
           <input ref={inputRef} type="file" hidden aria-hidden="true" tabIndex={-1} disabled={uploading || resetting} accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void loadCustomImage(file); }} />
-          <button type="button" class="avatar-upload-button" disabled={uploading || resetting} onClick={() => inputRef.current?.click()}>{t("avatar.upload")}</button>
-          <button type="button" class="avatar-reset-button" aria-busy={resetting} disabled={uploading || resetting} onClick={() => void resetAvatar()}>{resetting ? t("avatar.resetting") : t("avatar.reset")}</button>
+          <button type="button" class="avatar-upload-button" disabled={uploading || resetting} onClick={() => inputRef.current?.click()} aria-label={t("avatar.upload")} title={t("avatar.upload")}><UploadIcon /></button>
+          <button type="button" class="avatar-reset-button" aria-busy={resetting} disabled={uploading || resetting} onClick={() => void resetAvatar()} aria-label={resetting ? t("avatar.resetting") : t("avatar.reset")} title={resetting ? t("avatar.resetting") : t("avatar.reset")}><ResetIcon /></button>
         </div>
         {error && <p class="avatar-picker-error" role="alert">{error}</p>}
+        {resize.handles.map((handle) => (
+          <div
+            key={handle.edge}
+            class={`app-modal-resize ${handle.className}`}
+            role="separator"
+            aria-label={t("common.resizeModal")}
+            title={t("common.resizeModal")}
+            onPointerDown={resize.begin(handle.edge)}
+          />
+        ))}
       </section>
     </div>
   );

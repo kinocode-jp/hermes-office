@@ -1,4 +1,5 @@
 import { render } from "preact";
+import { selectedProfileId, applyChatGatewayEvent, applyChatHistory, applyOfficeSnapshot, installMobileRouteHistory, requireDeviceLogin, registerChatRuntime, registerKanbanRuntime, registerOfficeRetry, refreshKanbanBoard, setOfficeAccessUnavailable, setOfficeAuthenticated, setChatHistoryError, setChatHistoryLoading, setChatSessionConnecting, setChatSessionDisconnected, setChatSessionError, setChatSessionReady, setChatSocketState, setOfficeConnecting, setOfficeError, setOfficeEventStream } from "./store";
 import { App } from "./app";
 import { initializeAppearance } from "./appearance";
 import { connectChatApi } from "./chat-api";
@@ -9,29 +10,7 @@ import { isLocalOfficeClient } from "./auth-state";
 import { notifyAccessAuditChanged, shouldRefreshAccessAudit } from "./audit-api";
 import { initializeI18n } from "./i18n";
 import { initializeInventory, registerInventorySnapshotRefresh } from "./inventory";
-import {
-  applyChatGatewayEvent,
-  applyChatHistory,
-  applyOfficeSnapshot,
-  installMobileRouteHistory,
-  requireDeviceLogin,
-  registerChatRuntime,
-  registerKanbanRuntime,
-  registerOfficeRetry,
-  refreshKanbanBoard,
-  setOfficeAccessUnavailable,
-  setOfficeAuthenticated,
-  setChatHistoryError,
-  setChatHistoryLoading,
-  setChatSessionConnecting,
-  setChatSessionDisconnected,
-  setChatSessionError,
-  setChatSessionReady,
-  setChatSocketState,
-  setOfficeConnecting,
-  setOfficeError,
-  setOfficeEventStream
-} from "./store";
+import { ensureSettingsPrefetch } from "./settings-prefetch";
 import "./fonts.css";
 import "./styles.css";
 import "./components/avatar-picker.css";
@@ -76,6 +55,7 @@ const officeApi = connectOfficeApi({
     if (snapshot.capabilities.runtime.state === "ready") {
       void refreshKanbanBoard();
       void refreshTeams({ acknowledgeErrors: true });
+      ensureSettingsPrefetch(selectedProfileId.value || snapshot.profiles[0]?.id || null);
     } else if (!snapshot.capabilities.features.includes("demo")) {
       void refreshTeams({ acknowledgeErrors: true });
     }
@@ -88,7 +68,7 @@ const officeApi = connectOfficeApi({
     if (isLocalOfficeClient(location)) setOfficeAuthenticated(serverUrl);
     // Keep the concrete server/client error when present so snapshot/auth
     // incompatibilities are not remapped to a generic network outage.
-    else setOfficeAccessUnavailable(serverUrl, message.trim() || "Office Serverへ接続できませんでした。ネットワークを確認してください。");
+    else setOfficeAccessUnavailable(serverUrl, message.trim() || "Studio Serverへ接続できませんでした。ネットワークを確認してください。");
   },
   onEvent(event) {
     if (event.topic === "kanban.changed" || event.topic === "resync.required") void refreshKanbanBoard();

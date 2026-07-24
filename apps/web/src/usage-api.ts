@@ -41,7 +41,7 @@ export type TokenUsageChartBar = {
 };
 
 /**
- * Loads the last `days` of Office token usage (Asia/Tokyo day buckets).
+ * Loads the last `days` of Studio token usage (Asia/Tokyo day buckets).
  * Defaults to 14 for the office surface chart.
  */
 export async function fetchTokenUsage(days = DEFAULT_DAYS): Promise<TokenUsageSnapshot> {

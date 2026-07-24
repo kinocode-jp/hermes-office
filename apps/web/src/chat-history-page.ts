@@ -38,7 +38,7 @@ export function normalizeHistoryPage(value: unknown, storedSessionId: string): {
     ? pagination.nextCursor
     : undefined;
   if ((hasMore && nextCursor === undefined) || (hasMore && truncated) || pagination?.direction !== "older") {
-    throw new Error("Office Serverの履歴ページ情報に互換性がありません。");
+    throw new Error("Studio Serverの履歴ページ情報に互換性がありません。");
   }
   const truncationReason = typeof pagination?.truncationReason === "string" ? pagination.truncationReason : undefined;
   return {

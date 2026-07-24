@@ -126,8 +126,13 @@ invalid-digest registry fails closed and does not reopen enrollment.
   operation (owner tier). Remote owners receive it only under the same explicit
   `HERMES_STUDIO_REMOTE_PRIVILEGED=true` deployment gate. The Obsidian handler
   accepts no request body and runs one absolute Homebrew executable with the
-  fixed argument list `install --cask obsidian`; installer output is discarded
+  fixed argument list `install --cask obsidian`; installer output is discarded. Local Hermes Agent updates use the same owner/remote-privileged gate with fixed argv `update --yes` (`hermes-agent.update`); updater output is discarded
   and never reflected to clients or logs. See [`HOST-APPS.md`](HOST-APPS.md).
+- Obsidian graph reads use the owner-tier, remote-privileged
+  `obsidian.vault.read` operation. Vault paths come only from Obsidian's local
+  registry; request parameters are opaque ids. Responses exclude note bodies
+  and absolute paths, skip symlinks and application/config directories, and
+  enforce note, node, edge, and response-size bounds.
 - Managed and adopted Hermes endpoints are restricted to loopback.
 - Hermes child processes receive a constructed environment allowlist rather
   than Office Server's complete environment; Office auth/proxy configuration

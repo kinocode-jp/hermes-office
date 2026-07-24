@@ -93,20 +93,63 @@ export type ProfileAgentSettings = {
   soul: ProfileSoul;
 };
 
+export type ProfileProjectFolder = {
+  path: string;
+  label: string | null;
+  isPrimary: boolean;
+  addedAt: number;
+};
+
+export type ProfileProject = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  boardSlug: string | null;
+  primaryPath: string | null;
+  archived: boolean;
+  createdAt: number;
+  folders: ProfileProjectFolder[];
+};
+
+export type ProfileProjects = {
+  projects: ProfileProject[];
+  activeId: string | null;
+};
+
 export type SubagentMode = "auto" | "manual";
+
+export type SharedSubagentCandidate = {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+  enabled: boolean;
+};
 
 export type ProfileAgentBehavior = {
   profile: string;
   revision: number;
   subagentMode: SubagentMode;
   preferredSubagent: string;
+  preferredCandidateIds: string[];
   updatedAt: string;
+};
+
+export type AgentBehaviorSnapshot = {
+  sharedCandidates: SharedSubagentCandidate[];
+  profile: ProfileAgentBehavior;
 };
 
 export type ProfileAgentBehaviorUpdate = {
   expectedRevision: number;
   subagentMode?: SubagentMode;
   preferredSubagent?: string;
+  preferredCandidateIds?: string[];
+  sharedCandidates?: SharedSubagentCandidate[];
 };
 
 export type HermesConfigFieldType = "boolean" | "number" | "string" | "select" | "list";
@@ -260,7 +303,7 @@ export type UsageStats = {
   items: UsageStatItem[];
 };
 
-/** Office-owned skill/MCP/tool usage stats for a profile (names + counts only). */
+/** Studio-owned skill/MCP/tool usage stats for a profile (names + counts only). */
 export async function loadUsageStats(profile: string, days = 30): Promise<UsageStats> {
   const params = new URLSearchParams({ profile, days: String(days) });
   return validateUsageStats(await settingsRequest<unknown>(`/api/v1/stats/usage?${params.toString()}`));
@@ -297,21 +340,110 @@ export async function loadProfileSoul(profile: string): Promise<ProfileSoul> {
   return validateSoul(await settingsRequest<unknown>(profilePath(profile, "soul")));
 }
 
+export async function loadProfileProjects(profile: string): Promise<ProfileProjects> {
+  return validateProjects(await settingsRequest<unknown>(profilePath(profile, "projects")));
+}
+
+export interface HostDirListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  dirs: { name: string; path: string }[];
+  truncated: boolean;
+}
+
+/** Browse host directories (names only) for the project folder picker. */
+export async function listHostDirs(path?: string): Promise<HostDirListing> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  const value = await settingsRequest<unknown>(`/api/v1/host/fs/dirs${query}`);
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.home !== "string"
+    || (value.parent !== null && typeof value.parent !== "string")
+    || !Array.isArray(value.dirs)) throw incompatible();
+  return {
+    path: value.path,
+    parent: value.parent as string | null,
+    home: value.home,
+    truncated: value.truncated === true,
+    dirs: value.dirs.filter(isRecord).map((dir) => {
+      if (typeof dir.name !== "string" || typeof dir.path !== "string") throw incompatible();
+      return { name: dir.name, path: dir.path };
+    }),
+  };
+}
+
+export async function createProfileProject(
+  profile: string,
+  input: { name: string; path?: string; label?: string; isPrimary?: boolean },
+): Promise<{ project: ProfileProject | null }> {
+  const value = await settingsRequest<unknown>(profilePath(profile, "projects"), {
+    method: "POST",
+    body: {
+      name: input.name,
+      ...(input.path === undefined ? {} : { path: input.path }),
+      ...(input.label === undefined ? {} : { label: input.label }),
+      ...(input.isPrimary === undefined ? {} : { isPrimary: input.isPrimary }),
+    },
+  });
+  if (!isRecord(value) || (value.project !== null && !isRecord(value.project))) throw incompatible();
+  return { project: value.project === null ? null : validateProject(value.project) };
+}
+
+export async function renameProfileProject(profile: string, projectId: string, name: string): Promise<ProfileProject> {
+  const value = await settingsRequest<unknown>(profilePath(profile, `projects/${encodeSegment(projectId)}`), {
+    method: "PATCH",
+    body: { name },
+  });
+  if (!isRecord(value)) throw incompatible();
+  return validateProject(value.project);
+}
+
+export async function deleteProfileProject(profile: string, projectId: string): Promise<ProfileProjects> {
+  return validateProjects(await settingsRequest<unknown>(profilePath(profile, `projects/${encodeSegment(projectId)}`), {
+    method: "DELETE",
+  }));
+}
+
+export async function addProfileProjectFolder(
+  profile: string,
+  projectId: string,
+  input: { path: string; label?: string; isPrimary?: boolean },
+): Promise<ProfileProject> {
+  const value = await settingsRequest<unknown>(profilePath(profile, `projects/${encodeSegment(projectId)}/folders`), {
+    method: "POST",
+    body: {
+      path: input.path,
+      ...(input.label === undefined ? {} : { label: input.label }),
+      ...(input.isPrimary === undefined ? {} : { isPrimary: input.isPrimary }),
+    },
+  });
+  if (!isRecord(value)) throw incompatible();
+  return validateProject(value.project);
+}
+
+export async function removeProfileProjectFolder(profile: string, projectId: string, path: string): Promise<ProfileProject> {
+  const value = await settingsRequest<unknown>(profilePath(profile, `projects/${encodeSegment(projectId)}/folders`), {
+    method: "DELETE",
+    body: { path },
+  });
+  if (!isRecord(value)) throw incompatible();
+  return validateProject(value.project);
+}
+
 export async function updateProfileSoul(profile: string, content: string, expectedRevision: string): Promise<ProfileSoul> {
   return validateSoul(await settingsRequest<unknown>(profilePath(profile, "soul"), {
     method: "PUT", body: { content, expectedRevision },
   }));
 }
 
-export async function loadAgentBehavior(profile: string): Promise<ProfileAgentBehavior> {
-  return validateAgentBehavior(await settingsRequest<unknown>(profilePath(profile, "agent-behavior")));
+export async function loadAgentBehavior(profile: string): Promise<AgentBehaviorSnapshot> {
+  return validateAgentBehaviorSnapshot(await settingsRequest<unknown>(profilePath(profile, "agent-behavior")));
 }
 
 export async function updateAgentBehavior(
   profile: string,
   update: ProfileAgentBehaviorUpdate,
-): Promise<ProfileAgentBehavior> {
-  return validateAgentBehavior(await settingsRequest<unknown>(profilePath(profile, "agent-behavior"), {
+): Promise<AgentBehaviorSnapshot> {
+  return validateAgentBehaviorSnapshot(await settingsRequest<unknown>(profilePath(profile, "agent-behavior"), {
     method: "PUT",
     body: update,
   }));
@@ -528,6 +660,75 @@ function validateSoul(value: unknown): ProfileSoul {
   return { profile: value.profile, content: value.content, exists: value.exists, redacted: value.redacted, revision: value.revision };
 }
 
+function nullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw incompatible();
+  return value;
+}
+
+function validateProjectFolder(value: unknown): ProfileProjectFolder {
+  if (!isRecord(value) || typeof value.path !== "string") throw incompatible();
+  return {
+    path: value.path,
+    label: nullableString(value.label),
+    isPrimary: value.isPrimary === true,
+    addedAt: typeof value.addedAt === "number" && Number.isFinite(value.addedAt) ? value.addedAt : 0,
+  };
+}
+
+function validateProject(value: unknown): ProfileProject {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string" || !Array.isArray(value.folders)) throw incompatible();
+  return {
+    id: value.id,
+    slug: typeof value.slug === "string" ? value.slug : "",
+    name: value.name,
+    description: nullableString(value.description),
+    icon: nullableString(value.icon),
+    color: nullableString(value.color),
+    boardSlug: nullableString(value.boardSlug),
+    primaryPath: nullableString(value.primaryPath),
+    archived: value.archived === true,
+    createdAt: typeof value.createdAt === "number" && Number.isFinite(value.createdAt) ? value.createdAt : 0,
+    folders: value.folders.map(validateProjectFolder),
+  };
+}
+
+function validateProjects(value: unknown): ProfileProjects {
+  if (!isRecord(value) || !Array.isArray(value.projects)) throw incompatible();
+  return {
+    projects: value.projects.map(validateProject),
+    activeId: typeof value.activeId === "string" ? value.activeId : null,
+  };
+}
+
+function validateAgentBehaviorSnapshot(value: unknown): AgentBehaviorSnapshot {
+  if (!isRecord(value) || !Array.isArray(value.sharedCandidates) || !isRecord(value.profile)) throw incompatible();
+  return {
+    sharedCandidates: value.sharedCandidates.map(validateSharedSubagentCandidate),
+    profile: validateAgentBehavior(value.profile),
+  };
+}
+
+function validateSharedSubagentCandidate(value: unknown): SharedSubagentCandidate {
+  if (
+    !isRecord(value)
+    || typeof value.id !== "string"
+    || typeof value.label !== "string"
+    || typeof value.provider !== "string"
+    || typeof value.model !== "string"
+    || typeof value.reasoningEffort !== "string"
+    || typeof value.enabled !== "boolean"
+  ) throw incompatible();
+  return {
+    id: value.id,
+    label: value.label,
+    provider: value.provider,
+    model: value.model,
+    reasoningEffort: value.reasoningEffort,
+    enabled: value.enabled,
+  };
+}
+
 function validateAgentBehavior(value: unknown): ProfileAgentBehavior {
   if (
     !isRecord(value)
@@ -537,11 +738,15 @@ function validateAgentBehavior(value: unknown): ProfileAgentBehavior {
     || typeof value.preferredSubagent !== "string"
     || typeof value.updatedAt !== "string"
   ) throw incompatible();
+  const preferredCandidateIds = Array.isArray(value.preferredCandidateIds)
+    ? value.preferredCandidateIds.filter((item): item is string => typeof item === "string").slice(0, 3)
+    : [];
   return {
     profile: value.profile,
     revision: value.revision as number,
     subagentMode: value.subagentMode,
     preferredSubagent: value.preferredSubagent,
+    preferredCandidateIds,
     updatedAt: value.updatedAt,
   };
 }
@@ -757,4 +962,4 @@ function validateUsageStats(value: unknown): UsageStats {
 
 function isStringArray(value: unknown): value is string[] { return Array.isArray(value) && value.every((item) => typeof item === "string"); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function incompatible(): SettingsApiError { return new SettingsApiError("unknown", "Office Serverの設定応答に互換性がありません。"); }
+function incompatible(): SettingsApiError { return new SettingsApiError("unknown", "Studio Serverの設定応答に互換性がありません。"); }

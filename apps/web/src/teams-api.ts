@@ -231,34 +231,34 @@ export function createDemoTeamsApi(seed: readonly OfficeTeam[]): TeamsApi {
 
 function normalizeList(value: unknown): TeamsListResult {
   if (!value || typeof value !== "object" || !Array.isArray((value as { teams?: unknown }).teams)) {
-    throw new Error("Office Server returned an incompatible teams list.");
+    throw new Error("Studio Server returned an incompatible teams list.");
   }
   const teams = (value as { teams: unknown[] }).teams.slice(0, MAX_TEAMS).map(normalizeTeam);
   return { teams };
 }
 
 function normalizeTeam(value: unknown): OfficeTeam {
-  if (!value || typeof value !== "object") throw new Error("Office Server returned an incompatible team.");
+  if (!value || typeof value !== "object") throw new Error("Studio Server returned an incompatible team.");
   const team = value as Record<string, unknown>;
   if (typeof team.id !== "string" || !TEAM_ID_PATTERN.test(team.id)) {
-    throw new Error("Office Server returned an incompatible team identifier.");
+    throw new Error("Studio Server returned an incompatible team identifier.");
   }
   if (typeof team.name !== "string" || team.name.length < 1 || team.name.length > 64) {
-    throw new Error("Office Server returned an incompatible team name.");
+    throw new Error("Studio Server returned an incompatible team name.");
   }
   if (typeof team.color !== "string" || !COLOR_PATTERN.test(team.color)) {
-    throw new Error("Office Server returned an incompatible team color.");
+    throw new Error("Studio Server returned an incompatible team color.");
   }
   if (!Number.isInteger(team.revision) || (team.revision as number) < 1) {
-    throw new Error("Office Server returned an incompatible team revision.");
+    throw new Error("Studio Server returned an incompatible team revision.");
   }
   if (typeof team.createdAt !== "string" || typeof team.updatedAt !== "string") {
-    throw new Error("Office Server returned incompatible team timestamps.");
+    throw new Error("Studio Server returned incompatible team timestamps.");
   }
   if (!Array.isArray(team.memberProfileIds)
     || team.memberProfileIds.length > 64
     || !team.memberProfileIds.every((id) => typeof id === "string" && PROFILE_PATTERN.test(id))) {
-    throw new Error("Office Server returned incompatible team members.");
+    throw new Error("Studio Server returned incompatible team members.");
   }
   const description = team.description === undefined
     ? undefined
@@ -289,25 +289,25 @@ function normalizeTeam(value: unknown): OfficeTeam {
 
 function normalizeTeamSettings(value: unknown): OfficeTeamSettings {
   if (!value || typeof value !== "object") {
-    throw new Error("Office Server returned incompatible team settings.");
+    throw new Error("Studio Server returned incompatible team settings.");
   }
   const settings = value as Record<string, unknown>;
   if (!Number.isInteger(settings.revision) || (settings.revision as number) < 0) {
-    throw new Error("Office Server returned an incompatible team settings revision.");
+    throw new Error("Studio Server returned an incompatible team settings revision.");
   }
   if (typeof settings.skillsEnabled !== "boolean" || typeof settings.contextEnabled !== "boolean") {
-    throw new Error("Office Server returned incompatible team settings toggles.");
+    throw new Error("Studio Server returned incompatible team settings toggles.");
   }
   if (!Array.isArray(settings.skills)
     || settings.skills.length > GLOBAL_SETTINGS_MAX_SKILLS
     || !settings.skills.every((item) => typeof item === "string")) {
-    throw new Error("Office Server returned incompatible team skills.");
+    throw new Error("Studio Server returned incompatible team skills.");
   }
   if (typeof settings.context !== "string" || !isGlobalContextWithinBudget(settings.context)) {
-    throw new Error("Office Server returned incompatible team context.");
+    throw new Error("Studio Server returned incompatible team context.");
   }
   if (typeof settings.updatedAt !== "string") {
-    throw new Error("Office Server returned incompatible team settings timestamps.");
+    throw new Error("Studio Server returned incompatible team settings timestamps.");
   }
   return {
     revision: settings.revision as number,

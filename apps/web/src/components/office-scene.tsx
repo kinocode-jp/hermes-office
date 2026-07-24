@@ -14,9 +14,10 @@ import {
   type SimCharacter
 } from "../office/sim";
 import { assignTask, selectProfile, selectedProfileId, sessions, tasks } from "../store";
+import { isScheduledSessionHidden } from "../scheduled-sessions";
 import { loadMoreProfiles, profileInventoryState } from "../inventory";
 import { CharacterPortrait } from "./character-portrait";
-import { CardsIcon, ListIcon } from "./icons";
+import { CardsIcon, CloseIcon, ListIcon } from "./icons";
 import { InfoTip } from "./info-tip";
 import { StatusPill } from "./status-pill";
 import { TaskCables, type TaskCable } from "./task-cables";
@@ -74,7 +75,7 @@ const DENSE_OFFICE_PROFILE_COUNT = 12;
 const MIN_INTERACTIVE_SCENE_SCALE = 0.55;
 
 function profileActivity(profileId: string): string | undefined {
-  const profileSessions = sessions.value.filter((session) => session.profileId === profileId);
+  const profileSessions = sessions.value.filter((session) => session.profileId === profileId && !isScheduledSessionHidden(session));
   const current = profileSessions.find((session) => session.status === "streaming" || session.status === "waiting") ?? profileSessions[0];
   return current?.title;
 }
@@ -492,7 +493,7 @@ export function OfficeScene({ profiles }: { profiles: Profile[] }) {
           aria-label={t("office.remove")}
           title={t("office.remove")}
           onClick={() => setOfficeWindowOpen(false)}
-        >×</button>
+        ><CloseIcon width={18} height={18} /></button>
         </div>
       </header>
 

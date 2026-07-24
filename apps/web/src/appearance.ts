@@ -87,7 +87,7 @@ function normalizeFontScale(value: unknown): FontScale {
 }
 
 function themeColor(theme: Theme): string {
-  if (theme === "midnight") return "#101827";
-  if (theme === "mint") return "#effaf6";
-  return "#ffffff";
+  if (theme === "midnight") return "#111b24";
+  if (theme === "mint") return "#eef8f5";
+  return "#f4f7f9";
 }

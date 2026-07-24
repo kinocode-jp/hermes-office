@@ -4,6 +4,7 @@ import { isLocalOfficeClient } from "../auth-state";
 import { fetchRemoteConfigStatus, logoutRemoteDevice, revokeRemoteDevice, DeviceRevokeError, OfficeRemoteConfigError, type DeviceRevokeFailureCode, type RemoteConfigFailureCode } from "../office-api";
 import { locale, t, type TranslationKey } from "../i18n";
 import { InfoTip } from "./info-tip";
+import { CloseIcon, LogOutIcon, RefreshIcon, TrashIcon } from "./icons";
 import "./access-audit.css";
 
 const REVOKE_ERROR_KEY: Readonly<Record<DeviceRevokeFailureCode, TranslationKey>> = {
@@ -146,7 +147,7 @@ export function DeviceAdmin() {
   const showReload = !(isRemote && error === "not_allowed");
 
   return (
-    <section class="access-audit" aria-labelledby="device-admin-title" aria-busy={loading}>
+    <section class="access-audit device-admin" aria-labelledby="device-admin-title" aria-busy={loading}>
       <header class="access-audit__gate">
         <div class="access-audit__title">
           <div class="heading-info-group">
@@ -155,8 +156,14 @@ export function DeviceAdmin() {
           </div>
         </div>
         {showReload && (
-          <button type="button" onClick={() => void reload()} disabled={loading}>
-            {loading ? t("audit.loading") : t("hostAdmin.reload")}
+          <button
+            type="button"
+            onClick={() => void reload()}
+            disabled={loading}
+            aria-label={loading ? t("audit.loading") : t("hostAdmin.reload")}
+            title={loading ? t("audit.loading") : t("hostAdmin.reload")}
+          >
+            <RefreshIcon />
           </button>
         )}
       </header>
@@ -173,8 +180,10 @@ export function DeviceAdmin() {
               class="access-audit__logout-action"
               ref={logoutTriggerRef}
               onClick={beginLogout}
+              aria-label={t("hostAdmin.logout")}
+              title={t("hostAdmin.logout")}
             >
-              {t("hostAdmin.logout")}
+              <LogOutIcon />
             </button>
           ) : (
             <div
@@ -197,8 +206,10 @@ export function DeviceAdmin() {
                   class="access-audit__logout-action"
                   onClick={cancelLogout}
                   disabled={logoutPhase === "busy"}
+                  aria-label={t("hostAdmin.logoutCancel")}
+                  title={t("hostAdmin.logoutCancel")}
                 >
-                  {t("hostAdmin.logoutCancel")}
+                  <CloseIcon />
                 </button>
                 <button
                   type="button"
@@ -206,8 +217,10 @@ export function DeviceAdmin() {
                   onClick={() => void confirmLogout()}
                   disabled={logoutPhase === "busy"}
                   aria-busy={logoutPhase === "busy"}
+                  aria-label={logoutPhase === "busy" ? t("hostAdmin.loggingOut") : t("hostAdmin.logoutConfirmAction")}
+                  title={logoutPhase === "busy" ? t("hostAdmin.loggingOut") : t("hostAdmin.logoutConfirmAction")}
                 >
-                  {logoutPhase === "busy" ? t("hostAdmin.loggingOut") : t("hostAdmin.logoutConfirmAction")}
+                  <LogOutIcon />
                 </button>
               </div>
             </div>
@@ -275,8 +288,9 @@ export function DeviceAdmin() {
                     disabled={revoking.has(device.id) || device.revokedAt !== undefined}
                     onClick={(event) => askRevoke(device, event.currentTarget)}
                     aria-label={t("hostAdmin.revokeAria", { name: device.displayName })}
+                    title={t("hostAdmin.revokeAria", { name: device.displayName })}
                   >
-                    {revoking.has(device.id) ? t("hostAdmin.revoking") : device.revokedAt ? t("hostAdmin.revokeDone") : t("hostAdmin.revoke")}
+                    <TrashIcon />
                   </button>
                 </li>
               ))}
@@ -302,15 +316,19 @@ export function DeviceAdmin() {
                   type="button"
                   ref={cancelButtonRef}
                   onClick={cancelRevoke}
+                  aria-label={t("hostAdmin.revokeCancel")}
+                  title={t("hostAdmin.revokeCancel")}
                 >
-                  {t("hostAdmin.revokeCancel")}
+                  <CloseIcon />
                 </button>
                 <button
                   type="button"
                   onClick={() => void revoke(confirmDevice)}
                   disabled={revoking.has(confirmDevice.id)}
+                  aria-label={revoking.has(confirmDevice.id) ? t("hostAdmin.revoking") : t("hostAdmin.revoke")}
+                  title={revoking.has(confirmDevice.id) ? t("hostAdmin.revoking") : t("hostAdmin.revoke")}
                 >
-                  {revoking.has(confirmDevice.id) ? t("hostAdmin.revoking") : t("hostAdmin.revoke")}
+                  <TrashIcon />
                 </button>
               </div>
             </div>

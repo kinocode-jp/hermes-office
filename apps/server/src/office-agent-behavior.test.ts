@@ -90,3 +90,23 @@ test("buildSubagentSessionInstruction and composeSessionCreateSystemSeed are pur
     "shared context\n\nUse subagents proactively.",
   );
 });
+
+
+test("buildSubagentSessionInstruction prefers ordered shared candidates with fallback", () => {
+  const instruction = buildSubagentSessionInstruction(
+    {
+      subagentMode: "auto",
+      preferredSubagent: "legacy",
+      preferredCandidateIds: ["c2", "missing", "c1"],
+    },
+    [
+      { id: "c1", label: "Fast", provider: "openai", model: "gpt-fast", reasoningEffort: "low", enabled: true },
+      { id: "c2", label: "Strong", provider: "openai", model: "gpt-strong", reasoningEffort: "high", enabled: true },
+      { id: "c3", label: "Off", provider: "openai", model: "gpt-off", reasoningEffort: "", enabled: false },
+    ],
+  );
+  assert.match(String(instruction), /Preferred subagent model candidates/);
+  assert.match(String(instruction), /1\. Strong/);
+  assert.match(String(instruction), /2\. Fast/);
+  assert.doesNotMatch(String(instruction), /gpt-off/);
+});

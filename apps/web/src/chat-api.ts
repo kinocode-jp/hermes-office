@@ -396,7 +396,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     const existingLiveSessionId = liveSessionIdFor(active, liveToClient);
     if (existingLiveSessionId) {
       if (historiesAwaitingReset.has(target.clientSessionId)) return;
-      callbacks.onSessionReady(target.clientSessionId, existingLiveSessionId, target.storedSessionId);
+      // Live session is already mapped; avoid re-emitting ready which causes UI flicker.
       return;
     }
     opening.set(target.clientSessionId, operation);
@@ -658,8 +658,18 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     ensureSession(target) {
       const existing = targets.get(target.clientSessionId);
       if (existing !== undefined && targetsMatch(existing.target, target)) {
+        // Already tracking this session. Only revive a halted transport or finish a
+        // not-yet-live start. Do not re-enter startTarget when a live session exists,
+        // or the UI flaps through connecting/ready on every ensure call.
         restartTransport(false);
-        if (gatewayReady) startTarget(existing);
+        if (!gatewayReady) return;
+        if (liveSessionIdFor(existing, liveToClient) !== undefined) return;
+        if (
+          targetStartOperations.has(target.clientSessionId)
+          || opening.has(target.clientSessionId)
+          || historyLoads.has(target.clientSessionId)
+        ) return;
+        startTarget(existing);
         return;
       }
       if (existing !== undefined) deactivateTarget(existing);

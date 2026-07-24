@@ -1,16 +1,26 @@
-import { useEffect, useState } from "preact/hooks";
-import type { SettingsTab } from "../domain";
-import { profileDisplayName } from "../profile-names";
-import { closeProfileSettingsModal, profileList, profileSettingsModalId } from "../store";
+import { useEffect, useMemo, useState } from "preact/hooks";
+import {
+  closeProfileSettingsModal,
+  profileList,
+  profileSettingsModalId,
+  profileSettingsModalTab,
+} from "../store";
 import { t } from "../i18n";
+import { appModalSizes, createModalResizeHandlers, getAppModalSize, shouldIgnoreModalOutsideClose } from "../app-modal-layout";
 import { CharacterPortrait } from "./character-portrait";
 import { LiveSettings } from "./live-settings";
 import { useMobileOverlay } from "./use-mobile-overlay";
+import { CloseIcon } from "./icons";
+import {
+  profileDisplayName,
+  profileStoredDisplayName,
+  setProfileDisplayName,
+} from "../profile-names";
 
 export function ProfileSettingsModal() {
   const profile = profileList.value.find((item) => item.id === profileSettingsModalId.value);
   const open = profileSettingsModalId.value !== null && profile !== undefined;
-  const [tab, setTab] = useState<SettingsTab>("soul");
+  const tab = profileSettingsModalTab.value;
   const overlay = useMobileOverlay<HTMLElement>({
     kind: "modal",
     open,
@@ -18,13 +28,30 @@ export function ProfileSettingsModal() {
     viewport: "(min-width: 0px)",
   });
 
-  useEffect(() => { setTab("soul"); }, [profile?.id]);
+  const _sizes = appModalSizes.value;
+  const modalSize = getAppModalSize("profile-settings");
+  const resize = useMemo(() => createModalResizeHandlers("profile-settings"), []);
+  useEffect(() => () => resize.dispose(), [resize]);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+
+  useEffect(() => {
+    if (!profile) return;
+    setEditingName(false);
+    setNameDraft(profileStoredDisplayName(profile.id, profileDisplayName(profile)));
+  }, [profile?.id]);
 
   if (!open || !profile) return null;
   const name = profileDisplayName(profile);
+
+  const saveName = () => {
+    setProfileDisplayName(profile.id, nameDraft);
+    setEditingName(false);
+  };
+
   return (
-    <div class="profile-settings-modal-layer" data-modal-affordance="true">
-      <button class="profile-settings-modal-scrim" type="button" aria-label={t("common.close")} onClick={closeProfileSettingsModal} />
+    <div class="profile-settings-modal-layer" data-modal-affordance="true" role="presentation" onPointerDown={(event) => { if (shouldIgnoreModalOutsideClose()) return; if (event.target === event.currentTarget) closeProfileSettingsModal(); }} onClick={(event) => { if (shouldIgnoreModalOutsideClose()) return; if (event.target === event.currentTarget) closeProfileSettingsModal(); }}>
+      <button class="profile-settings-modal-scrim" type="button" aria-label={t("common.close")} onClick={() => { if (!shouldIgnoreModalOutsideClose()) closeProfileSettingsModal(); }} />
       <section
         ref={overlay.ref}
         class="profile-settings-modal"
@@ -32,28 +59,97 @@ export function ProfileSettingsModal() {
         aria-modal="true"
         aria-labelledby="profile-settings-modal-title"
         tabIndex={-1}
+        style={{ width: `${modalSize.width}px`, height: `${modalSize.height}px` }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
       >
         <header class="profile-settings-modal-head">
           <div class="profile-settings-modal-identity">
             <CharacterPortrait profileId={profile.id} profileName={name} class="character-portrait--modal" decorative />
-            <div>
+            <div class="profile-settings-modal-copy">
               <span>{t("profile.settings")}</span>
-              <h2 id="profile-settings-modal-title">{name}</h2>
+              {editingName ? (
+                <form
+                  class="profile-settings-name-editor"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    saveName();
+                  }}
+                >
+                  <label>
+                    <span class="visually-hidden">{t("profile.displayName")}</span>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={nameDraft}
+                      maxLength={40}
+                      placeholder={profile.name}
+                      onInput={(event) => setNameDraft(event.currentTarget.value)}
+                    />
+                  </label>
+                  <div>
+                    <button type="submit">{t("profile.saveName")}</button>
+                    <button type="button" onClick={() => setEditingName(false)}>{t("common.cancel")}</button>
+                  </div>
+                </form>
+              ) : (
+                <div class="profile-settings-modal-title-row">
+                  <h2 id="profile-settings-modal-title" title={name}>{name}</h2>
+                  <button
+                    type="button"
+                    class="profile-name-edit"
+                    title={t("profile.editName")}
+                    aria-label={t("profile.editName")}
+                    onClick={() => {
+                      setNameDraft(profileStoredDisplayName(profile.id, name));
+                      setEditingName(true);
+                    }}
+                  >
+                    ✎
+                  </button>
+                </div>
+              )}
               <small>{profile.id}</small>
             </div>
           </div>
-          <button type="button" class="profile-settings-modal-close" onClick={closeProfileSettingsModal} aria-label={t("common.close")}>×</button>
+          <button
+            type="button"
+            class="profile-settings-modal-close"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              closeProfileSettingsModal();
+            }}
+            aria-label={t("common.close")}
+            title={t("common.close")}
+          ><CloseIcon width={18} height={18} /></button>
         </header>
         <div class="profile-settings-modal-body">
           <LiveSettings
             profileId={profile.id}
             profileLabel={name}
-            initialTab="soul"
+            scope="profile"
+            initialTab={tab}
             activeTab={tab}
-            onTabChange={setTab}
+            onTabChange={(next) => {
+              if (next === "global" || next === "host") return;
+              profileSettingsModalTab.value = next;
+            }}
           />
         </div>
-      </section>
+      
+        {resize.handles.map((handle) => (
+          <div
+            key={handle.edge}
+            class={`app-modal-resize ${handle.className}`}
+            role="separator"
+            aria-label={t("common.resizeModal")}
+            title={t("common.resizeModal")}
+            onPointerDown={resize.begin(handle.edge)}
+          />
+        ))}
+</section>
     </div>
   );
 }

@@ -6,16 +6,16 @@ const STORAGE_KEY = "hermes-studio:chat-model-prefs:v3";
 const LEGACY_V2_STORAGE_KEY = "hermes-studio:chat-model-prefs:v2";
 /** Pre-`__manual__` key: provider `"custom"` was the UI manual-entry sentinel. */
 const LEGACY_V1_STORAGE_KEY = "hermes-studio:chat-model-prefs:v1";
-/** Pre-rebrand product prefix (Hermes Office). Dual-read only. */
+/** Pre-rebrand product prefix (Hermes Studio). Dual-read only. */
 const LEGACY_OFFICE_KEYS = [
   "hermes-office:chat-model-prefs:v3",
   "hermes-office:chat-model-prefs:v2",
   "hermes-office:chat-model-prefs:v1",
 ] as const;
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-/** Matches Office server provider id sanitizer. */
+/** Matches Studio server provider id sanitizer. */
 const PROVIDER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}$/;
-/** Matches Office server model id sanitizer. */
+/** Matches Studio server model id sanitizer. */
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_./:+@-]{0,255}$/;
 const PRESET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const PRESET_NAME_MAX = 64;
@@ -432,7 +432,7 @@ const CLIENT_CATALOG_TTL_MS = 30_000;
 const clientCatalogCache = new Map<string, { expiresAt: number; catalog: LiveChatModelsCatalog }>();
 
 /**
- * Same-origin Office live catalog for one Hermes profile.
+ * Same-origin Studio live catalog for one Hermes profile.
  * Optional provider scopes the models list to that provider only.
  * Pass `forceRefresh` to bypass client + server soft caches (reaches Hermes refresh when needed).
  */

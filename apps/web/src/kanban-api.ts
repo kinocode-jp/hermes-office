@@ -34,7 +34,7 @@ export class KanbanMutationFailure extends Error {
 }
 
 /**
- * A 4xx response (other than Request Timeout) proves that Office Server
+ * A 4xx response (other than Request Timeout) proves that Studio Server
  * rejected the request. Transport failures, 5xx responses, and invalid 2xx
  * bodies happen after a non-idempotent request may have committed, so callers
  * must not present them as safe-to-retry failures.

@@ -7,8 +7,11 @@ import {
   isGlobalContextWithinBudget,
 } from "@hermes-studio/protocol";
 import { localizeRuntimeMessage, t } from "../i18n";
+import { appModalSizes, createModalResizeHandlers, getAppModalSize, shouldIgnoreModalOutsideClose } from "../app-modal-layout";
 import { profileDisplayName } from "../profile-names";
 import { profileList } from "../store";
+import { InfoTip } from "./info-tip";
+import { CloseIcon, EditIcon, PlusIcon, RefreshIcon, SaveIcon, TrashIcon } from "./icons";
 import {
   createTeam,
   deleteTeam,
@@ -105,6 +108,11 @@ export function TeamsPanel() {
     setSettingsDraft(settingsFromTeam(team));
     setEditor(team.id);
   };
+
+    const _teamsModalSizes = appModalSizes.value;
+  const teamsModalSize = getAppModalSize("teams-editor");
+  const teamsResize = useMemo(() => createModalResizeHandlers("teams-editor"), []);
+  useEffect(() => () => teamsResize.dispose(), [teamsResize]);
 
   const closeEditor = () => {
     setEditor(null);
@@ -219,12 +227,12 @@ export function TeamsPanel() {
         </div>
         <div class={`teams-sync state-${board.state}`} role={board.state === "error" ? "alert" : "status"}>
           <span>{localizeRuntimeMessage(board.message)}</span>
-          <button type="button" onClick={() => void refreshTeams({ acknowledgeErrors: true })} disabled={board.state === "loading" || busy}>
-            {t("teams.reload")}
+          <button type="button" onClick={() => void refreshTeams({ acknowledgeErrors: true })} disabled={board.state === "loading" || busy} aria-label={t("teams.reload")} title={t("teams.reload")}>
+            <RefreshIcon />
           </button>
         </div>
-        <button class="primary-button" type="button" onClick={openCreate} disabled={busy || board.state === "loading"}>
-          {t("teams.create")}
+        <button class="primary-button" type="button" onClick={openCreate} disabled={busy || board.state === "loading"} aria-label={t("teams.create")} title={t("teams.create")}>
+          <PlusIcon />
         </button>
       </header>
 
@@ -234,7 +242,7 @@ export function TeamsPanel() {
       {board.state === "error" && list.length === 0 && (
         <div class="teams-error" role="alert">
           <span>{localizeRuntimeMessage(board.message)}</span>
-          <button type="button" onClick={() => void refreshTeams({ acknowledgeErrors: true })}>{t("teams.reload")}</button>
+          <button type="button" onClick={() => void refreshTeams({ acknowledgeErrors: true })} aria-label={t("teams.reload")} title={t("teams.reload")}><RefreshIcon /></button>
         </div>
       )}
       {board.state !== "loading" && list.length === 0 && board.state !== "error" && (
@@ -253,8 +261,8 @@ export function TeamsPanel() {
                   <h2>{team.name}</h2>
                   {team.description && <p>{team.description}</p>}
                 </div>
-                <button type="button" class="quiet-button" onClick={() => openEdit(team)} disabled={busy}>
-                  {t("teams.edit")}
+                <button type="button" class="quiet-button" onClick={() => openEdit(team)} disabled={busy} aria-label={t("teams.edit")} title={t("teams.edit")}>
+                  <EditIcon />
                 </button>
               </header>
               <dl class="team-meta">
@@ -272,12 +280,12 @@ export function TeamsPanel() {
                 </div>
               </dl>
               <div class="team-settings-summary" aria-label={t("teams.settings.title")}>
-                <span>{team.settings.skillsEnabled
+                <span class={team.settings.skillsEnabled ? "" : "is-off"}><i aria-hidden="true" /><InfoTip text={team.settings.skillsEnabled
                   ? t("teams.settings.skillsOn", { count: team.settings.skills.length })
-                  : t("teams.settings.skillsOff")}</span>
-                <span>{team.settings.contextEnabled
+                  : t("teams.settings.skillsOff")} align="start" /></span>
+                <span class={team.settings.contextEnabled ? "" : "is-off"}><i aria-hidden="true" /><InfoTip text={team.settings.contextEnabled
                   ? (team.settings.context.trim() === "" ? t("teams.settings.contextEmpty") : t("teams.settings.contextOn"))
-                  : t("teams.settings.contextOff")}</span>
+                  : t("teams.settings.contextOff")} align="start" /></span>
               </div>
               {team.settings.skillsEnabled && team.settings.skills.length > 0 && (
                 <ul class="team-skill-chips" aria-label={t("teams.settings.skills")}>
@@ -302,18 +310,19 @@ export function TeamsPanel() {
       </div>
 
       {editor !== null && (
-        <div class="teams-editor-backdrop" role="presentation" onClick={closeEditor}>
+        <div class="teams-editor-backdrop" role="presentation" onClick={() => { if (!shouldIgnoreModalOutsideClose()) closeEditor(); }}>
           <form
             class="teams-editor"
             role="dialog"
             aria-modal="true"
             aria-labelledby="teams-editor-title"
+            style={{ width: `${teamsModalSize.width}px`, height: `${teamsModalSize.height}px` }}
             onClick={(event) => event.stopPropagation()}
             onSubmit={(event) => void submit(event)}
           >
             <header>
               <h2 id="teams-editor-title">{editor === "create" ? t("teams.createTitle") : t("teams.editTitle")}</h2>
-              <button type="button" class="mobile-close" onClick={closeEditor} aria-label={t("common.close")}>×</button>
+              <button type="button" class="mobile-close" onClick={closeEditor} aria-label={t("common.close")} title={t("common.close")}><CloseIcon /></button>
             </header>
             <label>
               <span>{t("teams.field.name")}</span>
@@ -336,6 +345,7 @@ export function TeamsPanel() {
                     class={draft.color.toLowerCase() === color ? "is-active" : ""}
                     style={{ background: color }}
                     aria-label={color}
+                    title={color}
                     aria-pressed={draft.color.toLowerCase() === color}
                     disabled={busy}
                     onClick={() => setDraft((current) => ({ ...current, color }))}
@@ -365,7 +375,9 @@ export function TeamsPanel() {
             </label>
             <fieldset class="teams-members-field" disabled={busy}>
               <legend>{t("teams.field.members")}</legend>
-              <p class="teams-members-hint">{t("teams.field.membersHint")}</p>
+              <div class="teams-field-label-row">
+                <InfoTip text={t("teams.field.membersHint")} align="start" />
+              </div>
               <div class="teams-member-picker">
                 {profiles.map((profile) => {
                   const checked = draft.memberProfileIds.includes(profile.id);
@@ -405,12 +417,16 @@ export function TeamsPanel() {
 
             {editingTeam && settingsDraft && (
               <fieldset class="teams-settings-field" disabled={busy}>
-                <legend>{t("teams.settings.title")}</legend>
-                <p class="teams-members-hint">{t("teams.settings.hint")}</p>
+                <legend>
+                  <span class="heading-info-group">
+                    <span>{t("teams.settings.title")}</span>
+                    <InfoTip text={t("teams.settings.hint")} align="start" />
+                  </span>
+                </legend>
                 <label class="teams-settings-switch">
-                  <span>
+                  <span class="teams-settings-switch-label">
                     <b>{t("teams.settings.skillsEnabled")}</b>
-                    <small>{t("teams.settings.skillsEnabledDetail")}</small>
+                    <InfoTip text={t("teams.settings.skillsEnabledDetail")} align="start" />
                   </span>
                   <input
                     type="checkbox"
@@ -422,9 +438,9 @@ export function TeamsPanel() {
                   />
                 </label>
                 <label class="teams-settings-switch">
-                  <span>
+                  <span class="teams-settings-switch-label">
                     <b>{t("teams.settings.contextEnabled")}</b>
-                    <small>{t("teams.settings.contextEnabledDetail")}</small>
+                    <InfoTip text={t("teams.settings.contextEnabledDetail")} align="start" />
                   </span>
                   <input
                     type="checkbox"
@@ -482,8 +498,10 @@ export function TeamsPanel() {
                     class="primary-button"
                     disabled={busy || !settingsDirty || !settingsSkillsValid || !settingsContextValid}
                     onClick={() => void submitSettings()}
+                    aria-label={busy ? t("settings.saving") : t("teams.settings.save")}
+                    title={busy ? t("settings.saving") : t("teams.settings.save")}
                   >
-                    {busy ? t("settings.saving") : t("teams.settings.save")}
+                    <SaveIcon />
                   </button>
                 </div>
               </fieldset>
@@ -495,21 +513,31 @@ export function TeamsPanel() {
                 confirmDeleteId === editingTeam.id ? (
                   <div class="teams-delete-confirm">
                     <span>{t("teams.deleteConfirm", { name: editingTeam.name })}</span>
-                    <button type="button" class="danger-button" disabled={busy} onClick={() => void confirmDelete(editingTeam)}>
-                      {t("teams.deleteForever")}
+                    <button type="button" class="danger-button" disabled={busy} onClick={() => void confirmDelete(editingTeam)} aria-label={t("teams.deleteForever")} title={t("teams.deleteForever")}>
+                      <TrashIcon />
                     </button>
-                    <button type="button" disabled={busy} onClick={() => setConfirmDeleteId(null)}>{t("common.cancel")}</button>
+                    <button type="button" disabled={busy} onClick={() => setConfirmDeleteId(null)} aria-label={t("common.cancel")} title={t("common.cancel")}><CloseIcon /></button>
                   </div>
                 ) : (
-                  <button type="button" class="danger-button" disabled={busy} onClick={() => setConfirmDeleteId(editingTeam.id)}>
-                    {t("teams.delete")}
+                  <button type="button" class="danger-button" disabled={busy} onClick={() => setConfirmDeleteId(editingTeam.id)} aria-label={t("teams.delete")} title={t("teams.delete")}>
+                    <TrashIcon />
                   </button>
                 )
               )}
               <span class="teams-editor-spacer" />
-              <button type="button" disabled={busy} onClick={closeEditor}>{t("common.cancel")}</button>
-              <button class="primary-button" type="submit" disabled={busy}>{t("teams.save")}</button>
+              <button type="button" disabled={busy} onClick={closeEditor} aria-label={t("common.cancel")} title={t("common.cancel")}><CloseIcon /></button>
+              <button class="primary-button" type="submit" disabled={busy} aria-label={t("teams.save")} title={t("teams.save")}><SaveIcon /></button>
             </footer>
+            {teamsResize.handles.map((handle) => (
+              <div
+                key={handle.edge}
+                class={`app-modal-resize ${handle.className}`}
+                role="separator"
+                aria-label={t("common.resizeModal")}
+                title={t("common.resizeModal")}
+                onPointerDown={teamsResize.begin(handle.edge)}
+              />
+            ))}
           </form>
         </div>
       )}

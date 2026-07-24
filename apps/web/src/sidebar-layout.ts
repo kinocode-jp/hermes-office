@@ -1,10 +1,11 @@
 import { signal } from "@preact/signals";
+import { isPhoneViewport } from "./viewport";
 
 const STORAGE_KEY = "hermes-studio:sidebar-layout:v1";
 
 export const SIDEBAR_MIN_WIDTH = 64;
-export const SIDEBAR_MAX_WIDTH = 320;
-export const SIDEBAR_DEFAULT_WIDTH = 232;
+export const SIDEBAR_MAX_WIDTH = 420;
+export const SIDEBAR_DEFAULT_WIDTH = 248;
 export const SIDEBAR_ICON_THRESHOLD = 96;
 
 export type SidebarMode = "cards" | "rows";
@@ -75,7 +76,8 @@ function readPreferences(): SidebarPreferences {
   const fallback: SidebarPreferences = {
     width: SIDEBAR_DEFAULT_WIDTH,
     mode: "cards",
-    profilesOpen: true,
+    // On phones the profile sheet overlays the whole screen, so it starts closed.
+    profilesOpen: !isPhoneViewport(),
     openProfileIds: [],
   };
   if (typeof localStorage === "undefined") return fallback;
@@ -84,7 +86,7 @@ function readPreferences(): SidebarPreferences {
     return {
       width: clampSidebarWidth(typeof parsed?.width === "number" ? parsed.width : fallback.width),
       mode: parsed?.mode === "rows" ? "rows" : fallback.mode,
-      profilesOpen: parsed?.profilesOpen !== false,
+      profilesOpen: typeof parsed?.profilesOpen === "boolean" ? parsed.profilesOpen : fallback.profilesOpen,
       openProfileIds: Array.isArray(parsed?.openProfileIds)
         ? parsed.openProfileIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
         : fallback.openProfileIds,

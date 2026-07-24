@@ -10,13 +10,16 @@ import {
   activeSurface,
   navigateToSurface,
   openMobileWorkspace,
-  openRecurringJobs,
+  openProfileChatModal,
   openSession,
   openSessionIds,
   profileList,
   selectProfile,
   selectedProfileId,
   sessions,
+  setWorkspaceSessionDropPreview,
+  clearWorkspaceSessionDropPreview,
+  profileChatModalId,
 } from "../store";
 import {
   SIDEBAR_ICON_THRESHOLD,
@@ -34,15 +37,21 @@ import {
   toggleSidebarProfileOpen,
 } from "../sidebar-layout";
 import { CharacterPortrait } from "./character-portrait";
-import { CardsIcon, ClockIcon, GroupIcon, ListIcon, UsersIcon } from "./icons";
+import { CardsIcon, ChatIcon, GroupIcon, ListIcon, ScheduleIcon, UsersIcon } from "./icons";
 import { StatusPill } from "./status-pill";
 import { TeamBadges } from "./team-badges";
-import { migrateHiddenRecurringSessionIds, recurringJobGroups } from "../recurring-jobs";
 import { teams } from "../teams-store";
 import { groupProfilesByTeams, profileGroupItemKey, type ProfileTeamGroup } from "../profile-team-groups";
 import { setSidebarGroupMode, sidebarGroupMode } from "../group-display-prefs";
+import {
+  moveSidebarProfile,
+  reconcileSidebarProfileOrder,
+  sortProfilesBySidebarOrder,
+} from "../profile-order";
 import { ProfileContextMenu, useProfileContextMenu } from "./profile-context-menu";
+import { isScheduledSessionHidden, scheduledSessionCount } from "../scheduled-sessions";
 import { isPhoneViewport } from "../viewport";
+import { createProfileSession } from "./profile-panel";
 
 
 function sidebarTaskStatusLabel(status: string): string {
@@ -83,10 +92,12 @@ export function SideRail({ navItems }: SideRailProps) {
   const inventory = profileInventoryState.value;
   const iconOnly = isSidebarIconOnly();
   const [phoneViewport, setPhoneViewport] = useState(isPhoneViewport());
+  const [dragProfileId, setDragProfileId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof matchMedia !== "function") return;
-    const query = matchMedia("(max-width: 767px)");
+    const query = matchMedia("(max-width: 768px)");
     const sync = () => setPhoneViewport(query.matches);
     sync();
     if (typeof query.addEventListener === "function") {
@@ -97,12 +108,19 @@ export function SideRail({ navItems }: SideRailProps) {
     return () => query.removeListener(sync);
   }, []);
 
+  const profileIdsKey = profileList.value.map((profile) => profile.id).join("|");
+  useEffect(() => {
+    reconcileSidebarProfileOrder(profileList.value.map((profile) => profile.id));
+  }, [profileIdsKey]);
+
   void profileDisplayNameMap();
   const hasTeams = teams.value.length > 0;
   const groupMode = hasTeams && sidebarGroupMode.value === "teams" ? "teams" : "profiles";
+  const orderedProfiles = sortProfilesBySidebarOrder(profileList.value);
+  const defaultProfile = profileList.value.find((profile) => profile.id === "default");
   const grouping = groupMode === "teams"
-    ? groupProfilesByTeams(profileList.value, teams.value)
-    : { mode: "flat" as const, profiles: profileList.value };
+    ? groupProfilesByTeams(orderedProfiles, teams.value)
+    : { mode: "flat" as const, profiles: orderedProfiles };
 
   const copy = {
     profiles: t("sidebar.profiles"),
@@ -154,10 +172,66 @@ export function SideRail({ navItems }: SideRailProps) {
       openProfileMenu(event, profileId);
       return;
     }
-    selectProfile(profileId);
-    toggleSidebarProfileOpen(profileId);
+    // Icon-only mode has no session list; open the chat modal directly.
+    if (iconOnly) {
+      selectProfile(profileId, { openDetail: false });
+      openProfileChatModal(profileId);
+      if (phoneViewport) closeMobileProfiles();
+      closeMenu();
+      return;
+    }
+    // Name row only toggles the session accordion when there are conversations.
+    selectProfile(profileId, { openDetail: false });
+    const hasSessions = sessions.value.some((session) => session.profileId === profileId);
+    if (hasSessions) toggleSidebarProfileOpen(profileId);
     if (phoneViewport) closeMobileProfiles();
     closeMenu();
+  };
+
+  const openProfileChat = (event: MouseEvent, profileId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    selectProfile(profileId, { openDetail: false });
+    openProfileChatModal(profileId);
+    if (phoneViewport) closeMobileProfiles();
+    closeMenu();
+  };
+
+  const onProfileDragStart = (event: DragEvent, profileId: string) => {
+    if (!(event.dataTransfer instanceof DataTransfer)) return;
+    event.dataTransfer.setData("application/x-hermes-profile", profileId);
+    event.dataTransfer.setData("text/plain", profileId);
+    event.dataTransfer.effectAllowed = "move";
+    setDragProfileId(profileId);
+    setDropTargetId(null);
+  };
+
+  const onProfileDragOver = (event: DragEvent, profileId: string) => {
+    if (!dragProfileId || dragProfileId === profileId) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    if (dropTargetId !== profileId) setDropTargetId(profileId);
+  };
+
+  const onProfileDrop = (event: DragEvent, profileId: string) => {
+    event.preventDefault();
+    const sourceId = event.dataTransfer?.getData("application/x-hermes-profile")
+      || event.dataTransfer?.getData("text/plain")
+      || dragProfileId
+      || "";
+    if (!sourceId || sourceId === profileId) {
+      setDragProfileId(null);
+      setDropTargetId(null);
+      return;
+    }
+    moveSidebarProfile(sourceId, profileId);
+    setDragProfileId(null);
+    setDropTargetId(null);
+  };
+
+  const onProfileDragEnd = () => {
+    setDragProfileId(null);
+    setDropTargetId(null);
   };
 
   const onSessionClick = (event: MouseEvent, sessionId: string, profileId: string) => {
@@ -172,30 +246,52 @@ export function SideRail({ navItems }: SideRailProps) {
   const renderProfileEntry = (profile: Profile, entryKey: string) => {
     const displayName = profileDisplayName(profile);
     const secondaryName = profileSecondaryName(profile);
-    const profileSessions = sessions.value.filter((session) => session.profileId === profile.id);
-    const sessionsOpen = isSidebarProfileOpen(profile.id);
+    const profileSessions = sessions.value.filter((session) => session.profileId === profile.id && !isScheduledSessionHidden(session));
+    const hasSessions = profileSessions.length > 0;
+    const sessionsOpen = hasSessions && isSidebarProfileOpen(profile.id);
+    const isDragging = dragProfileId === profile.id;
+    const isDropTarget = dropTargetId === profile.id && dragProfileId !== profile.id;
     return (
-      <div class="sidebar-profile-entry" key={entryKey} data-sessions-open={sessionsOpen ? "true" : "false"}>
+      <div
+        class={`sidebar-profile-entry ${isDragging ? "is-dragging" : ""} ${isDropTarget ? "is-drop-target" : ""}`}
+        key={entryKey}
+        data-sessions-open={sessionsOpen ? "true" : "false"}
+        data-profile-id={profile.id}
+        onDragOver={(event) => onProfileDragOver(event, profile.id)}
+        onDrop={(event) => onProfileDrop(event, profile.id)}
+      >
         <div class={`sidebar-profile-row ${selectedProfileId.value === profile.id ? "is-active" : ""}`}>
           <button
             class="sidebar-profile-button"
             type="button"
+            draggable
             aria-current={selectedProfileId.value === profile.id ? "true" : undefined}
-            aria-expanded={profileSessions.length > 0 ? sessionsOpen : undefined}
-            aria-label={`${displayName}${secondaryName ? ` (${secondaryName})` : ""}${profileSessions.length > 0 ? ` — ${sessionsOpen ? copy.profileCollapse : copy.profileExpand}` : ""}`}
+            aria-expanded={hasSessions ? sessionsOpen : undefined}
+            aria-label={`${displayName}${secondaryName ? ` (${secondaryName})` : ""}${hasSessions ? ` — ${sessionsOpen ? copy.profileCollapse : copy.profileExpand}` : ""}`}
             onClick={(event) => onProfileClick(event, profile.id)}
             onContextMenu={(event) => openProfileMenu(event, profile.id)}
+            onDragStart={(event) => onProfileDragStart(event, profile.id)}
+            onDragEnd={onProfileDragEnd}
           >
             <CharacterPortrait profileId={profile.id} profileName={displayName} class="character-portrait--sidebar" decorative />
             <span class="sidebar-profile-copy">
               <b>{displayName}</b>
-              {secondaryName ? <small>{secondaryName}</small> : profile.role ? <small>{profile.role}</small> : null}
+              {secondaryName ? <small>{secondaryName}</small> : null}
               <TeamBadges profileId={profile.id} />
             </span>
-            {profileSessions.length > 0 && (
+            {hasSessions && (
               <span class="sidebar-profile-chevron" aria-hidden="true">{sessionsOpen ? "▾" : "▸"}</span>
             )}
             <StatusPill status={profile.status} />
+          </button>
+          <button
+            class="sidebar-profile-chat"
+            type="button"
+            aria-label={t("sidebar.openChat")}
+            title={t("sidebar.openChat")}
+            onClick={(event) => openProfileChat(event, profile.id)}
+          >
+            <ChatIcon width={15} height={15} />
           </button>
           <button
             class="sidebar-item-menu-trigger"
@@ -205,7 +301,7 @@ export function SideRail({ navItems }: SideRailProps) {
             onClick={(event) => openProfileMenu(event, profile.id)}
           >⋯</button>
         </div>
-        {sessionsOpen && profileSessions.length > 0 && (
+        {sessionsOpen && hasSessions && (
           <div class="sidebar-session-list" aria-label={copy.sessionCount(profileSessions.length)}>
             {profileSessions.map((session) => {
               const isOpen = openSessionIds.value.includes(session.id);
@@ -227,7 +323,10 @@ export function SideRail({ navItems }: SideRailProps) {
                     onDragStart={(event) => {
                       event.dataTransfer?.setData("application/x-hermes-session", session.id);
                       if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+                      // Main content shrinks only when the profile modal is closed.
+                      setWorkspaceSessionDropPreview(!profileChatModalId.value);
                     }}
+                    onDragEnd={() => clearWorkspaceSessionDropPreview()}
                   >
                     <i aria-hidden="true" />
                     <span>{chatSessionTitle(session)}</span>
@@ -272,7 +371,6 @@ export function SideRail({ navItems }: SideRailProps) {
     </section>
   );
 
-  migrateHiddenRecurringSessionIds(sessions.value);
   const activeSidebarTasks = tasks.value
     .filter((task) =>
       task.status === "running"
@@ -326,7 +424,8 @@ export function SideRail({ navItems }: SideRailProps) {
               if (phoneViewport) closeMobileProfiles();
             }}
           >
-            <span aria-hidden="true"><item.icon /></span><b class={phoneViewport ? "visually-hidden" : undefined}>{t(item.label)}</b>
+            <span aria-hidden="true"><item.icon /></span>
+            {!iconOnly && <b>{t(item.label)}</b>}
           </button>
         ))}
       </div>
@@ -334,19 +433,35 @@ export function SideRail({ navItems }: SideRailProps) {
       <div class="side-rail-rule" aria-hidden="true" />
 
       <button
-        class="sidebar-recurring-trigger"
+        class={`sidebar-scheduled-trigger ${activeSurface.value === "scheduled" ? "is-active" : ""}`}
         type="button"
+        aria-current={activeSurface.value === "scheduled" ? "page" : undefined}
         onClick={() => {
-          openRecurringJobs();
+          navigateToSurface("scheduled");
           if (phoneViewport) closeMobileProfiles();
         }}
-        title={t("nav.recurringJobs")}
-        aria-label={t("nav.recurringJobs")}
+        title={t("nav.scheduled")}
+        aria-label={t("nav.scheduled")}
       >
-        <span aria-hidden="true"><ClockIcon /></span>
-        <b class={phoneViewport ? "visually-hidden" : undefined}>{t("nav.recurringJobs")}</b>
-        <small class={phoneViewport ? "visually-hidden" : undefined}>{recurringJobGroups(sessions.value).length}</small>
+        <span aria-hidden="true"><ScheduleIcon /></span>
+        {!iconOnly && <b>{t("nav.scheduled")}</b>}
+        {scheduledSessionCount(sessions.value) > 0 && <small aria-hidden="true">{scheduledSessionCount(sessions.value)}</small>}
       </button>
+
+      {phoneViewport && defaultProfile && (
+        <button
+          class="sidebar-default-chat-trigger"
+          type="button"
+          aria-label={t("sidebar.defaultChatStart", { name: profileDisplayName(defaultProfile) })}
+          title={t("sidebar.defaultChatStart", { name: profileDisplayName(defaultProfile) })}
+          onClick={() => {
+            createProfileSession(defaultProfile.id);
+            closeMobileProfiles();
+          }}
+        >
+          <span aria-hidden="true"><ChatIcon /></span>
+        </button>
+      )}
 
       {phoneViewport && (
         <button
@@ -359,7 +474,6 @@ export function SideRail({ navItems }: SideRailProps) {
           onClick={() => (sidebarProfilesOpen.value ? closeMobileProfiles() : openMobileProfiles())}
         >
           <span aria-hidden="true"><UsersIcon /></span>
-          <b class="visually-hidden">{copy.profiles}</b>
           <small class="visually-hidden">{copy.profileCount}</small>
         </button>
       )}

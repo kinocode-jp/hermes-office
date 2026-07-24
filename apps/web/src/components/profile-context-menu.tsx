@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { Ref } from "preact";
-import { chatSessionTitle, t } from "../i18n";
+import { chatSessionTitle, locale, t } from "../i18n";
 import { profileDisplayName, profileSecondaryName } from "../profile-names";
 import {
   closeSession,
   openMobileWorkspace,
+  openProfileChatModal,
   openProfileSettingsModal,
   openSession,
   openSessionIds,
@@ -12,6 +13,7 @@ import {
   selectProfile,
   sessions,
 } from "../store";
+import { isScheduledSessionHidden } from "../scheduled-sessions";
 import {
   isSidebarProfileOpen,
   setSidebarProfileOpen,
@@ -77,14 +79,15 @@ export function useProfileContextMenu() {
   const openProfileMenu = (event: MouseEvent | PointerEvent, profileId: string) => {
     event.preventDefault();
     event.stopPropagation();
-    selectProfile(profileId);
+    // Selection only — do not open chat/detail modals from a context-menu gesture.
+    selectProfile(profileId, { openDetail: false });
     setMenu({ kind: "profile", profileId, ...menuPositionFromEvent(event) });
   };
 
   const openSessionMenu = (event: MouseEvent | PointerEvent, sessionId: string, profileId: string) => {
     event.preventDefault();
     event.stopPropagation();
-    selectProfile(profileId);
+    selectProfile(profileId, { openDetail: false });
     setMenu({ kind: "session", sessionId, profileId, ...menuPositionFromEvent(event) });
   };
 
@@ -116,10 +119,11 @@ export function ProfileContextMenu({
   onClose: () => void;
   onOpenSession: (sessionId: string) => void;
 }) {
+  void locale.value; // re-render when display language changes
   const profile = profileList.value.find((item) => item.id === menu.profileId);
   const displayName = profile ? profileDisplayName(profile) : menu.profileId;
   const secondaryName = profile ? profileSecondaryName(profile) : "";
-  const profileSessions = sessions.value.filter((session) => session.profileId === menu.profileId);
+  const profileSessions = sessions.value.filter((session) => session.profileId === menu.profileId && !isScheduledSessionHidden(session));
   const sessionsOpen = isSidebarProfileOpen(menu.profileId);
 
   if (menu.kind === "session") {
@@ -142,23 +146,26 @@ export function ProfileContextMenu({
         ) : null}
         <div class="profile-context-menu-divider" role="separator" />
         <button type="button" role="menuitem" onClick={() => onOpenSession(session.id)}>
-          <span aria-hidden="true">↗</span>{t("sidebar.menu.openSession")}
+          {t("profile.openInWorkspace")}
           {session.status === "streaming" ? <small>{t("profile.running")}</small> : isOpen ? <small>{t("profile.open")}</small> : null}
+        </button>
+        <button type="button" role="menuitem" onClick={() => { openProfileChatModal(menu.profileId); onClose(); }}>
+          {t("sidebar.openChat")}
         </button>
         {isOpen && (
           <button type="button" role="menuitem" onClick={() => { closeSession(session.id); onClose(); }}>
-            <span aria-hidden="true">✕</span>{t("sidebar.menu.closeSession")}
+            {t("sidebar.menu.closeSession")}
           </button>
         )}
         <div class="profile-context-menu-divider" role="separator" />
-        <button type="button" role="menuitem" onClick={() => { selectProfile(menu.profileId); createProfileSession(menu.profileId); onClose(); }}>
-          <span aria-hidden="true">＋</span>{t("sidebar.menu.newChat")}
+        <button type="button" role="menuitem" onClick={() => { selectProfile(menu.profileId, { openDetail: false }); createProfileSession(menu.profileId); onClose(); }}>
+          {t("sidebar.menu.newChat")}
         </button>
         <button type="button" role="menuitem" onClick={() => { openProfileSettingsModal(menu.profileId); onClose(); }}>
-          <span aria-hidden="true">⚙</span>{t("sidebar.menu.settings")}
+          {t("sidebar.menu.settings")}
         </button>
         <button type="button" role="menuitem" onClick={onClose}>
-          <span aria-hidden="true">×</span>{t("common.close")}
+          {t("common.close")}
         </button>
       </div>
     );
@@ -179,26 +186,26 @@ export function ProfileContextMenu({
       <p class="profile-context-menu-title" title={displayName}>{displayName}</p>
       {secondaryName ? <p class="profile-context-menu-subtitle">{secondaryName}</p> : null}
       <div class="profile-context-menu-divider" role="separator" />
-      <button type="button" role="menuitem" onClick={() => { selectProfile(menu.profileId); onClose(); }}>
-        <span aria-hidden="true">◉</span>{t("sidebar.menu.details")}
+      <button type="button" role="menuitem" onClick={() => { openProfileChatModal(menu.profileId); onClose(); }}>
+        {t("sidebar.openChat")}
       </button>
       <button
         type="button"
         role="menuitem"
         onClick={() => {
           setSidebarProfileOpen(menu.profileId, !sessionsOpen);
-          selectProfile(menu.profileId);
+          selectProfile(menu.profileId, { openDetail: false });
           onClose();
         }}
       >
-        <span aria-hidden="true">{sessionsOpen ? "▾" : "▸"}</span>
+        
         {sessionsOpen ? t("sidebar.menu.collapseSessions") : t("sidebar.menu.expandSessions")}
       </button>
-      <button type="button" role="menuitem" onClick={() => { selectProfile(menu.profileId); createProfileSession(menu.profileId); onClose(); }}>
-        <span aria-hidden="true">＋</span>{t("sidebar.menu.newChat")}
+      <button type="button" role="menuitem" onClick={() => { selectProfile(menu.profileId, { openDetail: false }); createProfileSession(menu.profileId); onClose(); }}>
+        {t("sidebar.menu.newChat")}
       </button>
       <button type="button" role="menuitem" onClick={() => { openProfileSettingsModal(menu.profileId); onClose(); }}>
-        <span aria-hidden="true">⚙</span>{t("sidebar.menu.settings")}
+        {t("sidebar.menu.settings")}
       </button>
       <div class="profile-context-menu-divider" role="separator" />
       <p class="profile-context-menu-section" role="presentation">{t("sidebar.menu.sessions")}</p>
@@ -216,7 +223,7 @@ export function ProfileContextMenu({
                 aria-label={t("sidebar.menu.openSessionNamed", { title: chatSessionTitle(session) })}
                 onClick={() => onOpenSession(session.id)}
               >
-                <span aria-hidden="true">↗</span>
+                
                 <em>{chatSessionTitle(session)}</em>
                 <small>{session.status === "streaming" ? t("profile.running") : isOpen ? t("profile.open") : ""}</small>
               </button>
@@ -228,17 +235,17 @@ export function ProfileContextMenu({
               role="menuitem"
               onClick={() => {
                 setSidebarProfileOpen(menu.profileId, true);
-                selectProfile(menu.profileId);
+                selectProfile(menu.profileId, { openDetail: false });
                 onClose();
               }}
             >
-              <span aria-hidden="true">…</span>{t("sidebar.menu.moreSessions", { count: hiddenCount })}
+              {t("sidebar.menu.moreSessions", { count: hiddenCount })}
             </button>
           )}
         </div>
       )}
       <button type="button" role="menuitem" onClick={onClose}>
-        <span aria-hidden="true">×</span>{t("common.close")}
+        {t("common.close")}
       </button>
     </div>
   );

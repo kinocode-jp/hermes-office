@@ -35,6 +35,7 @@ test("protocol policies make privileged ops owner remote-safe/readable", () => {
   assert.equal(OPERATION_POLICIES["secret.write"].minimumTier, "owner");
   assert.equal(OPERATION_POLICIES["secret.write"].boundary, "remote-safe");
   assert.equal(isRemotePrivilegedOperation("secret.write"), true);
+  assert.equal(isRemotePrivilegedOperation("obsidian.vault.read"), true);
   assert.equal(isRemotePrivilegedOperation("state.read"), false);
 });
 
@@ -52,6 +53,8 @@ test("remote privileged ops denied by default and allowed when flag enabled for 
   assert.equal(off.authorizeSession(remoteOwner, "privileged-config.read").allowed, false);
   assert.equal(off.authorizeSession(remoteOwner, "secret.write").allowed, false);
   assert.equal(off.authorizeSession(remoteOwner, "host-app.install").allowed, false);
+  assert.equal(off.authorizeSession(remoteOwner, "obsidian.vault.read").allowed, false);
+  assert.equal(off.authorizeSession(remoteOwner, "hermes-agent.update").allowed, false);
   assert.equal(off.effectiveAccess(remoteOwner).allowedOperations.includes("secret.write"), false);
 
   const on = new OfficeAuth({ remotePrivilegedEnabled: true });
@@ -61,10 +64,14 @@ test("remote privileged ops denied by default and allowed when flag enabled for 
   assert.equal(on.authorizeSession(remoteOwner, "privileged-config.update").allowed, true);
   assert.equal(on.authorizeSession(remoteOwner, "secret.write").allowed, true);
   assert.equal(on.authorizeSession(remoteOwner, "host-app.install").allowed, true);
+  assert.equal(on.authorizeSession(remoteOwner, "obsidian.vault.read").allowed, true);
+  assert.equal(on.authorizeSession(remoteOwner, "hermes-agent.update").allowed, true);
   assert.equal(on.authorizeSession(remoteOperator, "secret.write").allowed, false);
   assert.equal(on.authorizeSession(remoteManager, "secret.write").allowed, false);
   assert.equal(on.authorizeSession(remoteOperator, "host-app.install").allowed, false);
+  assert.equal(on.authorizeSession(remoteOperator, "hermes-agent.update").allowed, false);
   assert.equal(on.authorizeSession(remoteManager, "host-app.install").allowed, false);
+  assert.equal(on.authorizeSession(remoteManager, "hermes-agent.update").allowed, false);
   assert.equal(on.effectiveAccess(remoteOwner).allowedOperations.includes("privileged-config.read"), true);
   assert.equal(on.effectiveAccess(remoteOperator).allowedOperations.includes("secret.write"), false);
   assert.equal(on.effectiveAccess(remoteManager).allowedOperations.includes("secret.write"), false);

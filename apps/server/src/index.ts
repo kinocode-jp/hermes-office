@@ -2,6 +2,7 @@ import { createOfficeServer } from "./server.js";
 import { HermesBackend } from "./hermes-backend.js";
 import { OfficeTeamsStore } from "./office-teams.js";
 import { brandEnv, brandEnvIsTrue, brandStatePath } from "./brand-env.js";
+import { HermesAgentUpdateManager } from "./hermes-agent-update.js";
 
 const host = brandEnv("HOST") ?? "127.0.0.1";
 const configuredPort = Number.parseInt(brandEnv("PORT") ?? "4317", 10);
@@ -22,6 +23,8 @@ const trustedProxyHops = Number.isInteger(parsedTrustedProxyHops) && parsedTrust
 const teamsPath = brandEnv("TEAMS_PATH") ?? brandStatePath("teams.json");
 const teamsStore = new OfficeTeamsStore(teamsPath);
 const listTeamLayers = async () => await teamsStore.listSkillLayers();
+const hermesExecutable = brandEnv("HERMES_EXECUTABLE") ?? "hermes";
+const hermesAgentUpdate = new HermesAgentUpdateManager(hermesExecutable);
 
 const hermesMode = brandEnv("HERMES_MODE") ?? "managed";
 const hermesToken = brandEnv("HERMES_TOKEN");
@@ -34,7 +37,7 @@ const runtimeSource = hermesMode === "demo"
         listTeamLayers,
       })
     : new HermesBackend({
-        executable: brandEnv("HERMES_EXECUTABLE") ?? "hermes",
+        executable: hermesExecutable,
         listTeamLayers,
       });
 
@@ -90,6 +93,7 @@ initialization = (async () => {
       // Accepts HERMES_STUDIO_REMOTE_PRIVILEGED or deprecated HERMES_OFFICE_REMOTE_PRIVILEGED.
       remotePrivilegedEnabled: brandEnvIsTrue("REMOTE_PRIVILEGED"),
       ...(runtimeSource === undefined ? {} : { runtimeSource }),
+      hermesAgentUpdate,
     });
     const address = await candidate.listen();
     if (shuttingDown) { await candidate.close(); return; }

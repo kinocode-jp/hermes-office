@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { activeSurface, navigateToSurface } from "../store";
 import { t } from "../i18n";
 import { officeWindowOpen, setOfficeWindowOpen } from "../office-window";
+import { MenuIcon } from "./icons";
 
 export function WindowMenu() {
   const [open, setOpen] = useState(false);
@@ -35,10 +36,11 @@ export function WindowMenu() {
         class={`quiet-button window-menu-trigger ${open ? "is-open" : ""}`}
         type="button"
         aria-label={t("app.windows")}
+        title={t("app.windows")}
         aria-expanded={open}
         aria-controls="window-menu-panel"
         onClick={() => setOpen((current) => !current)}
-      >{t("app.windows")}</button>
+      ><MenuIcon width={18} height={18} /></button>
       {open && (
         <div id="window-menu-panel" class="window-menu-panel" role="menu" aria-label={t("app.windows")}>
           <p>{t("app.windowsKicker")}</p>

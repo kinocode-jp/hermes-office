@@ -3,8 +3,8 @@ import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnap
 import { officeMessage, type RuntimeMessage } from "./i18n";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
+import { isScheduledSessionHidden } from "./scheduled-sessions";
 import { mergeServerSessionStatus } from "./session-runtime";
-import { isRecurringSessionHidden } from "./recurring-jobs";
 import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
 import { ensurePokemonDisplayNames } from "./profile-names";
 import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
@@ -163,6 +163,7 @@ function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void 
   const pageSeen = new Set<string>();
   const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
   for (const live of rows) {
+    if (isScheduledSessionHidden({ profileId: live.profileId, title: live.title, titlePresentation: undefined })) continue;
     if (pageSeen.has(live.id)) continue;
     pageSeen.add(live.id);
     seen?.add(live.id);
@@ -183,8 +184,14 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
   const existing = new Map(next.flatMap((session, index) => session.remoteKind === "stored" ? [[sessionKey(session), index] as const] : []));
   const pageSeen = new Set<string>();
   for (const live of rows) {
+    if (isScheduledSessionHidden({
+      id: live.id,
+      storedSessionId: live.id,
+      profileId: live.profileId,
+      title: live.title,
+      titlePresentation: undefined,
+    })) continue;
     const key = sessionKey(live);
-    if (isRecurringSessionHidden(storedSessionClientId(live.profileId, live.id))) continue;
     if (pageSeen.has(key)) continue;
     pageSeen.add(key);
     seen?.add(key);
@@ -198,7 +205,7 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
     }
     next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, titlePresentation: undefined, ...(live.createdAt === undefined ? {} : { createdAt: live.createdAt }), ...(live.updatedAt === undefined ? {} : { updatedAt: live.updatedAt }), ...(live.lastMessagePreview === undefined ? {} : { lastMessagePreview: live.lastMessagePreview }), status, remoteKind: "stored" };
   }
-  sessions.value = next;
+  sessions.value = next.filter((session) => !isScheduledSessionHidden(session));
   updateProfileSessionCounts();
 }
 
@@ -219,7 +226,10 @@ function pruneSessions(seen: ReadonlySet<string>): void {
 
 function updateProfileSessionCounts(): void {
   const counts = new Map<string, number>();
-  for (const session of sessions.value) if (session.remoteKind !== "demo") counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  for (const session of sessions.value) {
+    if (session.remoteKind === "demo" || isScheduledSessionHidden(session)) continue;
+    counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  }
   profileList.value = profileList.value.map((profile) => ({ ...profile, sessions: counts.get(profile.id) ?? 0 }));
 }
 

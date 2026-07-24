@@ -16,6 +16,7 @@ import { ChatSessionCoordinator } from "./chat-session-coordinator.js";
 import { ChatUpstreamHub } from "./chat-upstream-hub.js";
 import { fetchOfficeHistoryPage, HistoryHttpInputError } from "./history-http.js";
 import { routeInventoryHttp } from "./inventory-http.js";
+import { handleSessionDelete, isSessionResourcePath } from "./sessions-http.js";
 import { isModelsHttpPath, routeModelsHttp } from "./models-http.js";
 import { StaticWebAssets } from "./static-web.js";
 import {
@@ -51,6 +52,9 @@ import { buildTokenUsageQuery, TokenUsageStore } from "./usage-stats.js";
 import { UsageTelemetryStore } from "./usage-telemetry.js";
 import { SecretTransferStore } from "./secret-transfer.js";
 import { HostAppManager } from "./host-apps.js";
+import { HermesAgentUpdateManager } from "./hermes-agent-update.js";
+import { ObsidianVaultManager } from "./obsidian-vaults.js";
+import { listHostDirectories } from "./host-fs.js";
 
 export {
   allowedCorsOrigin,
@@ -67,13 +71,13 @@ export interface OfficeServerOptions {
   allowNonLoopback?: boolean;
   trustedProxyHops?: number;
   deviceRegistryPath?: string;
-  /** Absolute path for Office-owned teams JSON; defaults under brand state home (~/.hermes-studio). */
+  /** Absolute path for Studio-owned teams JSON; defaults under brand state home (~/.hermes-studio). */
   teamsPath?: string;
   /** Shared store instance (preferred when inheritance also reads teams). */
   teamsStore?: OfficeTeamsStore;
   /** Durable per-day token usage counters (default: no persistence). */
   tokenUsagePath?: string;
-  /** Office-owned skill/MCP/tool usage telemetry JSON path. */
+  /** Studio-owned skill/MCP/tool usage telemetry JSON path. */
   usageTelemetryPath?: string;
   maxJsonBytes?: number;
   maxResponseJsonBytes?: number;
@@ -89,6 +93,8 @@ export interface OfficeServerOptions {
    * Default false. Enabled intentionally by the Tailscale launcher env.
    */
   remotePrivilegedEnabled?: boolean;
+  /** Optional fixed Hermes Agent updater (managed local installs). */
+  hermesAgentUpdate?: HermesAgentUpdateManager;
 }
 
 export interface OfficeServer {
@@ -129,6 +135,8 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
   });
   const secretTransfers = new SecretTransferStore();
   const hostApps = new HostAppManager();
+  const hermesAgentUpdate = options.hermesAgentUpdate ?? new HermesAgentUpdateManager();
+  const obsidianVaults = new ObsidianVaultManager();
 
   if (!isLoopbackHost(host)) {
     throw new Error(`Refusing direct non-loopback bind (${host}); use a trusted HTTPS reverse proxy to the loopback listener.`);
@@ -300,11 +308,11 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         request.resume();
         writeError(response, 413, "bad_request", "Logout request bodies are not accepted.", maxJsonBytes);
       } else if (auth.authenticate(request) === undefined) {
-        writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
+        writeError(response, 401, "unauthenticated", "Studio session is not active.", maxJsonBytes);
       } else if (!auth.authorizeOperation(request, "state.read", true).allowed) {
-        writeError(response, 403, "forbidden", "A valid Office session and CSRF token are required.", maxJsonBytes);
+        writeError(response, 403, "forbidden", "A valid Studio session and CSRF token are required.", maxJsonBytes);
       } else if (!await auth.revoke(request, response)) {
-        writeError(response, 401, "unauthenticated", "Office session is not active.", maxJsonBytes);
+        writeError(response, 401, "unauthenticated", "Studio session is not active.", maxJsonBytes);
       } else {
         writeJson(response, 200, { ok: true }, maxResponseJsonBytes);
       }
@@ -402,6 +410,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
               globalSettings: runtimeSource.globalSettings(),
               ...(runtimeSource.globalInheritance === undefined ? {} : { globalInheritance: runtimeSource.globalInheritance() }),
               ...(runtimeSource.agentBehavior === undefined ? {} : { agentBehavior: runtimeSource.agentBehavior() }),
+              ...(runtimeSource.projects === undefined ? {} : { projects: runtimeSource.projects() }),
             }),
           secretTransfers,
           // Server-derived privileged-owner session (never client headers).
@@ -460,6 +469,25 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       writeJson(response, 202, hostApps.installObsidian(), maxResponseJsonBytes, { "Cache-Control": "no-store" });
       return;
     }
+    if (requestUrl.pathname === "/api/v1/host/hermes-agent/update") {
+      if (request.method !== "POST") {
+        writeError(response, 405, "bad_request", "Method not allowed.", maxJsonBytes, { Allow: "POST" });
+        return;
+      }
+      if (requestHasBody(request)) {
+        request.resume();
+        writeError(response, 413, "bad_request", "Hermes Agent update requests do not accept a body.", maxJsonBytes);
+        return;
+      }
+      const updateAccess = auth.authorizeOperation(request, "hermes-agent.update", true);
+      if (!updateAccess.allowed) {
+        writeAuthorizationError(response, updateAccess.reason, maxJsonBytes);
+        return;
+      }
+      writeJson(response, 202, hermesAgentUpdate.startUpdate(), maxResponseJsonBytes, { "Cache-Control": "no-store" });
+      return;
+    }
+
 
     if (requestHasBody(request)) {
       request.resume();
@@ -543,6 +571,44 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
       writeJson(response, 200, hostApps.obsidianStatus(), maxResponseJsonBytes, { "Cache-Control": "no-store" });
       return;
     }
+    if (requestUrl.pathname === "/api/v1/host/fs/dirs") {
+      const fsAccess = auth.authorizeOperation(request, "host-fs.read", false);
+      if (!fsAccess.allowed) {
+        writeAuthorizationError(response, fsAccess.reason, maxJsonBytes);
+        return;
+      }
+      const listing = await listHostDirectories(requestUrl.searchParams.get("path"));
+      writeJson(response, 200, listing, maxResponseJsonBytes, { "Cache-Control": "no-store" });
+      return;
+    }
+    if (requestUrl.pathname === "/api/v1/host/apps/obsidian/vaults") {
+      const vaultAccess = auth.authorizeOperation(request, "obsidian.vault.read", false);
+      if (!vaultAccess.allowed) {
+        writeAuthorizationError(response, vaultAccess.reason, maxJsonBytes);
+        return;
+      }
+      writeJson(response, 200, { vaults: await obsidianVaults.listVaults() }, maxResponseJsonBytes, { "Cache-Control": "no-store" });
+      return;
+    }
+    if (requestUrl.pathname === "/api/v1/host/apps/obsidian/graph") {
+      const vaultAccess = auth.authorizeOperation(request, "obsidian.vault.read", false);
+      if (!vaultAccess.allowed) {
+        writeAuthorizationError(response, vaultAccess.reason, maxJsonBytes);
+        return;
+      }
+      const vaultId = requestUrl.searchParams.get("vault") ?? "";
+      const graph = await obsidianVaults.graph(vaultId);
+      if (graph === undefined) writeError(response, 404, "not_found", "Registered Obsidian vault was not found.", maxJsonBytes);
+      else writeJson(response, 200, graph, maxResponseJsonBytes, { "Cache-Control": "no-store" });
+      return;
+    }
+    if (requestUrl.pathname === "/api/v1/host/hermes-agent") {
+      const force = requestUrl.searchParams.get("force") === "1";
+      const status = await hermesAgentUpdate.refresh({ force });
+      writeJson(response, 200, status, maxResponseJsonBytes, { "Cache-Control": "no-store" });
+      return;
+    }
+
 
     if (requestUrl.pathname === "/api/v1/inventory") {
       const result = await routeInventoryHttp(runtimeSource, requestUrl);
@@ -597,6 +663,25 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
         runtimeSource?.models === undefined ? undefined : runtimeSource.models(),
       );
       writeJson(response, result.status, result.body, maxResponseJsonBytes, result.headers ?? {});
+      return;
+    }
+
+    if (isSessionResourcePath(requestUrl.pathname)) {
+      if (request.method !== "DELETE") {
+        writeError(response, 405, "bad_request", "Only DELETE is supported for this session route.", maxJsonBytes, { Allow: "DELETE" });
+        return;
+      }
+      if (requestHasBody(request)) {
+        request.resume();
+        writeError(response, 413, "bad_request", "DELETE request bodies are not accepted.", maxJsonBytes);
+        return;
+      }
+      const deleteAccess = auth.authorizeOperation(request, "chat.session.archive", true);
+      if (!deleteAccess.allowed) {
+        writeAuthorizationError(response, deleteAccess.reason, maxJsonBytes);
+        return;
+      }
+      await handleSessionDelete(response, requestUrl, runtimeSource, maxJsonBytes, maxResponseJsonBytes);
       return;
     }
 
@@ -710,7 +795,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     if (runtimeSource === undefined || chatUpstreamHub === undefined) { client.close(1013, "Hermes runtime unavailable"); return; }
     const officeSession = chatSocketSessions.get(client);
     const authGuard = chatSocketAuthGuards.get(client);
-    if (officeSession === undefined || authGuard === undefined) { client.close(1008, "Office session unavailable"); return; }
+    if (officeSession === undefined || authGuard === undefined) { client.close(1008, "Studio session unavailable"); return; }
     handleOfficeChatConnection(client, {
       auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter: chatDeviceLimiter, sessionCoordinator: chatSessionCoordinator, chatHub: chatUpstreamHub,
       usageTelemetry,
@@ -740,6 +825,7 @@ export function createOfficeServer(options: OfficeServerOptions = {}): OfficeSer
     close: () => {
       unsubscribeRuntimeStatus?.();
       hostApps.close();
+      hermesAgentUpdate.close();
       const runtimeClose = runtimeSource?.close();
       const serverClose = new Promise<void>((resolve, reject) => {
         for (const client of websocketServer.clients) {

@@ -34,6 +34,7 @@ export function ComposerModelPickers({
   canSend,
   onQueued,
   onOpenAdvanced,
+  onInteract,
 }: {
   profileId: string;
   sessionId: string;
@@ -42,6 +43,7 @@ export function ComposerModelPickers({
   canSend: boolean;
   onQueued: () => void;
   onOpenAdvanced: () => void;
+  onInteract?: () => void;
 }) {
   const [open, setOpen] = useState<OpenMenu>(null);
   const [liveProviders, setLiveProviders] = useState<LiveChatProviderOption[]>([]);
@@ -54,7 +56,7 @@ export function ComposerModelPickers({
   const prefProvider = chatModelProvider.value;
   const prefModel = chatModelName.value;
   const displayProvider = displayProviderLabel(sessionProvider, prefProvider, liveProviders);
-  const displayModel = displayModelLabel(sessionModel, prefModel);
+  const displayModel = displayModelLabel(sessionModel, prefModel, liveModels);
   const displayEffort = chatModelReasoningEffort.value || t("chat.model.reasoning.default");
 
   useEffect(() => {
@@ -175,7 +177,7 @@ export function ComposerModelPickers({
           aria-expanded={open === "provider"}
           aria-label={t("chat.model.picker.providerAria", { name: displayProvider })}
           title={`${t("chat.provider.label")}: ${displayProvider}`}
-          onClick={() => void openMenu("provider")}
+          onClick={() => { onInteract?.(); void openMenu("provider"); }}
         >
           <span class="composer-model-chip-value">{displayProvider}</span>
           <span class="composer-model-chip-caret" aria-hidden="true">▾</span>
@@ -187,7 +189,7 @@ export function ComposerModelPickers({
           aria-expanded={open === "model"}
           aria-label={t("chat.model.picker.modelAria", { name: displayModel })}
           title={`${t("chat.model.label")}: ${displayModel}`}
-          onClick={() => void openMenu("model")}
+          onClick={() => { onInteract?.(); void openMenu("model"); }}
         >
           <span class="composer-model-chip-value">{displayModel}</span>
           <span class="composer-model-chip-caret" aria-hidden="true">▾</span>
@@ -199,7 +201,7 @@ export function ComposerModelPickers({
           aria-expanded={open === "effort"}
           aria-label={`${t("chat.reasoning")}: ${displayEffort}`}
           title={`${t("chat.reasoning")}: ${displayEffort}`}
-          onClick={() => setOpen((c) => c === "effort" ? null : "effort")}
+          onClick={() => { onInteract?.(); setOpen((c) => c === "effort" ? null : "effort"); }}
         >
           <span class="composer-model-chip-value">{displayEffort}</span>
           <span class="composer-model-chip-caret" aria-hidden="true">▾</span>
@@ -351,15 +353,29 @@ function displayProviderLabel(
     const live = liveProviders.find((item) => item.id === sessionProvider);
     return live?.label ?? sessionProvider;
   }
-  if (!prefProvider || isManualChatModelProvider(prefProvider)) return t("chat.model.default");
-  const live = liveProviders.find((item) => item.id === prefProvider);
-  return live?.label ?? prefProvider;
+  if (prefProvider && !isManualChatModelProvider(prefProvider)) {
+    const live = liveProviders.find((item) => item.id === prefProvider);
+    return live?.label ?? prefProvider;
+  }
+  if (isManualChatModelProvider(prefProvider)) return t("chat.model.custom");
+  const active = liveProviders.find((item) => item.active);
+  if (active) return active.label;
+  if (liveProviders[0]) return liveProviders[0].label;
+  return t("chat.provider.label");
 }
 
-function displayModelLabel(sessionModel: string | undefined, prefModel: string): string {
+function displayModelLabel(
+  sessionModel: string | undefined,
+  prefModel: string,
+  liveModels: readonly LiveChatModelOption[] = [],
+): string {
   if (sessionModel) return sessionModel;
-  if (prefModel) return prefModel;
-  return t("chat.model.default");
+  if (prefModel) {
+    const live = liveModels.find((item) => item.id === prefModel);
+    return live?.label ?? prefModel;
+  }
+  if (liveModels[0]) return liveModels[0].label;
+  return t("chat.model.label");
 }
 
 function reasoningEffortsFor(

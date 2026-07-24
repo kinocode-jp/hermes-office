@@ -4,21 +4,21 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: stretch;
-  min-height: 26px;
+  min-height: 32px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--surface-2);
 }
 
 .profile-group-toggle button {
   display: grid;
   place-items: center;
   min-width: 28px;
-  min-height: 26px;
+  min-height: 32px;
   padding: 0 8px;
   border: 0;
-  color: var(--muted);
+  color: var(--ink-muted);
   background: transparent;
   font: 700 var(--text-xs)/1 var(--font-sans);
   letter-spacing: 0.02em;
@@ -31,12 +31,12 @@
 
 .profile-group-toggle button.is-active,
 .profile-group-toggle button[aria-pressed="true"] {
-  color: var(--paper);
-  background: rgba(85, 214, 190, 0.14);
+  color: var(--ink);
+  background: var(--accent-soft);
 }
 
 .profile-group-toggle button:focus-visible {
-  outline: 2px solid var(--aqua);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
   z-index: 1;
 }
@@ -57,38 +57,33 @@
   padding: 4px 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface);
 }
 
 .profile-group-header i {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--team-color, var(--aqua));
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  background: var(--team-color, var(--accent));
 }
 
 .profile-group-header b {
   min-width: 0;
   overflow: hidden;
-  color: var(--paper);
+  color: var(--ink);
   font: 700 var(--text-sm)/1.2 var(--font-sans);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .profile-group-header small {
-  color: var(--muted);
-  font: 600 var(--text-xs)/1 ui-monospace, monospace;
+  color: var(--ink-muted);
+  font: 600 var(--text-xs)/1 var(--font-sans);
   white-space: nowrap;
 }
 
-.profile-group--unassigned .profile-group-header {
-  border-style: dashed;
-}
-
 .profile-group--unassigned .profile-group-header i {
-  background: var(--muted);
+  background: var(--ink-muted);
   opacity: 0.55;
 }
 
@@ -130,20 +125,20 @@
 }
 
 /* Narrow viewports and touch / coarse pointers (wide phones, foldables open). */
-@media (max-width: 767px), (hover: none) and (pointer: coarse) {
+@media (max-width: 768px), (hover: none) and (pointer: coarse) {
   .profile-group-toggle {
-    min-height: 32px;
+    min-height: 44px;
   }
 
   .profile-group-toggle button {
-    min-width: 36px;
-    min-height: 32px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0 10px;
     font-size: var(--text-sm);
   }
 
   .profile-group-header {
-    min-height: 34px;
+    min-height: 44px;
     padding: 6px 10px;
   }
 

@@ -71,7 +71,7 @@ export function ProfileCommand() {
 
   return (
     <>
-      <button class="quiet-button profile-command-trigger" type="button" aria-label={t("command.open")} onClick={openCommand}>⌘ K</button>
+      <button class="quiet-button profile-command-trigger" type="button" aria-label={t("command.open")} title={t("command.open")} onClick={openCommand}>⌘</button>
       {open && (
         <div class="profile-command-layer" role="presentation" onPointerDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
           <section ref={dialog} class="profile-command" role="dialog" aria-modal="true" aria-labelledby="profile-command-title" onKeyDown={trapFocus}>

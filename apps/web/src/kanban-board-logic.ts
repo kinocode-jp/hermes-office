@@ -1,7 +1,7 @@
 import type { TaskStatus, TaskWritableStatus } from "./domain";
 import { moveTask } from "./kanban-store";
 
-/** Statuses Office may write. Hermes owns `running` / `review`. */
+/** Statuses Studio may write. Hermes owns `running` / `review`. */
 export const KANBAN_WRITABLE_STATUSES = [
   "triage",
   "todo",
@@ -60,8 +60,8 @@ export function defaultKanbanColumnVisibility(): KanbanColumnVisibility {
   return {
     mode: "all",
     selected: [...DEFAULT_KANBAN_FOCUS_STATUSES],
-    hideEmpty: false,
-    layout: "columns",
+    hideEmpty: true,
+    layout: "stream",
   };
 }
 

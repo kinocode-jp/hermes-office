@@ -11,12 +11,9 @@ export function TeamBadges({ profileId, compact = false }: { profileId: string; 
   return (
     <span class={`team-badges ${compact ? "team-badges--compact" : ""}`} aria-label={t("teams.memberships", { count: memberships.length })}>
       {visible.map((team) => (
-        <span key={team.id} class="team-badge" style={{ "--team-color": team.color }} title={team.name}>
-          <i aria-hidden="true" />
-          <span>{team.name}</span>
-        </span>
+        <span key={team.id} class="team-badge" style={{ "--team-color": team.color }} role="img" aria-label={team.name} title={team.name} />
       ))}
-      {overflow > 0 && <span class="team-badge is-more" title={memberships.map((team) => team.name).join(", ")}>+{overflow}</span>}
+      {overflow > 0 && <span class="team-badge is-more" role="img" aria-label={memberships.slice(MAX_VISIBLE).map((team) => team.name).join(", ")} title={memberships.map((team) => team.name).join(", ")}>+{overflow}</span>}
     </span>
   );
 }

@@ -8,6 +8,7 @@ import {
 import { locale, t, type TranslationKey } from "../i18n";
 import { accessDeviceName } from "../audit-presentation";
 import { InfoTip } from "./info-tip";
+import { RefreshIcon } from "./icons";
 import "./access-audit.css";
 
 const operationLabels: Partial<Record<AccessAuditEntry["operation"], TranslationKey>> = {
@@ -16,6 +17,7 @@ const operationLabels: Partial<Record<AccessAuditEntry["operation"], Translation
   "auth.logout": "audit.operation.logout",
   "audit.read": "audit.operation.read",
   "host-app.install": "audit.operation.hostAppInstall",
+  "obsidian.vault.read": "audit.operation.obsidianVaultRead",
 };
 
 const outcomeLabels: Record<AccessAuditEntry["outcome"], TranslationKey> = {
@@ -72,7 +74,15 @@ export function AccessAudit() {
           <strong>{accessDeviceName(current)}</strong>
           <small>{current === null || current === undefined ? t("audit.checkingOwner") : current.local ? t("audit.localSafe") : t("audit.remoteSafe")}</small>
         </div>
-        <button type="button" onClick={() => void reload()} disabled={loading}>{loading ? t("audit.loading") : t("audit.reload")}</button>
+        <button
+          type="button"
+          onClick={() => void reload()}
+          disabled={loading}
+          aria-label={loading ? t("audit.loading") : t("audit.reload")}
+          title={loading ? t("audit.loading") : t("audit.reload")}
+        >
+          <RefreshIcon />
+        </button>
       </header>
 
       <div class="access-audit__rail">
@@ -90,7 +100,10 @@ export function AccessAudit() {
                 <time dateTime={record.occurredAt}>{formatTime(record.occurredAt)}</time>
                 <span class="access-audit__device"><i class={record.local ? "is-local" : "is-remote"} />{record.deviceName ?? (record.local ? t("audit.thisMac") : t("audit.remoteDevice"))}</span>
                 <span>{operationLabel(record.operation)}</span>
-                <span class={`access-audit__outcome is-${record.outcome}`}>{t(outcomeLabels[record.outcome])}</span>
+                <span class={`access-audit__outcome is-${record.outcome}`}>
+                  <i aria-hidden="true" />
+                  <InfoTip text={t(outcomeLabels[record.outcome])} align="end" />
+                </span>
               </li>
             ))}
           </ol>

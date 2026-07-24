@@ -1,5 +1,5 @@
 /**
- * Browser storage keys for Hermes Studio, with dual-read of legacy Hermes Office keys.
+ * Browser storage keys for Hermes Studio, with dual-read of legacy Hermes Studio keys.
  *
  * New keys use the `hermes-studio` prefix. When a new key is missing, values are
  * read from the matching `hermes-office…` key and copied forward so display

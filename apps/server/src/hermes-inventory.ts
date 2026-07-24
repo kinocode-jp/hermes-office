@@ -261,6 +261,10 @@ export class HermesInventoryCache {
     return { profiles: [...profiles.profiles], sessions: [...sessions.sessions], metadata: { profiles: profiles.pagination, sessions: sessions.pagination } };
   }
 
+  clear(): void {
+    this.#generations.clear();
+  }
+
   page(kind: OfficeInventoryKind, cursor: string, limit: number): OfficeInventoryPage {
     const decoded = decodeCursor(cursor, kind);
     this.#prune(this.#now());

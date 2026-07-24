@@ -24,6 +24,7 @@ import {
   type HermesSettingsAdapter,
 } from "./hermes-settings.js";
 import { createHermesModelsAdapter, type HermesModelsAdapter } from "./hermes-models.js";
+import { createHermesProjectsAdapter, type HermesProjectsAdapter } from "./hermes-projects.js";
 import { OfficeAgentBehaviorStore } from "./office-agent-behavior.js";
 import type { OfficeTeamSkillLayer } from "./office-teams.js";
 
@@ -53,11 +54,14 @@ export interface HermesRuntimeSource {
   status(): RuntimeStatus;
   snapshot(): Promise<OfficeSnapshot>;
   inventoryPage?(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage>;
+  /** Permanently delete a durable Hermes session. Absent ids are treated as success. */
+  deleteSession?(profile: string, sessionId: string): Promise<void>;
   close(): Promise<void>;
   chat(options?: { maxEventBytes?: number }): HermesChatTransport;
   kanban(): HermesKanbanAdapter;
   settings?(): HermesSettingsAdapter;
   models?(): HermesModelsAdapter;
+  projects?(): HermesProjectsAdapter;
   globalSettings?(): OfficeGlobalSettingsStore;
   globalInheritance?(): GlobalInheritanceCoordinator;
   agentBehavior?(): OfficeAgentBehaviorStore;
@@ -84,6 +88,7 @@ export class HermesBackend implements HermesRuntimeSource {
   #globalInheritance?: GlobalInheritanceCoordinator;
   #settingsAdapter?: HermesSettingsAdapter;
   #modelsAdapter?: HermesModelsAdapter;
+  #projectsAdapter?: HermesProjectsAdapter;
   #childGeneration = 0;
   #connectionGeneration = 0;
   #startFlight: Promise<RuntimeStatus> | undefined;
@@ -166,6 +171,17 @@ export class HermesBackend implements HermesRuntimeSource {
       ...(this.#options.requestTimeoutMs === undefined ? {} : { timeoutMs: this.#options.requestTimeoutMs }),
     });
     return this.#modelsAdapter;
+  }
+
+  projects(): HermesProjectsAdapter {
+    this.#projectsAdapter ??= createHermesProjectsAdapter({
+      resolveProfileBackend: async (profile) => {
+        if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+        return await this.#profilePool.resolve(profile);
+      },
+      ...(this.#options.requestTimeoutMs === undefined ? {} : { timeoutMs: this.#options.requestTimeoutMs }),
+    });
+    return this.#projectsAdapter;
   }
 
   globalSettings(): OfficeGlobalSettingsStore {
@@ -282,6 +298,16 @@ export class HermesBackend implements HermesRuntimeSource {
   async inventoryPage(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage> {
     if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
     return this.#inventory.page(kind, cursor, limit);
+  }
+
+  async deleteSession(profile: string, sessionId: string): Promise<void> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    const safeProfile = requireProfile(profile);
+    const safeSessionId = requireSessionId(sessionId);
+    const path = `/api/sessions/${encodeURIComponent(safeSessionId)}?profile=${encodeURIComponent(safeProfile)}`;
+    await this.#requestJson(path, true, undefined, undefined, { method: "DELETE" });
+    this.#inventory.clear();
+    this.#snapshotRefresh = undefined;
   }
 
   async #collectSnapshotData(connection: ConnectionGeneration): Promise<SnapshotCollection> {
@@ -460,8 +486,14 @@ export class HermesBackend implements HermesRuntimeSource {
       && this.#token === connection.token;
   }
 
-  async #requestJson(path: string, authenticated = true): Promise<unknown> {
-    return (await this.#requestJsonResult(path, authenticated)).value;
+  async #requestJson(
+    path: string,
+    authenticated = true,
+    timeoutLimitMs?: number,
+    connection?: ConnectionGeneration,
+    init?: { method?: "GET" | "DELETE"; body?: Record<string, unknown> },
+  ): Promise<unknown> {
+    return (await this.#requestJsonResult(path, authenticated, timeoutLimitMs, connection, init)).value;
   }
 
   async #requestJsonResult(
@@ -469,6 +501,7 @@ export class HermesBackend implements HermesRuntimeSource {
     authenticated = true,
     timeoutLimitMs?: number,
     connection?: ConnectionGeneration,
+    init?: { method?: "GET" | "DELETE"; body?: Record<string, unknown> },
   ): Promise<HermesJsonResult> {
     const baseUrl = connection?.baseUrl ?? this.#baseUrl;
     if (baseUrl === undefined) throw new Error("Hermes backend is not configured.");
@@ -483,23 +516,35 @@ export class HermesBackend implements HermesRuntimeSource {
     const token = connection?.token ?? this.#token;
     timeout.unref();
     try {
+      const method = init?.method ?? "GET";
       const response = await fetch(target, {
+        method,
         headers: {
           Accept: "application/json",
           ...(authenticated && token !== undefined ? { "X-Hermes-Session-Token": token } : {}),
+          ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
         },
+        ...(init?.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         redirect: "error",
         signal: controller.signal,
       });
       if (!response.ok) {
         const status = response.status;
         try { await response.body?.cancel(); } catch { /* Preserve the HTTP classification if body disposal fails. */ }
+        // Hermes documents DELETE /api/sessions/{id} as idempotent for absent ids.
+        if (method === "DELETE" && status === 404) {
+          return { value: { ok: true, absent: true }, bytes: 0 };
+        }
         if (status === 408 || status === 425 || status === 429 || status >= 500) {
           throw new Error(`Hermes temporarily returned ${status}.`);
         }
         throw new IncompatibleHermesError(`Hermes returned ${status}.`);
       }
+      if (response.status === 204) {
+        return { value: { ok: true }, bytes: 0 };
+      }
       const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
+      if (text.trim() === "") return { value: { ok: true }, bytes: 0 };
       return { value: JSON.parse(text) as unknown, bytes: Buffer.byteLength(text) };
     } finally {
       clearTimeout(timeout);
@@ -662,3 +707,19 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
 function bounded(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }
 
 class IncompatibleHermesError extends Error {}
+
+
+const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function requireProfile(value: string): string {
+  const profile = value.trim();
+  if (!PROFILE_ID_PATTERN.test(profile)) throw new Error("Profile identifier is invalid.");
+  return profile;
+}
+
+function requireSessionId(value: string): string {
+  const sessionId = value.trim();
+  if (!SESSION_ID_PATTERN.test(sessionId)) throw new Error("Session identifier is invalid.");
+  return sessionId;
+}

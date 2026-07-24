@@ -81,7 +81,7 @@ export function openMobileInspector(): void {
 
 /**
  * Close the currently visible mobile route (same transition as Android/browser Back).
- * Inspector closes first when stacked over workspace; then workspace returns to Office.
+ * Inspector closes first when stacked over workspace; then workspace returns to Studio.
  */
 export function closeMobileRoute(): void {
   reconcileStackFromSignals();
@@ -139,7 +139,7 @@ export function installMobileRouteHistory(): () => void {
     if (routeStack.length > 1) {
       routeStack.pop();
       applyTopRoute();
-      // Keep one history entry so the next Back can leave Office cleanly.
+      // Keep one history entry so the next Back can leave Studio cleanly.
       historyArmed = false;
       armHistoryIfNeeded(routeStack.at(-1)!);
       return;

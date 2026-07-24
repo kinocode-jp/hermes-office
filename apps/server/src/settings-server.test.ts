@@ -133,6 +133,14 @@ test("raw memory file GETs map to memory.update and are denied without that auth
   assert.equal(settingsOperation("GET", "/api/v1/profiles/coder/secrets"), "privileged-config.read");
   assert.equal(settingsOperation("POST", "/api/v1/profiles/coder/secrets"), "secret.write");
   assert.equal(settingsOperation("POST", "/api/v1/secret-transfers"), "secret.write");
+  // Official Hermes Projects: reads stay on state.read; bindings change the
+  // profile workspace and share the profile.update manager/step-up boundary.
+  assert.equal(settingsOperation("GET", "/api/v1/profiles/coder/projects"), "state.read");
+  assert.equal(settingsOperation("POST", "/api/v1/profiles/coder/projects"), "profile.update");
+  assert.equal(settingsOperation("PATCH", "/api/v1/profiles/coder/projects/abc123"), "profile.update");
+  assert.equal(settingsOperation("DELETE", "/api/v1/profiles/coder/projects/abc123"), "profile.update");
+  assert.equal(settingsOperation("POST", "/api/v1/profiles/coder/projects/abc123/folders"), "profile.update");
+  assert.equal(settingsOperation("DELETE", "/api/v1/profiles/coder/projects/abc123/folders"), "profile.update");
   assert.equal(OPERATION_POLICIES["memory.update"].minimumTier, "manager");
   assert.equal(OPERATION_POLICIES["memory.update"].boundary, "step-up-required");
   assert.equal(OPERATION_POLICIES["profile-config.update"].minimumTier, "manager");

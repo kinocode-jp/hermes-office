@@ -47,14 +47,20 @@ test("settings mutations fail closed for a remote operator snapshot", () => {
     global: false,
     skill: false,
     soul: false,
+    project: false,
     memory: false,
     config: false,
     privileged: false,
     hostApps: false,
+    hermesUpdate: false,
+    obsidianVaults: false,
     localOwner: false,
     hostAdmin: false,
   });
   assert.equal(canMutateSettingsTab(access, "privileged"), false);
+  // Project overview stays writable: its only editor is the device-local
+  // display-name alias, which needs no server operation.
+  assert.equal(canMutateSettingsTab(access, "project"), true);
 });
 
 test("privileged follows server allowedOperations for local owner and remote owner", () => {
@@ -93,6 +99,7 @@ test("privileged follows server allowedOperations for local owner and remote own
   ));
   assert.equal(remoteOwner.privileged, true);
   assert.equal(remoteOwner.hostApps, false);
+  assert.equal(remoteOwner.obsidianVaults, false);
   assert.equal(remoteOwner.hostAdmin, false);
   assert.equal(canMutateSettingsTab(remoteOwner, "privileged"), true);
 
@@ -107,21 +114,23 @@ test("privileged follows server allowedOperations for local owner and remote own
   assert.equal(remoteOwnerNoFlag.hostApps, false);
 
   const remoteOwnerWithHostApps = settingsMutationAccess(snapshot(
-    ["state.read", ...PRIVILEGED_OPS, "host-app.install"],
+    ["state.read", ...PRIVILEGED_OPS, "host-app.install", "obsidian.vault.read"],
     "owner",
     "tailnet",
     "device-cookie",
   ));
   assert.equal(remoteOwnerWithHostApps.hostApps, true);
+  assert.equal(remoteOwnerWithHostApps.obsidianVaults, true);
 
   const desktopOwner = settingsMutationAccess(snapshot(
-    ["state.read", ...PRIVILEGED_OPS, "host-app.install", "device.revoke", "audit.read"],
+    ["state.read", ...PRIVILEGED_OPS, "host-app.install", "obsidian.vault.read", "device.revoke", "audit.read"],
     "owner",
     "loopback",
     "desktop-capability",
   ));
   assert.equal(desktopOwner.privileged, true);
   assert.equal(desktopOwner.hostApps, true);
+  assert.equal(desktopOwner.obsidianVaults, true);
   assert.equal(desktopOwner.hostAdmin, true);
 });
 
@@ -130,10 +139,13 @@ test("settings mutations remain disabled until a validated snapshot exists", () 
     global: false,
     skill: false,
     soul: false,
+    project: false,
     memory: false,
     config: false,
     privileged: false,
     hostApps: false,
+    hermesUpdate: false,
+    obsidianVaults: false,
     localOwner: false,
     hostAdmin: false,
   });

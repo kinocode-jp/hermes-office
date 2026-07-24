@@ -43,7 +43,7 @@ export class AvatarOrdinalPreferences {
     if (changed) this.#persist(this.#snapshot());
   }
 
-  /** Reconciles only after Office has observed one complete authoritative roster. */
+  /** Reconciles only after Studio has observed one complete authoritative roster. */
   reconcile(profileIds: readonly string[]): void {
     const current = uniqueProfileIds(profileIds);
     const currentSet = new Set(current);

@@ -6,6 +6,7 @@ import {
   activeSessionId,
   clearFollowUpSuggestions,
   closeSession,
+  consumeCardSeed,
   interruptSession,
   officeSnapshot,
   openSession,
@@ -28,8 +29,24 @@ import {
 } from "../chat-model-prefs";
 import { ChatModelPanel } from "./chat-model-panel";
 import { ComposerModelPickers } from "./composer-model-pickers";
+import { AttachIcon, CloseIcon, MenuIcon, MicIcon, SendIcon, SteerIcon, StopIcon } from "./icons";
+import {
+  setWorkspacePlacement,
+  workspacePlacement,
+  type WorkspacePlacement,
+} from "../workspace-layout";
 
-export function ChatPane({ session, profile }: { session: ChatSession; profile: Profile }) {
+export function ChatPane({
+  session,
+  profile,
+  onClosePane,
+  hideHeader = false,
+}: {
+  session: ChatSession;
+  profile: Profile;
+  onClosePane?: () => void;
+  hideHeader?: boolean;
+}) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | undefined>(undefined);
@@ -43,6 +60,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const announcedOperationKey = useRef("");
   const messageListRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerMenuRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottom = useRef(true);
   const isActive = activeSessionId.value === session.id;
   const isLiveChat = session.remoteKind === "stored" || session.remoteKind === "draft";
@@ -55,9 +73,14 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
   const timeline = groupChatTimeline(buildChatTimeline(transcript, operationEvidence));
   const displayTitle = chatSessionTitle(session);
   const profileName = profileDisplayName(profile);
+  const waitingForCardQuestion = Boolean(session.sourceCardId)
+    && session.sourceCardSeeded !== true
+    && (session.messages?.length ?? 0) === 0;
   const composerPlaceholder = session.pendingInteraction ? t("chat.answerAbove")
     : !isConnected ? t("chat.connectingPlaceholder")
-      : runActive ? t("chat.steerPlaceholder") : t("chat.instruct", { name: profileName });
+      : runActive ? t("chat.steerPlaceholder")
+        : waitingForCardQuestion ? t("kanban.askSeed.placeholder")
+          : t("chat.instruct", { name: profileName });
   const statusText = useMemo(() => {
     if (session.connectionState === "error") return t("chat.status.error");
     if (session.connectionState === "connecting") return t("chat.status.connecting");
@@ -87,6 +110,24 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
     announcedOperationKey.current = next.key;
     setAnnouncedOperation(next.operation);
   }, [operationEvidence.at(-1)?.id, operationEvidence.at(-1)?.state, operationEvidence.at(-1)?.message]);
+
+  useEffect(() => {
+    if (!composerMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (target && composerMenuRef.current?.contains(target)) return;
+      setComposerMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setComposerMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [composerMenuOpen]);
 
   async function addFiles(fileList: FileList | null): Promise<void> {
     if (!fileList?.length) return;
@@ -131,7 +172,15 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
       return;
     }
     if (!canSend) return;
-    sendMessage(session.id, prompt);
+    // For "Ask assignee", attach card context once to the user's first typed prompt.
+    const cardContext = consumeCardSeed(session.id);
+    const outbound = cardContext
+      ? `${cardContext}
+
+--- ${t("kanban.askSeed.userQuestion")} ---
+${prompt}`
+      : prompt;
+    sendMessage(session.id, outbound);
     setDraft("");
     setAttachments([]);
     setAttachError(undefined);
@@ -143,17 +192,149 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
     clearFollowUpSuggestions(session.id);
   }
 
+  const toggleVoiceInput = () => {
+    setComposerMenuOpen(false);
+    const existing = voiceRecognitionRef.current;
+    if (existing) {
+      try { existing.stop(); } catch { /* ignore */ }
+      voiceRecognitionRef.current = null;
+      setVoiceListening(false);
+      return;
+    }
+
+    const SpeechRecognitionImpl = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionImpl) {
+      setAttachError(t("chat.voiceUnsupported"));
+      return;
+    }
+
+    const recognition = new SpeechRecognitionImpl();
+    recognition.lang = locale.value.startsWith("ja") ? "ja-JP" : "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    recognition.maxAlternatives = 1;
+
+    let finalized = "";
+    recognition.onstart = () => setVoiceListening(true);
+    recognition.onresult = (event: any) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const piece = event.results[i]?.[0]?.transcript ?? "";
+        if (event.results[i]?.isFinal) finalized += piece;
+        else interim += piece;
+      }
+      const next = `${finalized}${interim}`.trimStart();
+      if (next) setDraft((current) => {
+        // Replace current draft while dictating for predictable UX.
+        return next;
+      });
+    };
+    recognition.onerror = (event: any) => {
+      const code = typeof event?.error === "string" ? event.error : "";
+      if (code && code !== "aborted" && code !== "no-speech") {
+        setAttachError(t("chat.voiceUnsupported"));
+      }
+      setVoiceListening(false);
+      voiceRecognitionRef.current = null;
+    };
+    recognition.onend = () => {
+      // Keep listening only while this instance is still active.
+      if (voiceRecognitionRef.current !== recognition) return;
+      setVoiceListening(false);
+      voiceRecognitionRef.current = null;
+    };
+
+    voiceRecognitionRef.current = recognition;
+    try {
+      recognition.start();
+      setVoiceListening(true);
+      setAttachError(undefined);
+    } catch {
+      setVoiceListening(false);
+      voiceRecognitionRef.current = null;
+      setAttachError(t("chat.voiceUnsupported"));
+    }
+  };
+
+  useEffect(() => () => {
+    const active = voiceRecognitionRef.current;
+    if (!active) return;
+    try { active.stop(); } catch { /* ignore */ }
+    voiceRecognitionRef.current = null;
+  }, []);
+
   return (
-    <article class={`chat-pane ${isActive ? "is-active" : ""}`} style={{ "--session-color": profile.color }} onPointerDown={() => openSession(session.id)}>
-      <header class="chat-header">
-        <span class="profile-dot" style={{ background: profile.color }} />
-        <div>
-          <b>{profileName}</b>
-          <span>{displayTitle}</span>
-        </div>
-        <span class={`chat-state state-${session.connectionState ?? session.status}`}>{statusText}</span>
-        <button class="icon-button" onClick={() => closeSession(session.id)} aria-label={t("chat.close", { title: displayTitle })}>×</button>
-      </header>
+    <article
+      class={`chat-pane ${isActive ? "is-active" : ""} ${hideHeader ? "is-headerless" : ""}`}
+      style={{ "--session-color": profile.color }}
+      onPointerDown={() => {
+        if (activeSessionId.value !== session.id) openSession(session.id);
+      }}
+    >
+      {!hideHeader && (
+        <header
+          class="chat-header"
+          draggable
+          title={t("workspace.dragPane")}
+          onDragStart={(event) => {
+            event.stopPropagation();
+            event.dataTransfer?.setData("application/x-hermes-session", session.id);
+            event.dataTransfer?.setData("text/plain", session.id);
+            if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+            if (event.currentTarget instanceof HTMLElement) {
+              event.currentTarget.classList.add("is-dragging");
+            }
+          }}
+          onDragEnd={(event) => {
+            if (event.currentTarget instanceof HTMLElement) {
+              event.currentTarget.classList.remove("is-dragging");
+            }
+          }}
+        >
+          <span class="profile-dot" style={{ background: profile.color }} />
+          <div>
+            <b>{profileName}</b>
+            <span>{displayTitle}</span>
+          </div>
+          <span
+            class={`chat-state state-${session.connectionState ?? session.status}`}
+            role="img"
+            aria-label={statusText}
+            title={statusText}
+          />
+          <label
+            class="chat-placement-control"
+            title={t("layout.handleTitle")}
+            draggable={false}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDragStart={(event) => event.preventDefault()}
+          >
+            <span class="visually-hidden">{t("appearance.layout")}</span>
+            <select
+              value={workspacePlacement.value}
+              aria-label={t("appearance.layout")}
+              onChange={(event) => setWorkspacePlacement(event.currentTarget.value as WorkspacePlacement)}
+            >
+              <option value="left">{t("appearance.placement.left")}</option>
+              <option value="right">{t("appearance.placement.right")}</option>
+              <option value="top">{t("appearance.placement.top")}</option>
+              <option value="bottom">{t("appearance.placement.bottom")}</option>
+            </select>
+          </label>
+          <button
+            class="icon-button"
+            draggable={false}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDragStart={(event) => event.preventDefault()}
+            onClick={() => {
+              if (onClosePane) onClosePane();
+              else closeSession(session.id);
+            }}
+            aria-label={t("chat.close", { title: displayTitle })}
+            title={t("chat.close", { title: displayTitle })}
+          ><CloseIcon width={18} height={18} /></button>
+        </header>
+      )}
 
       <div
         class="message-list"
@@ -169,7 +350,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             <span>{localizeRuntimeMessage(session.errorMessage)}</span>
             {isLiveChat && (session.connectionState === "error" || session.historyState === "error") && <button type="button" onClick={() => reconnectChatSession(session.id)}>{session.historyState === "error" ? t("chat.reload") : t("chat.reconnect")}</button>}
           </div>
-        ) : session.connectionState === "disconnected" && isLiveChat ? (
+        ) : session.connectionState === "disconnected" && isLiveChat && session.messages.length === 0 ? (
           <div class="chat-connection-note"><span>{t("chat.recovering")}</span></div>
         ) : null}
         {session.historyPartial && <div class="chat-connection-note"><span>{session.historyNotice ? localizeRuntimeMessage(session.historyNotice) : t("chat.historyPartial")}</span></div>}
@@ -239,7 +420,7 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
                   ? <img src={item.dataUrl} alt={item.name} />
                   : <span aria-hidden="true">📄</span>}
                 <b title={item.name}>{item.name}</b>
-                <button type="button" aria-label={t("chat.attachRemove")} onClick={() => setAttachments((current) => current.filter((entry) => entry.id !== item.id))}>×</button>
+                <button type="button" aria-label={t("chat.attachRemove")} title={t("chat.attachRemove")} onClick={() => setAttachments((current) => current.filter((entry) => entry.id !== item.id))}><CloseIcon width={14} height={14} /></button>
               </div>
             ))}
           </div>
@@ -253,42 +434,8 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             accept="image/*,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.toml,.sh"
             onChange={(event) => void addFiles(event.currentTarget.files)}
           />
-          <button type="button" class="composer-tool" disabled={!canCompose} title={t("chat.attach")} aria-label={t("chat.attach")} onClick={() => fileInputRef.current?.click()}>📎</button>
-          <button
-            type="button"
-            class={`composer-tool composer-voice-btn ${voiceListening ? "is-listening" : ""}`}
-            disabled={!canCompose}
-            title={voiceListening ? t("chat.voiceListening") : t("chat.voice")}
-            aria-label={t("chat.voice")}
-            onClick={() => {
-              if (voiceListening) {
-                voiceRecognitionRef.current?.stop();
-                setVoiceListening(false);
-                return;
-              }
-              const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-              if (!SR) { alert(t("chat.voiceUnsupported")); return; }
-              const rec = new SR();
-              rec.lang = locale.value.startsWith("ja") ? "ja-JP" : "en-US";
-              rec.interimResults = true;
-              rec.continuous = false;
-              let finalTranscript = "";
-              rec.onresult = (e: any) => {
-                let interim = "";
-                for (let i = e.resultIndex; i < e.results.length; i++) {
-                  if (e.results[i].isFinal) finalTranscript += e.results[i][0].transcript;
-                  else interim += e.results[i][0].transcript;
-                }
-                setDraft(finalTranscript + interim);
-              };
-              rec.onend = () => { setVoiceListening(false); voiceRecognitionRef.current = null; };
-              rec.onerror = () => { setVoiceListening(false); voiceRecognitionRef.current = null; };
-              voiceRecognitionRef.current = rec;
-              setVoiceListening(true);
-              rec.start();
-            }}
-          >{voiceListening ? "⏹" : "🎤"}</button>
-          <div class="composer-menu-wrap">
+          <button type="button" class="composer-tool" disabled={!canCompose} title={t("chat.attach")} aria-label={t("chat.attach")} onClick={() => { setComposerMenuOpen(false); fileInputRef.current?.click(); }}><AttachIcon width={20} height={20} /></button>
+          <div class="composer-menu-wrap" ref={composerMenuRef}>
             <button
               type="button"
               class={`composer-tool composer-menu-trigger ${composerMenuOpen ? "is-open" : ""}`}
@@ -296,26 +443,21 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
               aria-label={t("chat.menu")}
               aria-expanded={composerMenuOpen}
               onClick={() => setComposerMenuOpen(!composerMenuOpen)}
-            >☰</button>
+            ><MenuIcon width={20} height={20} /></button>
             {composerMenuOpen && (
               <div class="composer-menu-panel" role="menu">
-                <div class="composer-menu-section">{t("chat.menu.add")}</div>
                 <button type="button" role="menuitem" class="composer-menu-item" onClick={() => { fileInputRef.current?.click(); setComposerMenuOpen(false); }}>
-                  <span class="composer-menu-icon">📎</span>
-                  <b>{t("chat.menu.files")}</b>
+                  <span class="composer-menu-item-label">{t("chat.menu.files")}</span>
                 </button>
                 <button type="button" role="menuitem" class="composer-menu-item" onClick={() => { setModelOpen(true); setModelNote(undefined); setComposerMenuOpen(false); }}>
-                  <span class="composer-menu-icon">⚙</span>
-                  <b>{t("chat.menu.settings")}</b>
+                  <span class="composer-menu-item-label">{t("chat.menu.settings")}</span>
                 </button>
                 <button type="button" role="menuitem" class="composer-menu-item" onClick={() => setComposerMenuOpen(false)}>
-                  <span class="composer-menu-icon">🎯</span>
-                  <b>{t("chat.menu.goal")}</b>
+                  <span class="composer-menu-item-label">{t("chat.menu.goal")}</span>
                   <small>{t("chat.menu.goalHint")}</small>
                 </button>
                 <button type="button" role="menuitem" class="composer-menu-item" onClick={() => setComposerMenuOpen(false)}>
-                  <span class="composer-menu-icon">💡</span>
-                  <b>{t("chat.menu.planMode")}</b>
+                  <span class="composer-menu-item-label">{t("chat.menu.planMode")}</span>
                   <small>{t("chat.menu.planModeHint")}</small>
                 </button>
               </div>
@@ -329,9 +471,11 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             canSend={canSend}
             onQueued={() => setModelNote(t("chat.model.queued"))}
             onOpenAdvanced={() => {
+              setComposerMenuOpen(false);
               setModelOpen(true);
               setModelNote(undefined);
             }}
+            onInteract={() => setComposerMenuOpen(false)}
           />
           {presetReadout && (
             <small class="composer-model-readout" title={t("chat.model.hint")}>
@@ -376,8 +520,25 @@ export function ChatPane({ session, profile }: { session: ChatSession; profile: 
             rows={2}
           />
           <div class="composer-actions">
-            <button type="submit" disabled={submitDisabled}>{runActive ? t("chat.steer") : t("chat.send")}</button>
-            {showStop && <button type="button" class="interrupt-button" aria-busy={session.interruptPending === true} disabled={session.connectionState !== "ready" || session.interruptPending === true} onClick={() => void interruptSession(session.id)}>{session.interruptPending ? t("chat.stopping") : t("chat.stop")}</button>}
+            <button
+              type="button"
+              class={`composer-tool composer-voice-btn ${voiceListening ? "is-listening" : ""}`}
+              disabled={!canCompose && !voiceListening}
+              title={voiceListening ? t("chat.voiceListening") : t("chat.voice")}
+              aria-label={t("chat.voice")}
+              aria-pressed={voiceListening}
+              onClick={toggleVoiceInput}
+            >{voiceListening ? <StopIcon width={18} height={18} /> : <MicIcon width={18} height={18} />}</button>
+            <button
+              type="submit"
+              class="composer-send"
+              disabled={submitDisabled}
+              title={runActive ? t("chat.steer") : t("chat.send")}
+              aria-label={runActive ? t("chat.steer") : t("chat.send")}
+            >
+              {runActive ? <SteerIcon width={18} height={18} /> : <SendIcon width={18} height={18} />}
+            </button>
+            {showStop && <button type="button" class="interrupt-button" aria-busy={session.interruptPending === true} aria-label={session.interruptPending ? t("chat.stopping") : t("chat.stop")} title={session.interruptPending ? t("chat.stopping") : t("chat.stop")} disabled={session.connectionState !== "ready" || session.interruptPending === true} onClick={() => void interruptSession(session.id)}><StopIcon width={18} height={18} /></button>}
           </div>
         </div>
         {(attachError || modelNote || blocked) && (
@@ -529,8 +690,8 @@ function ChatLogGroup({
       <button type="button" class="chat-log-group-toggle" aria-expanded={expanded} onClick={onToggle}>
         <span class="chat-log-group-icon" aria-hidden="true">⚙</span>
         <b>{t("chat.logs.group", { count: group.messages.length })}</b>
-        <span class="chat-log-group-preview">{preview}</span>
         <small>{expanded ? t("chat.logs.collapse") : t("chat.logs.expand")}</small>
+        <span class="chat-log-group-preview">{preview}</span>
       </button>
       {expanded && (
         <div class="chat-log-group-items">

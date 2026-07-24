@@ -20,6 +20,7 @@ import {
   restoredSelectedProfileId,
   restoredSettingsTab,
 } from "./ui-nav-prefs";
+import { isScheduledSessionHidden } from "./scheduled-sessions";
 
 export const profileList = signal<Profile[]>([]);
 export const sessions = signal<ChatSession[]>([]);
@@ -31,11 +32,17 @@ export const openSessionIds = signal<string[]>([]);
 export const activeSessionId = signal("");
 export const mobileInspectorOpen = signal(false);
 export const mobileWorkspaceOpen = signal(false);
+/** True while a sidebar chat session is being dragged for workspace drop. */
+export const workspaceSessionDropPreview = signal(false);
+/** Preferred chat dock edge while dragging a session (top/right/bottom/left). */
+export const workspaceSessionDropPlacement = signal<"top" | "right" | "bottom" | "left" | null>(null);
 export const profileSettingsModalId = signal<string | null>(null);
-export const profileDetailModalId = signal<string | null>(null);
+export const profileSettingsModalTab = signal<SettingsTab>("soul");
+export const settingsModalOpen = signal(false);
 export const profileChatModalId = signal<string | null>(null);
-export const recurringJobsOpen = signal(false);
+export const profileChatModalPaneIds = signal<string[]>([]);
 export const MAX_OPEN_CHAT_SESSIONS = 4;
+export const MAX_PROFILE_CHAT_MODAL_PANES = 4;
 export const chatSocketState = signal<{ state: ChatConnectionState; message: RuntimeMessage }>({
   state: "disconnected",
   message: officeMessage("runtime.chat.waiting")
@@ -57,7 +64,7 @@ export const selectedProfile = computed(() =>
   profileList.value.find((profile) => profile.id === selectedProfileId.value)
 );
 export const selectedProfileSessions = computed(() =>
-  sessions.value.filter((session) => session.profileId === selectedProfileId.value)
+  sessions.value.filter((session) => session.profileId === selectedProfileId.value && !isScheduledSessionHidden(session))
 );
 
 export const officeRuntimeHooks = {

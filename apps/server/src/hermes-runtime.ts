@@ -184,7 +184,7 @@ export function isRecognizedHermesVersion(version: string): boolean {
   return Number.isSafeInteger(major) && Number.isSafeInteger(minor) && Number.isSafeInteger(patch);
 }
 
-function createVersionProbeEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function createVersionProbeEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"] as const) {
     const value = source[key];

@@ -4,8 +4,8 @@ import type { SettingsTab, Surface } from "./domain";
 const STORAGE_KEY = "hermes-studio:ui-nav:v1";
 const VERSION = 1;
 
-const SURFACES: readonly Surface[] = ["office", "kanban", "teams", "library", "settings"];
-const SETTINGS_TABS: readonly SettingsTab[] = ["global", "skills", "soul", "memory", "config", "privileged", "host"];
+const SURFACES: readonly Surface[] = ["office", "kanban", "teams", "library", "settings", "scheduled"];
+const SETTINGS_TABS: readonly SettingsTab[] = ["global", "project", "skills", "soul", "memory", "config", "privileged", "host"];
 
 export type UiNavPreferences = {
   version: typeof VERSION;
@@ -17,7 +17,7 @@ export type UiNavPreferences = {
 const defaults: UiNavPreferences = {
   version: VERSION,
   surface: "office",
-  settingsTab: "skills",
+  settingsTab: "global",
   selectedProfileId: "",
 };
 
@@ -49,9 +49,17 @@ export function normalizeUiNavPreferences(value: unknown): UiNavPreferences {
   let settingsTab = SETTINGS_TABS.includes(record.settingsTab as SettingsTab)
     ? (record.settingsTab as SettingsTab)
     : defaults.settingsTab;
-  // "library" was a mislabeled global-settings entry; migrate to Settings → Global.
+  // "library" was a mislabeled global-settings entry.
   if (surface === "library") {
-    surface = "settings";
+    surface = "office";
+    settingsTab = "global";
+  }
+  // Settings is a header modal now, not a restorable main surface.
+  if (surface === "settings") {
+    surface = "office";
+  }
+  // Settings modal only hosts global/host; profile tabs open from each profile modal.
+  if (settingsTab !== "global" && settingsTab !== "host") {
     settingsTab = "global";
   }
   const selectedProfileId = typeof record.selectedProfileId === "string"

@@ -58,7 +58,7 @@ export function writeAuthorizationError(
   maxBytes: number,
 ): void {
   if (reason === "unauthenticated") {
-    writeError(response, 401, "unauthenticated", "Office session is required.", maxBytes);
+    writeError(response, 401, "unauthenticated", "Studio session is required.", maxBytes);
     return;
   }
   const message = reason === "csrf" ? "A valid CSRF token is required."

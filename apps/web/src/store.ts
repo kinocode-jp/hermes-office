@@ -3,10 +3,13 @@ import { initialSessions, initialTaskComments, initialTasks, initialTeams, profi
 import { createDemoKanbanApi } from "./demo-kanban-api";
 import { loadTeamsDemoRuntime, resetTeamsRuntimeState } from "./teams-store";
 import type { ChatTarget } from "./chat-api";
-import type { OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, Surface } from "./domain";
+import type { OfficeSnapshot, OfficeSnapshotRequestIdentity, Profile, SettingsTab, Surface } from "./domain";
 import type { DeviceLoginFailure } from "./auth-state";
 import { loadKanbanDemoRuntime, registerKanbanProfileTaskUpdater, resetKanbanRuntimeState } from "./kanban-store";
+import { prefetchSelectedProfileSettings } from "./settings-prefetch";
 import { findStoredSession, storedSessionClientId } from "./session-identity";
+import { isScheduledSessionHidden } from "./scheduled-sessions";
+import { deleteStoredSession } from "./sessions-api";
 import { mergeServerSessionStatus } from "./session-runtime";
 import { reconcileChatSessionDisconnected } from "./chat-session-reconciliation";
 import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
@@ -14,7 +17,6 @@ import { ensurePokemonDisplayNames } from "./profile-names";
 import { resolvedCreateModelPrefs } from "./chat-model-prefs";
 import { setOfficeWindowOpen } from "./office-window";
 import { officeMessage, officeRuntimeMessage } from "./i18n";
-import { isRecurringSessionHidden } from "./recurring-jobs";
 import {
   buildCardAskSeedPrompt,
   cardAskSeedInputFromTask,
@@ -23,11 +25,11 @@ import {
 import {
   clearMobileRoutes,
   noteMobileWorkspaceClosed,
-  openMobileInspector,
   openMobileWorkspace,
 } from "./mobile-routes";
 import {
   MAX_OPEN_CHAT_SESSIONS,
+  MAX_PROFILE_CHAT_MODAL_PANES,
   activeSessionId,
   activeSurface,
   chatSocketState,
@@ -38,11 +40,14 @@ import {
   officeRuntimeHooks,
   officeSnapshot,
   openSessionIds,
+  workspaceSessionDropPreview,
+  workspaceSessionDropPlacement,
   profileList,
-  profileDetailModalId,
   profileSettingsModalId,
+  profileSettingsModalTab,
+  settingsModalOpen,
   profileChatModalId,
-  recurringJobsOpen,
+  profileChatModalPaneIds,
   runtimeDataSource,
   selectedProfile,
   selectedProfileId,
@@ -56,21 +61,25 @@ import { persistUiNavPreferences } from "./ui-nav-prefs";
 
 export {
   MAX_OPEN_CHAT_SESSIONS,
+  MAX_PROFILE_CHAT_MODAL_PANES,
   activeSessionId,
   activeSurface,
   chatSocketState,
   inspectorTab,
   mobileInspectorOpen,
   mobileWorkspaceOpen,
+  workspaceSessionDropPreview,
+  workspaceSessionDropPlacement,
   officeAccess,
   officeConnection,
   officeSnapshot,
   openSessionIds,
-  profileDetailModalId,
   profileList,
   profileSettingsModalId,
+  profileSettingsModalTab,
+  settingsModalOpen,
   profileChatModalId,
-  recurringJobsOpen,
+  profileChatModalPaneIds,
   selectedProfile,
   selectedProfileId,
   selectedProfileSessions,
@@ -109,6 +118,7 @@ import {
   setChatSocketState,
   steerSession,
   tryFlushCardSeed,
+  consumeCardSeed,
 } from "./store-chat";
 
 export {
@@ -133,6 +143,7 @@ export {
   setChatSocketState,
   steerSession,
   tryFlushCardSeed,
+  consumeCardSeed,
 };
 
 registerKanbanProfileTaskUpdater((counts) => {
@@ -140,13 +151,14 @@ registerKanbanProfileTaskUpdater((counts) => {
 });
 
 export function navigateToSurface(surface: Surface): void {
-  // Legacy "library" was global agent settings; fold it into Settings.
-  if (surface === "library") {
-    activeSurface.value = "settings";
-    settingsTab.value = "global";
-  } else {
-    activeSurface.value = surface;
+  // Settings is a header modal, not a main surface.
+  if (surface === "settings" || surface === "library") {
+    openSettingsModal(surface === "library" ? "global" : settingsTab.value);
+    return;
   }
+  activeSurface.value = surface;
+  // Leaving another surface closes the settings modal so the floor stays primary.
+  settingsModalOpen.value = false;
   if (activeSurface.value === "office") setOfficeWindowOpen(true);
   clearMobileRoutes();
   persistNavigationState();
@@ -292,7 +304,6 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   const previousTargetIds = new Set(getOpenChatTargets().map((target) => target.clientSessionId));
   const sessionCounts = new Map<string, number>();
   for (const session of snapshot.sessions) {
-    if (isRecurringSessionHidden(storedSessionClientId(session.profileId, session.id))) continue;
     sessionCounts.set(session.profileId, (sessionCounts.get(session.profileId) ?? 0) + 1);
   }
   const palette = ["#64b7a7", "#e07a55", "#d6a94f", "#8499c8", "#55d6be", "#f06a57"];
@@ -322,7 +333,15 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   if (snapshot.inventory.profiles.hasMore || snapshot.inventory.profiles.truncated) profileList.value = [...profileList.value, ...[...previousProfiles.values()].filter((profile) => !snapshot.profiles.some((live) => live.id === profile.id))];
 
   const previousSessions = sessions.value;
-  const snapshotSessions = snapshot.sessions.filter((live) => !isRecurringSessionHidden(storedSessionClientId(live.profileId, live.id))).map((live): import("./domain").ChatSession => {
+  const snapshotSessions = snapshot.sessions
+    .filter((live) => !isScheduledSessionHidden({
+      id: live.id,
+      storedSessionId: live.id,
+      profileId: live.profileId,
+      title: live.title,
+      titlePresentation: undefined,
+    }))
+    .map((live): import("./domain").ChatSession => {
     const previous = findStoredSession(previousSessions, live);
     return {
       ...(previous ?? { id: storedSessionClientId(live.profileId, live.id), messages: [] }),
@@ -342,7 +361,11 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   });
   const retainedStored = snapshot.inventory.sessions.hasMore || snapshot.inventory.sessions.truncated ? previousSessions.filter((session) => session.remoteKind === "stored" && !snapshot.sessions.some((live) => live.id === (session.storedSessionId ?? session.id) && live.profileId === session.profileId)) : [];
   const unpersistedDrafts = previousSessions.filter((session) => session.remoteKind === "draft" && !session.storedSessionId);
-  sessions.value = [...snapshotSessions, ...retainedStored, ...unpersistedDrafts];
+  sessions.value = [
+    ...snapshotSessions,
+    ...retainedStored.filter((session) => !isScheduledSessionHidden(session)),
+    ...unpersistedDrafts,
+  ];
 
   const liveSessionIds = new Set(sessions.value.map((session) => session.id));
   const previouslyOpen = openSessionIds.value;
@@ -351,6 +374,7 @@ export function applyOfficeSnapshot(snapshot: OfficeSnapshot, source: string | O
   if (!liveSessionIds.has(activeSessionId.value)) activeSessionId.value = openSessionIds.value.at(-1) ?? "";
   if (!profileList.value.some((profile) => profile.id === selectedProfileId.value)) {
     selectedProfileId.value = profileList.value[0]?.id ?? "";
+    prefetchSelectedProfileSettings(selectedProfileId.value || null);
   }
   setRuntimeDataSource("live");
   for (const target of getOpenChatTargets()) if (!previousTargetIds.has(target.clientSessionId)) officeRuntimeHooks.ensureChatSession(target);
@@ -382,42 +406,57 @@ function activityToStatus(activity: string): Profile["status"] {
 
 function updateProfileSessionCounts(): void {
   const counts = new Map<string, number>();
-  for (const session of sessions.value) if (session.remoteKind !== "demo") counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  for (const session of sessions.value) {
+    if (session.remoteKind === "demo" || isScheduledSessionHidden(session)) continue;
+    counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  }
   profileList.value = profileList.value.map((profile) => ({ ...profile, sessions: counts.get(profile.id) ?? 0 }));
 }
 
 export function selectProfile(profileId: string, options?: { openWorkspace?: boolean; openDetail?: boolean }): void {
   selectedProfileId.value = profileId;
+  prefetchSelectedProfileSettings(profileId);
   inspectorTab.value = "chat";
   persistNavigationState();
   if (options?.openWorkspace) {
     const existing = sessions.value.find((session) => session.profileId === profileId);
     if (existing) openSession(existing.id);
     else createSession(profileId);
-    // Office floor / character click: chat workspace only on mobile (not the inspector).
+    // Studio floor / character click: chat workspace only on mobile (not the inspector).
     openMobileWorkspace();
     return;
   }
   if (options?.openDetail !== false) {
     openProfileChatModal(profileId);
-    return;
   }
-  openMobileInspector();
 }
 
-export function openProfileDetailModal(profileId: string): void {
-  selectedProfileId.value = profileId;
-  profileDetailModalId.value = profileId;
+
+export function openScheduledSessions(): void {
+  navigateToSurface("scheduled");
+}
+
+export function closeScheduledSessions(): void {
+  if (activeSurface.value === "scheduled") navigateToSurface("office");
+}
+
+export function openSettingsModal(tab: SettingsTab = "global"): void {
+  settingsTab.value = tab === "host" ? "host" : "global";
+  settingsModalOpen.value = true;
   persistNavigationState();
 }
 
-export function closeProfileDetailModal(): void {
-  profileDetailModalId.value = null;
+export function closeSettingsModal(): void {
+  settingsModalOpen.value = false;
+  persistNavigationState();
 }
 
-export function openProfileSettingsModal(profileId: string): void {
+export function openProfileSettingsModal(profileId: string, tab: SettingsTab = "soul"): void {
   selectedProfileId.value = profileId;
+  prefetchSelectedProfileSettings(profileId);
   profileSettingsModalId.value = profileId;
+  // Profile settings stay modal-scoped; only profile-owned tabs are accepted.
+  profileSettingsModalTab.value = tab === "global" || tab === "host" ? "soul" : tab;
   persistNavigationState();
 }
 
@@ -425,43 +464,149 @@ export function closeProfileSettingsModal(): void {
   profileSettingsModalId.value = null;
 }
 
-export function openProfileChatModal(profileId: string): void {
+export function openProfileChatModal(profileId: string, options?: { sessionId?: string }): void {
   selectedProfileId.value = profileId;
+  prefetchSelectedProfileSettings(profileId);
   profileChatModalId.value = profileId;
+  if (options?.sessionId) {
+    profileChatModalPaneIds.value = [options.sessionId];
+    ensureSessionConnection(options.sessionId);
+  } else {
+    profileChatModalPaneIds.value = [];
+  }
   persistNavigationState();
 }
 
 export function closeProfileChatModal(): void {
   profileChatModalId.value = null;
+  profileChatModalPaneIds.value = [];
 }
 
-export function openRecurringJobs(): void {
-  recurringJobsOpen.value = true;
-}
-
-export function closeRecurringJobs(): void {
-  recurringJobsOpen.value = false;
-}
-
-export function openSession(sessionId: string): void {
-  if (!openSessionIds.value.includes(sessionId)) {
-    const previousIds = openSessionIds.value;
-    const nextIds = appendOpenSessionId(previousIds, sessionId);
-    openSessionIds.value = nextIds;
-    for (const evictedId of previousIds.filter((id) => !nextIds.includes(id))) releaseChatTarget(evictedId);
+export function addProfileChatModalPane(sessionId: string): boolean {
+  const modalProfileId = profileChatModalId.value;
+  if (!modalProfileId) return false;
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (!session || session.profileId !== modalProfileId) return false;
+  const current = profileChatModalPaneIds.value;
+  if (current.includes(sessionId)) {
+    ensureSessionConnection(sessionId);
+    return true;
   }
-  activeSessionId.value = sessionId;
+  if (current.length >= MAX_PROFILE_CHAT_MODAL_PANES) return false;
+  profileChatModalPaneIds.value = [...current, sessionId];
+  ensureSessionConnection(sessionId);
+  return true;
+}
+
+export function removeProfileChatModalPane(sessionId: string): void {
+  profileChatModalPaneIds.value = profileChatModalPaneIds.value.filter((id) => id !== sessionId);
+}
+
+export function setProfileChatModalPanes(sessionIds: readonly string[]): void {
+  const modalProfileId = profileChatModalId.value;
+  if (!modalProfileId) {
+    profileChatModalPaneIds.value = [];
+    return;
+  }
+  const allowed = sessionIds.filter((sessionId) => {
+    const session = sessions.value.find((item) => item.id === sessionId);
+    return Boolean(session && session.profileId === modalProfileId);
+  });
+  const unique: string[] = [];
+  for (const id of allowed) {
+    if (!unique.includes(id)) unique.push(id);
+    if (unique.length >= MAX_PROFILE_CHAT_MODAL_PANES) break;
+  }
+  profileChatModalPaneIds.value = unique;
+  for (const id of unique) ensureSessionConnection(id);
+}
+
+
+export function setWorkspaceSessionDropPreview(active: boolean): void {
+  workspaceSessionDropPreview.value = active;
+  if (!active) workspaceSessionDropPlacement.value = null;
+}
+
+export function setWorkspaceSessionDropPlacement(placement: "top" | "right" | "bottom" | "left" | null): void {
+  workspaceSessionDropPlacement.value = placement;
+  if (placement) workspaceSessionDropPreview.value = true;
+}
+
+export function clearWorkspaceSessionDropPreview(): void {
+  workspaceSessionDropPreview.value = false;
+  workspaceSessionDropPlacement.value = null;
+}
+
+export function ensureSessionConnection(sessionId: string): void {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (!session) return;
+  selectedProfileId.value = session.profileId;
+  prefetchSelectedProfileSettings(session.profileId);
+  const needsEnsure = session.connectionState !== "ready"
+    || session.historyState === "error"
+    || session.connectionState === "error"
+    || session.connectionState === "disconnected"
+    || session.historyState === "unloaded";
+  if (!needsEnsure) return;
+  const target = chatTarget(session);
+  if (target) officeRuntimeHooks.ensureChatSession(target);
+}
+
+export function openSession(sessionId: string, options?: { workspace?: boolean; index?: number }): void {
+  const addToWorkspace = options?.workspace !== false;
+  const wasOpen = openSessionIds.value.includes(sessionId);
+  if (addToWorkspace) {
+    if (!wasOpen) {
+      const previousIds = openSessionIds.value;
+      const nextIds = appendOpenSessionId(previousIds, sessionId, options?.index);
+      openSessionIds.value = nextIds;
+      for (const evictedId of previousIds.filter((id) => !nextIds.includes(id))) releaseChatTarget(evictedId);
+    } else if (typeof options?.index === "number") {
+      openSessionIds.value = moveOpenSessionId(openSessionIds.value, sessionId, options.index);
+    }
+    activeSessionId.value = sessionId;
+  }
   const session = sessions.value.find((item) => item.id === sessionId);
   if (session) {
     selectedProfileId.value = session.profileId;
-    const target = chatTarget(session);
-    if (target) officeRuntimeHooks.ensureChatSession(target);
+  prefetchSelectedProfileSettings(session.profileId);
+    const needsEnsure = (addToWorkspace && !wasOpen)
+      || session.connectionState !== "ready"
+      || session.historyState === "error"
+      || session.connectionState === "error"
+      || session.connectionState === "disconnected"
+      || session.historyState === "unloaded";
+    if (needsEnsure) {
+      const target = chatTarget(session);
+      if (target) officeRuntimeHooks.ensureChatSession(target);
+    }
   }
 }
 
-export function appendOpenSessionId(currentIds: readonly string[], sessionId: string): string[] {
+export function appendOpenSessionId(currentIds: readonly string[], sessionId: string, index?: number): string[] {
   if (currentIds.includes(sessionId)) return [...currentIds];
-  return [...currentIds, sessionId].slice(-MAX_OPEN_CHAT_SESSIONS);
+  const next = [...currentIds];
+  const insertAt = typeof index === "number"
+    ? Math.max(0, Math.min(next.length, Math.floor(index)))
+    : next.length;
+  next.splice(insertAt, 0, sessionId);
+  if (next.length <= MAX_OPEN_CHAT_SESSIONS) return next;
+  // Prefer keeping the newly inserted session; drop from the far end.
+  if (insertAt >= next.length - 1) return next.slice(-MAX_OPEN_CHAT_SESSIONS);
+  return next.slice(0, MAX_OPEN_CHAT_SESSIONS);
+}
+
+export function moveOpenSessionId(currentIds: readonly string[], sessionId: string, index: number): string[] {
+  const from = currentIds.indexOf(sessionId);
+  if (from < 0) return [...currentIds];
+  // `index` is a visual insert position computed while the dragged pane is still present.
+  // When moving rightward, account for the vacated slot so the final order matches the drop line.
+  let desired = Math.max(0, Math.min(currentIds.length, Math.floor(index)));
+  if (from < desired) desired -= 1;
+  const next = currentIds.filter((id) => id !== sessionId);
+  const insertAt = Math.max(0, Math.min(next.length, desired));
+  next.splice(insertAt, 0, sessionId);
+  return next;
 }
 
 export function closeSession(sessionId: string): void {
@@ -484,18 +629,47 @@ export function dismissSessions(sessionIds: readonly string[]): void {
   if (openSessionIds.value.length === 0) noteMobileWorkspaceClosed();
 }
 
+/** Permanently delete durable Hermes sessions, then drop them from Studio lists. */
+export async function deleteSessions(sessionIds: readonly string[]): Promise<{ deleted: string[]; failed: string[] }> {
+  const targets = sessions.value.filter((session) => sessionIds.includes(session.id));
+  if (targets.length === 0) return { deleted: [], failed: [] };
+
+  const deleted: string[] = [];
+  const failed: string[] = [];
+  // Sequential deletes keep Hermes load predictable for bulk prune actions.
+  for (const session of targets) {
+    const storedId = session.storedSessionId ?? (session.remoteKind === "stored" ? session.id : undefined);
+    if (!storedId) {
+      deleted.push(session.id);
+      continue;
+    }
+    try {
+      await deleteStoredSession(session.profileId, storedId);
+      deleted.push(session.id);
+    } catch {
+      failed.push(session.id);
+    }
+  }
+  if (deleted.length > 0) dismissSessions(deleted);
+  return { deleted, failed };
+}
+
 /**
  * Open or reuse a chat with the Kanban card's assignee for confirmation Q&A.
  * Does not change card status or call Hermes dispatch.
  */
-export function askAssigneeAboutTask(task: import("./domain").WorkTask): string | undefined {
+export function askAssigneeAboutTask(
+  task: import("./domain").WorkTask,
+  options?: { openWorkspace?: boolean },
+): string | undefined {
   const assigneeId = task.assigneeId;
   if (!assigneeId || task.pending) return undefined;
+  const openWorkspace = options?.openWorkspace !== false;
 
   const existing = findCardAskSession(sessions.value, task.id, assigneeId);
   if (existing) {
-    openSession(existing.id);
-    openMobileWorkspace();
+    openSession(existing.id, openWorkspace ? undefined : { workspace: false });
+    if (openWorkspace) openMobileWorkspace();
     return existing.id;
   }
 
@@ -516,8 +690,7 @@ export function askAssigneeAboutTask(task: import("./domain").WorkTask): string 
         }
       : session,
   );
-  openMobileWorkspace();
-  tryFlushCardSeed(sessionId);
+  if (openWorkspace) openMobileWorkspace();
   return sessionId;
 }
 

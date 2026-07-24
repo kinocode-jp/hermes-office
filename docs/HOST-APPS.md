@@ -51,3 +51,44 @@ configuration and secret transfer, but it never receives or returns a secret.
 Clients poll the status endpoint while installation is running. Installer
 stdout and stderr are discarded rather than copied into HTTP responses or
 Studio logs.
+
+## Obsidian note graph
+
+After Obsidian is installed, **Graph and settings** reads the vault registry
+maintained by Obsidian itself and displays Markdown note links in an interactive
+Three.js scene. Studio accepts a vault id only; browsers cannot provide an
+arbitrary filesystem path.
+
+- `GET /api/v1/host/apps/obsidian/vaults` lists registered vault ids and names.
+- `GET /api/v1/host/apps/obsidian/graph?vault=…` returns a bounded graph.
+
+The graph response contains relative note ids, display titles, folders, link
+counts, and edges. It excludes note bodies and absolute paths. Symlinks,
+`.obsidian`, `.git`, `.trash`, and `node_modules` are not scanned. Individual
+notes are limited to 512 KiB and the graph is limited to 800 notes. Access is
+the owner-tier, remote-privileged `obsidian.vault.read` operation.
+
+Graph presentation settings (vault selection, filters, labels, node size, link
+opacity, and automatic rotation) are stored in the browser. Studio does not
+rewrite Obsidian's internal application settings or vault files.
+
+
+## Hermes Agent update
+
+Open **Settings → Desktop Host Administration**. Studio can check the local
+Hermes Agent install and run the official fixed update command:
+
+```text
+hermes update --yes
+```
+
+Status is exposed as:
+
+- `GET /api/v1/host/hermes-agent` — bounded status metadata (version + phase only).
+- `POST /api/v1/host/hermes-agent/update` — starts the fixed update and returns
+  immediately with `updating`; request bodies are rejected.
+
+Authorization matches host-app install: auditable `hermes-agent.update`, owner
+tier, local always, remote only when `HERMES_STUDIO_REMOTE_PRIVILEGED=true`.
+Clients cannot supply an executable, branch, shell fragment, or extra argument.
+Updater stdout/stderr are discarded.

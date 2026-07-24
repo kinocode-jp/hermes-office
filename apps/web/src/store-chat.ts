@@ -252,29 +252,24 @@ export function setChatSessionReady(sessionId: string, liveSessionId: string, st
 }
 
 /**
- * If this session was opened via "Ask assignee" and still has a queued seed,
- * send it once when the composer can accept a prompt.
+ * Card-ask sessions keep pendingCardSeed as context for the first user-authored
+ * message. Studio never auto-sends that context; ChatPane prepends it on submit.
  */
-export function tryFlushCardSeed(sessionId: string): void {
-  const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session || !sessionNeedsCardSeed(session)) return;
-  const seed = session.pendingCardSeed?.trim();
-  if (!seed) {
-    updateChatSession(sessionId, (item) => ({
-      ...item,
-      sourceCardSeeded: true,
-      pendingCardSeed: undefined,
-    }));
-    return;
-  }
-  if (!canSubmitChatPrompt(session)) return;
+export function tryFlushCardSeed(_sessionId: string): void {
+  // Intentionally a no-op: asking an assignee opens a chat, then the user types.
+}
 
+/** Consume the one-shot card context after the user sends their first prompt. */
+export function consumeCardSeed(sessionId: string): string | undefined {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (!session || !sessionNeedsCardSeed(session)) return undefined;
+  const seed = session.pendingCardSeed?.trim();
   updateChatSession(sessionId, (item) => ({
     ...item,
     sourceCardSeeded: true,
     pendingCardSeed: undefined,
   }));
-  sendMessage(sessionId, seed);
+  return seed || undefined;
 }
 
 export function setChatSessionDisconnected(sessionId: string): void {

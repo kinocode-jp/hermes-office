@@ -140,6 +140,12 @@ export type Operation =
   | "privileged-config.update"
   /** Install a fixed allowlisted application on the Studio host. */
   | "host-app.install"
+  /** Browse host directories (names only) for folder pickers. */
+  | "host-fs.read"
+  /** Read registered Obsidian vault metadata and its bounded note graph. */
+  | "obsidian.vault.read"
+  /** Update the fixed local Hermes Agent install on the Studio host. */
+  | "hermes-agent.update"
   | "runtime.start"
   | "runtime.stop"
   | "runtime.configure"
@@ -153,6 +159,9 @@ export const REMOTE_PRIVILEGED_OPERATIONS: readonly Operation[] = [
   "privileged-config.update",
   "secret.write",
   "host-app.install",
+  "host-fs.read",
+  "obsidian.vault.read",
+  "hermes-agent.update",
 ] as const;
 
 export function isRemotePrivilegedOperation(operation: Operation): boolean {
@@ -223,6 +232,13 @@ export const OPERATION_POLICIES: Readonly<Record<Operation, OperationPolicy>> = 
   // Fixed allowlisted host app installation. Remote use requires the same
   // explicit Tailnet privileged deployment gate as secrets/config.
   "host-app.install": policy("host-app.install", "owner", "remote-safe", true),
+  // Directory-name browsing for folder pickers. Same remote-privileged
+  // deployment gate as other host-scoped reads.
+  "host-fs.read": policy("host-fs.read", "owner", "read-only", true),
+  "obsidian.vault.read": policy("obsidian.vault.read", "owner", "read-only", true),
+  // Fixed Hermes Agent update (`hermes update --yes`). Same remote-privileged
+  // deployment gate as host-app install / privileged config / secrets.
+  "hermes-agent.update": policy("hermes-agent.update", "owner", "remote-safe", true),
   "runtime.start": policy("runtime.start", "owner", "local-only", true),
   "runtime.stop": policy("runtime.stop", "owner", "local-only", true),
   "runtime.configure": policy("runtime.configure", "owner", "local-only", true),
@@ -636,6 +652,59 @@ export interface HostAppStatus {
   failure?: HostAppFailure;
 }
 
+export interface ObsidianVaultSummary {
+  id: string;
+  name: string;
+}
+
+export interface ObsidianGraphNode {
+  id: string;
+  title: string;
+  folder: string;
+  links: number;
+}
+
+export interface ObsidianGraphEdge {
+  source: string;
+  target: string;
+}
+
+/** Bounded, content-free note graph. Note bodies and absolute paths are absent. */
+export interface ObsidianGraph {
+  vaultId: string;
+  vaultName: string;
+  generatedAt: IsoDateTime;
+  truncated: boolean;
+  nodes: readonly ObsidianGraphNode[];
+  edges: readonly ObsidianGraphEdge[];
+}
+
+export type HermesAgentUpdatePhase =
+  | "checking"
+  | "up_to_date"
+  | "available"
+  | "updating"
+  | "updated"
+  | "blocked"
+  | "failed"
+  | "unsupported";
+
+export type HermesAgentUpdateFailure =
+  | "executable_missing"
+  | "check_failed"
+  | "update_failed"
+  | "update_timeout"
+  | "unsupported_install";
+
+/** Safe, bounded Hermes Agent update status. No paths or process output. */
+export interface HermesAgentUpdateStatus {
+  phase: HermesAgentUpdatePhase;
+  canUpdate: boolean;
+  updateMethod: "hermes-update";
+  currentVersion?: string;
+  failure?: HermesAgentUpdateFailure;
+}
+
 export interface OperationPayloadMap {
   "chat.session.create": CreateSessionRequest;
   "chat.session.archive": { sessionId: SessionId };
@@ -659,6 +728,7 @@ export interface OperationPayloadMap {
   "privileged-config.read": { profileId: ProfileId };
   "privileged-config.update": UpdatePrivilegedProfileConfigRequest;
   "host-app.install": { appId: "obsidian" };
+  "hermes-agent.update": Record<string, never>;
   "runtime.start": Record<string, never>;
   "runtime.stop": Record<string, never>;
   "runtime.configure": ConfigureRuntimeRequest;

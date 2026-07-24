@@ -68,6 +68,7 @@ export function AppearanceSettings() {
         class={`appearance-trigger ${open ? "is-open" : ""}`}
         type="button"
         aria-label={t("appearance.trigger")}
+        title={t("appearance.trigger")}
         aria-expanded={open}
         aria-controls="appearance-panel"
         onClick={() => setOpen((current) => current ? false : hasOpenModal() ? false : true)}

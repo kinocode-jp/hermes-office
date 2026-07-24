@@ -75,7 +75,7 @@ export const initialSessions: ChatSession[] = [
   {
     id: "s-build-1",
     profileId: "builder",
-    title: "Office UI",
+    title: "Studio UI",
     status: "waiting",
     messages: [
       { id: "m4", from: "user", body: "Profileをキャラクターとして扱って。", at: "10:08" },
@@ -97,10 +97,10 @@ export const initialTasks: WorkTask[] = [
   { id: "t-106", title: "Remote auth threat model", status: "blocked", assigneeId: "operator", priority: "high", comments: 4 },
   { id: "t-107", title: "Mobile chat navigation", status: "triage", priority: "normal", comments: 0 },
   { id: "t-108", title: "Skill provenance labels", status: "ready", assigneeId: "editor", priority: "normal", comments: 2 },
-  { id: "t-102", title: "Office state reducer", status: "done", assigneeId: "builder", priority: "normal", comments: 2 }
+  { id: "t-102", title: "Studio state reducer", status: "done", assigneeId: "builder", priority: "normal", comments: 2 }
 ];
 
-/** Sample Office teams for explicit demo mode (not persisted). */
+/** Sample Studio teams for explicit demo mode (not persisted). */
 export const initialTeams: OfficeTeam[] = [
   {
     id: "team-000000000000000000000001",

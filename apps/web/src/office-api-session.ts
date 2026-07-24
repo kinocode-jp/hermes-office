@@ -28,7 +28,7 @@ export function beginOfficeSynchronization(serverUrl: string, authRevision: numb
   beginSynchronizationBarrier(
     serverUrl,
     authRevision,
-    new OfficeSessionUnavailableError("Office recovery was superseded.", 0, false),
+    new OfficeSessionUnavailableError("Studio recovery was superseded.", 0, false),
   );
 }
 
@@ -70,7 +70,7 @@ export function subscribeOfficeAuthChanges(observer: (serverUrl: string) => void
 }
 
 /**
- * Opens a WebSocket only after this tab has a current Office session. Remote
+ * Opens a WebSocket only after this tab has a current Studio session. Remote
  * device credentials remain in the HttpOnly cookie; the returned revision is
  * an in-memory generation used solely to coalesce expiry recovery.
  */
@@ -100,7 +100,7 @@ function assertOfficeWebSocketTarget(value: string, serverUrl: string): void {
     || !["/api/v1/events", "/api/v1/chat"].includes(socketUrl.pathname)
     || socketUrl.username !== "" || socketUrl.password !== ""
     || socketUrl.search !== "" || socketUrl.hash !== "") {
-    throw new Error("Office WebSocket target is invalid.");
+    throw new Error("Studio WebSocket target is invalid.");
   }
 }
 
@@ -126,7 +126,7 @@ export async function officeFetchJson<T>(path: string, options: OfficeApiRequest
   const baseUrl = new URL(serverUrl);
   const url = new URL(path, baseUrl);
   if (url.origin !== baseUrl.origin || !url.pathname.startsWith("/api/v1/")) {
-    throw new Error("Office API path is invalid.");
+    throw new Error("Studio API path is invalid.");
   }
   try {
     const session = await ensureOfficeSession(serverUrl);
@@ -289,23 +289,23 @@ async function bootstrapLocalSession(serverUrl: string): Promise<OfficeClientSes
     }
     if (renewal.ok) {
       let body: unknown;
-      try { body = await renewal.json() as unknown; } catch { throw new OfficeSessionUnavailableError("Office session renewal response is incompatible."); }
+      try { body = await renewal.json() as unknown; } catch { throw new OfficeSessionUnavailableError("Studio session renewal response is incompatible."); }
       const renewed = parseOfficeSession(body);
       if (renewed) return issueOfficeClientSession(renewed.csrfToken);
-      throw new OfficeSessionUnavailableError("Office session renewal response is incompatible.");
+      throw new OfficeSessionUnavailableError("Studio session renewal response is incompatible.");
     }
     if (renewal.status === 401) throw new OfficeDeviceAuthRequiredError();
     if (renewal.status === 403) throw new OfficeSessionUnavailableError(REMOTE_PROXY_CONFIGURATION_MESSAGE, 0, false);
     throw new OfficeSessionUnavailableError(
-      `Office device session renewal failed with HTTP ${renewal.status}.`,
+      `Studio device session renewal failed with HTTP ${renewal.status}.`,
       renewal.status === 429 ? retryAfterMilliseconds(renewal.headers.get("Retry-After")) : 0,
     );
   }
-  if (!response.ok) throw new OfficeSessionUnavailableError(`Office local authentication failed with HTTP ${response.status}.`, response.status === 429 ? retryAfterMilliseconds(response.headers.get("Retry-After")) : 0);
+  if (!response.ok) throw new OfficeSessionUnavailableError(`Studio local authentication failed with HTTP ${response.status}.`, response.status === 429 ? retryAfterMilliseconds(response.headers.get("Retry-After")) : 0);
   let body: unknown;
-  try { body = await response.json() as unknown; } catch { throw new OfficeSessionUnavailableError("Office local authentication response is incompatible."); }
+  try { body = await response.json() as unknown; } catch { throw new OfficeSessionUnavailableError("Studio local authentication response is incompatible."); }
   const session = parseOfficeSession(body);
-  if (!session) throw new OfficeSessionUnavailableError("Office local authentication response is incompatible.");
+  if (!session) throw new OfficeSessionUnavailableError("Studio local authentication response is incompatible.");
   return issueOfficeClientSession(session.csrfToken);
 }
 

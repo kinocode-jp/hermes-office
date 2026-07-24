@@ -55,7 +55,7 @@ export class OfficeSessionUnavailableError extends Error {
 export const REMOTE_PROXY_CONFIGURATION_MESSAGE = "Studio Serverのtrusted HTTPS proxyまたは転送ヘッダー設定を修正してから再接続してください。端末の再認証は不要です。";
 export class OfficeHttpError extends Error {
   constructor(readonly status: number) {
-    super(`Office Server returned HTTP ${status}.`);
+    super(`Studio Server returned HTTP ${status}.`);
     this.name = "OfficeHttpError";
   }
 }
@@ -101,9 +101,9 @@ export function shouldRetrySnapshotFailure(error: unknown): boolean {
 }
 
 export function errorMessage(error: unknown): string {
-  if (error instanceof DOMException && error.name === "AbortError") return "Office Serverへの接続がタイムアウトしました。";
+  if (error instanceof DOMException && error.name === "AbortError") return "Studio Serverへの接続がタイムアウトしました。";
   if (error instanceof Error) return error.message;
-  return "Office Serverへ接続できませんでした。";
+  return "Studio Serverへ接続できませんでした。";
 }
 
 export function isHealthResponse(value: unknown): value is HealthResponse {

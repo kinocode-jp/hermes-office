@@ -12,6 +12,7 @@ import type {
   OfficeGlobalSettingsStore,
 } from "./hermes-settings.js";
 import { HermesSettingsError } from "./hermes-settings.js";
+import type { HermesProjectsAdapter } from "./hermes-projects.js";
 import type { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import type { OfficeAgentBehaviorStore, SubagentMode } from "./office-agent-behavior.js";
 import type { HermesConfigValue } from "./hermes-config.js";
@@ -25,6 +26,8 @@ export interface SettingsHttpDependencies {
   globalSettings?: OfficeGlobalSettingsStore;
   globalInheritance?: GlobalInheritanceCoordinator;
   agentBehavior?: OfficeAgentBehaviorStore;
+  /** Official per-profile Hermes Projects (gateway `projects.*` proxy). */
+  projects?: HermesProjectsAdapter;
   /** One-shot secret transfer store (owner privileged sessions only). */
   secretTransfers?: SecretTransferStore;
   /**
@@ -40,7 +43,7 @@ export interface SettingsHttpResult {
   body: unknown;
   headers?: Record<string, string>;
   changed?: {
-    kind: "global" | "memory" | "skill" | "soul" | "agent-behavior" | "config" | "privileged-config" | "secret";
+    kind: "global" | "memory" | "skill" | "soul" | "agent-behavior" | "config" | "privileged-config" | "secret" | "projects";
     profile?: string;
     id?: string;
     /** Metadata-only: category or change count — never field names for secrets, never values. */
@@ -52,7 +55,7 @@ export interface SettingsHttpResult {
 export function isSettingsHttpPath(pathname: string): boolean {
   return pathname === "/api/v1/settings/global"
     || pathname === "/api/v1/secret-transfers"
-    || /^\/api\/v1\/profiles\/[^/]+\/(?:settings|skills|soul|memory|agent-behavior|config|privileged-config|secrets)(?:\/|$)/.test(pathname);
+    || /^\/api\/v1\/profiles\/[^/]+\/(?:settings|skills|soul|memory|agent-behavior|config|privileged-config|secrets|projects)(?:\/|$)/.test(pathname);
 }
 
 export function isSettingsMutation(method: string | undefined): boolean {
@@ -185,15 +188,76 @@ export async function routeSettingsHttp(
       if (request.method === "GET") return ok(await dependencies.agentBehavior.read(profile));
       if (request.method === "PUT") {
         const body = await readObject(request, maxBodyBytes);
-        assertOnlyKeys(body, ["expectedRevision", "subagentMode", "preferredSubagent"]);
+        assertOnlyKeys(body, ["expectedRevision", "subagentMode", "preferredSubagent", "preferredCandidateIds", "sharedCandidates"]);
         const updated = await dependencies.agentBehavior.update(profile, {
           expectedRevision: requiredInteger(body.expectedRevision, "expectedRevision", 0),
           ...(body.subagentMode === undefined ? {} : { subagentMode: requiredSubagentMode(body.subagentMode) }),
           ...(body.preferredSubagent === undefined ? {} : { preferredSubagent: requiredString(body.preferredSubagent, "preferredSubagent", 128, true) }),
+          ...(body.preferredCandidateIds === undefined ? {} : { preferredCandidateIds: requiredStringArray(body.preferredCandidateIds, "preferredCandidateIds", 3) }),
+          ...(body.sharedCandidates === undefined ? {} : { sharedCandidates: requiredSharedSubagentCandidates(body.sharedCandidates) }),
         });
         return { ...ok(updated), changed: { kind: "agent-behavior", profile } };
       }
       return methodNotAllowed("GET, PUT");
+    }
+
+    if (resource === "projects") {
+      // Official per-profile Hermes Projects (folders bound to named workspaces).
+      // GET stays on state.read; mutations fall through to profile.update policy.
+      if (dependencies.projects === undefined) {
+        return { status: 503, body: { error: { code: "runtime_unavailable", message: "Hermes projects are unavailable." } } };
+      }
+      const projectsApi = dependencies.projects;
+      if (segments.length === 5) {
+        if (request.method === "GET") return ok(await projectsApi.listProjects(profile));
+        if (request.method === "POST") {
+          const body = await readObject(request, Math.min(maxBodyBytes, 16 * 1024));
+          assertOnlyKeys(body, ["name", "path", "label", "isPrimary"]);
+          const created = await projectsApi.createProject(profile, {
+            name: requiredString(body.name, "name", 200),
+            ...(body.path === undefined ? {} : { path: requiredProjectPath(body.path, "path") }),
+            ...(body.label === undefined ? {} : { label: requiredString(body.label, "label", 200) }),
+            ...(body.isPrimary === undefined ? {} : { isPrimary: requiredBoolean(body.isPrimary, "isPrimary") }),
+          });
+          return { ...ok(created), changed: { kind: "projects", profile } };
+        }
+        return methodNotAllowed("GET, POST");
+      }
+      const projectId = requiredProjectId(segments[5]);
+      if (segments.length === 6) {
+        if (request.method === "PATCH") {
+          const body = await readObject(request, Math.min(maxBodyBytes, 4 * 1024));
+          assertOnlyKeys(body, ["name"]);
+          const updated = await projectsApi.updateProject(profile, projectId, {
+            name: requiredString(body.name, "name", 200),
+          });
+          return { ...ok(updated), changed: { kind: "projects", profile, id: projectId } };
+        }
+        if (request.method === "DELETE") {
+          return { ...ok(await projectsApi.deleteProject(profile, projectId)), changed: { kind: "projects", profile, id: projectId } };
+        }
+        return methodNotAllowed("PATCH, DELETE");
+      }
+      if (segments.length === 7 && segments[6] === "folders") {
+        if (request.method === "POST") {
+          const body = await readObject(request, Math.min(maxBodyBytes, 16 * 1024));
+          assertOnlyKeys(body, ["path", "label", "isPrimary"]);
+          const updated = await projectsApi.addFolder(profile, projectId, {
+            path: requiredProjectPath(body.path, "path"),
+            ...(body.label === undefined ? {} : { label: requiredString(body.label, "label", 200) }),
+            ...(body.isPrimary === undefined ? {} : { isPrimary: requiredBoolean(body.isPrimary, "isPrimary") }),
+          });
+          return { ...ok(updated), changed: { kind: "projects", profile, id: projectId } };
+        }
+        if (request.method === "DELETE") {
+          const body = await readObject(request, Math.min(maxBodyBytes, 16 * 1024));
+          assertOnlyKeys(body, ["path"]);
+          const updated = await projectsApi.removeFolder(profile, projectId, requiredProjectPath(body.path, "path"));
+          return { ...ok(updated), changed: { kind: "projects", profile, id: projectId } };
+        }
+        return methodNotAllowed("POST, DELETE");
+      }
+      return notFound();
     }
 
     if (resource === "config") {
@@ -428,6 +492,17 @@ function requiredMemoryFileKey(value: string | undefined): "memory" | "user" {
 function requiredMemoryResetTarget(value: unknown): "all" | "memory" | "user" {
   if (value === "all" || value === "memory" || value === "user") return value;
   throw fieldError("target");
+}
+/** Project ids are gateway-issued slugs/ids; bound length and reject control chars. */
+function requiredProjectId(value: string | undefined): string {
+  if (value === undefined || value.length === 0 || value.length > 128 || value.includes("\0")) {
+    throw new HttpInputError(404, "not_found", "Settings route was not found.");
+  }
+  return value;
+}
+/** Folder paths bound to a project; Hermes normalizes to absolute paths itself. */
+function requiredProjectPath(value: unknown, name: string): string {
+  return requiredString(value, name, 4 * 1024);
 }
 /** HTTP layer shape check only; adapter re-validates against schema + policy. */
 function requiredConfigChanges(value: unknown): Record<string, HermesConfigValue> {

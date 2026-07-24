@@ -14,12 +14,12 @@ declare global {
 }
 
 // The desktop shell returns a capability only when it started and owns the
-// Office Server child. When the WebView opens an already-running compatible
-// Office on loopback (same UI as a browser), `desktop_owned` is false and the
+// Studio Server child. When the WebView opens an already-running compatible
+// Studio on loopback (same UI as a browser), `desktop_owned` is false and the
 // client uses normal local cookie authentication instead of the capability
 // bridge. A fresh IPC call revalidates the owned listener before each HTTP or
 // WebSocket send that requires the capability; the root capability is never
-// cached in this module or an Office session. Invalid non-null capability
+// cached in this module or an Studio session. Invalid non-null capability
 // values are rejected rather than silently falling back.
 
 export function isTauriAssetLocation(value: Pick<Location, "protocol" | "hostname">): boolean {
@@ -32,7 +32,7 @@ export function isTauriAssetLocation(value: Pick<Location, "protocol" | "hostnam
  *
  * - Packaged asset origins (`tauri://` / `tauri.localhost`): always capability.
  * - Tauri dev shell on `http://localhost` (Vite) with an injected bridge: capability.
- * - Loopback Office UI on `http://127.0.0.1` (browser or WebView attached to an
+ * - Loopback Studio UI on `http://127.0.0.1` (browser or WebView attached to an
  *   existing server): **never** capability — Tauri rejects custom IPC from that
  *   remote origin unless a remote ACL is configured, and cookie auth is the
  *   intended browser-equivalent path.
@@ -51,9 +51,9 @@ export function desktopCapability(): Promise<string | undefined> {
 }
 
 /**
- * True only when this shell currently owns a proven Office Server child.
+ * True only when this shell currently owns a proven Studio Server child.
  * Returns false (does not throw) when the bridge reports unowned — so an
- * attached existing loopback Office can fall through to local browser auth.
+ * attached existing loopback Studio can fall through to local browser auth.
  * Throws when the bridge is required but missing/invalid, or when IPC fails.
  */
 export async function desktopOwnershipIsAuthenticated(): Promise<boolean> {
@@ -102,7 +102,7 @@ export async function depositSecretTransfer(value: string): Promise<string> {
     const transferId = await invoke<string>("deposit_secret_transfer", { value });
     return validateTransferId(transferId);
   }
-  // Authenticated remote (or local-cookie) owner deposit over Office HTTPS.
+  // Authenticated remote (or local-cookie) owner deposit over Studio HTTPS.
   const { officeFetchJson } = await import("./office-api");
   const response = await officeFetchJson<{ transferId?: unknown; expiresAt?: unknown }>(
     "/api/v1/secret-transfers",
