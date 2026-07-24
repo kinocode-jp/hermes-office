@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import { isGlobalContextWithinBudget } from "@hermes-office/protocol";
+import { isGlobalContextWithinBudget } from "@hermes-studio/protocol";
 import { redactSecrets } from "./secret-scrubber.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -450,7 +450,21 @@ function normalizeEvent(raw: unknown, maxTextBytes: number): HermesChatEvent | u
     ...(safeProfile(raw.profile) === undefined ? {} : { profile: safeProfile(raw.profile)! }),
   };
   if (["message.start", "message.delta", "message.complete", "reasoning.available", "reasoning.delta", "thinking.delta", "background.complete"].includes(raw.type)) {
-    return { ...base, payload: compact({ text: sanitizeText(firstString(payload, ["text", "content"]), maxTextBytes), messageId: safeId(payload.message_id), role: safeEnum(payload.role, ["assistant", "system", "tool", "user"]) }) };
+    // Optional upstream usage counters (never text). Office token-usage stats
+    // prefer these over char/4 estimates when present on message.complete.
+    const usage = isRecord(payload.usage) ? payload.usage : undefined;
+    return {
+      ...base,
+      payload: compact({
+        text: sanitizeText(firstString(payload, ["text", "content"]), maxTextBytes),
+        messageId: safeId(payload.message_id),
+        role: safeEnum(payload.role, ["assistant", "system", "tool", "user"]),
+        tokensIn: finiteNonNegativeInt(firstValue(payload, ["tokens_in", "prompt_tokens", "input_tokens"])
+          ?? firstValue(usage ?? {}, ["tokens_in", "prompt_tokens", "input_tokens", "input"])),
+        tokensOut: finiteNonNegativeInt(firstValue(payload, ["tokens_out", "completion_tokens", "output_tokens"])
+          ?? firstValue(usage ?? {}, ["tokens_out", "completion_tokens", "output_tokens", "output"])),
+      }),
+    };
   }
   if (raw.type === "clarify.request") {
     const requestId = safeId(payload.request_id);
@@ -569,6 +583,10 @@ function optionalBoolean(value: unknown, name: string): boolean | undefined { if
 function optionalInteger(value: unknown, name: string, min: number, max: number): number | undefined { if (value === undefined) return undefined; if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw publicError("invalid_request", `${name} is invalid.`); return value; }
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }
 function finiteNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
+function finiteNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) return undefined;
+  return Math.floor(value);
+}
 function safePublicText(value: unknown, maxChars: number): string | undefined {
   if (typeof value !== "string") return undefined;
   return redactSecrets(value).value.slice(0, maxChars).replace(/[\u0000-\u001f\u007f]/g, "");

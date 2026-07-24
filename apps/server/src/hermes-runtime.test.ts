@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   discoverHermesRuntime,
-  isSupportedHermesVersion,
+  isRecognizedHermesVersion,
   normalizeBaseUrl,
   probeHermesCli,
 } from "./hermes-runtime.js";
@@ -23,8 +23,8 @@ test("ready status is validated and reduced to a secret-free DTO", async () => {
     active_sessions: 2,
     auth_required: true,
     auth_providers: ["nous"],
-    access_token: "must-not-escape",
-    gateways: [{ port: 9119, secret: "must-not-escape" }],
+    access_token: "must-not-escape", // gitleaks:allow -- synthetic rejection fixture
+    gateways: [{ port: 9119, secret: "must-not-escape" }], // gitleaks:allow -- synthetic rejection fixture
   });
 
   try {
@@ -73,10 +73,30 @@ test("reachable non-Hermes responses are incompatible", async () => {
   }
 });
 
-test("unsupported Hermes API versions fail closed", async () => {
+test("Hermes API versions are not pinned to a specific release", async () => {
   const fixture = await statusServer({
     version: "0.19.0",
     release_date: "2026.8.1",
+    config_version: 33,
+    latest_config_version: 33,
+    gateway_running: false,
+    gateway_state: null,
+    active_sessions: 0,
+  });
+  try {
+    const result = await discoverHermesRuntime({ baseUrl: fixture.baseUrl, timeoutMs: 500 });
+    assert.equal(result.state, "ready");
+    assert.equal(result.reason, "ready");
+    assert.equal(result.runtime?.version, "0.19.0");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("malformed Hermes API versions still fail closed", async () => {
+  const fixture = await statusServer({
+    version: "development",
+    release_date: "unknown",
     config_version: 33,
     latest_config_version: 33,
     gateway_running: false,
@@ -93,18 +113,19 @@ test("unsupported Hermes API versions fail closed", async () => {
 });
 
 test("CLI invocation never passes executable text through a shell", async () => {
-  const sentinel = join(tmpdir(), `hermes-office-shell-${process.pid}-${Date.now()}`);
+  const sentinel = join(tmpdir(), `hermes-studio-shell-${process.pid}-${Date.now()}`);
   const result = await probeHermesCli(`/missing/hermes;touch ${sentinel}`, 200);
   assert.equal(result.state, "unavailable");
   assert.equal(existsSync(sentinel), false);
 });
 
-test("Hermes compatibility is constrained to the audited API minor", () => {
-  assert.equal(isSupportedHermesVersion("0.18.0"), true);
-  assert.equal(isSupportedHermesVersion("0.18.99+local"), true);
-  assert.equal(isSupportedHermesVersion("0.17.9"), false);
-  assert.equal(isSupportedHermesVersion("0.19.0"), false);
-  assert.equal(isSupportedHermesVersion("not-a-version"), false);
+test("Hermes detection accepts any semantic version", () => {
+  assert.equal(isRecognizedHermesVersion("0.18.0"), true);
+  assert.equal(isRecognizedHermesVersion("0.18.99+local"), true);
+  assert.equal(isRecognizedHermesVersion("0.17.9"), true);
+  assert.equal(isRecognizedHermesVersion("0.19.0"), true);
+  assert.equal(isRecognizedHermesVersion("1.0.0"), true);
+  assert.equal(isRecognizedHermesVersion("not-a-version"), false);
 });
 
 test("base URL rejects credentials and non-origin paths", () => {

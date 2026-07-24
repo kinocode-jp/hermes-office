@@ -14,6 +14,16 @@ export function canSubmitChatPrompt(session: ChatSession): boolean {
   return connected && session.status === "ready" && session.steerPending !== true && session.interruptPending !== true && !isChatRunActive(session);
 }
 
+export function composerBlockedReason(session: ChatSession): "pending-interaction" | "connecting" | "disconnected" | "running" | "stopping" | undefined {
+  if (session.pendingInteraction) return "pending-interaction";
+  if (session.interruptPending) return "stopping";
+  if (isChatRunActive(session) && !canSteerChatSession(session)) return "running";
+  if (session.remoteKind === "demo") return undefined;
+  if (session.connectionState === "connecting") return "connecting";
+  if (session.connectionState !== "ready") return "disconnected";
+  return undefined;
+}
+
 export function canSteerChatSession(session: ChatSession): boolean {
   return session.remoteKind !== "demo"
     && session.connectionState === "ready"

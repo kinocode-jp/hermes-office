@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { WebSocket } from "ws";
-import type { Operation } from "@hermes-office/protocol";
+import type { Operation } from "@hermes-studio/protocol";
 import type { HermesRuntimeSource } from "./hermes-backend.js";
 import { HERMES_CHAT_METHODS, type HermesChatEvent, type HermesChatMethod, type HermesChatResult } from "./hermes-chat.js";
 import type { OfficeAuth, OfficeAuthSession } from "./office-auth.js";
 import { ChatSessionCoordinator, type ChatSessionClaim } from "./chat-session-coordinator.js";
 import { ChatCommitUnconfirmedError, ChatUpstreamHub } from "./chat-upstream-hub.js";
+import type { UsageTelemetryStore } from "./usage-telemetry.js";
+import { composeSessionCreateSystemSeed } from "./office-agent-behavior.js";
 
 const MAX_IN_FLIGHT = 4;
 const MAX_QUEUE = 16;
@@ -55,6 +57,8 @@ export interface ChatGatewayDependencies {
   invalidationSignal?: AbortSignal;
   sessionCoordinator: ChatSessionCoordinator;
   chatHub: ChatUpstreamHub;
+  /** Optional Office-owned skill/MCP/tool usage meter (fail-safe). */
+  usageTelemetry?: UsageTelemetryStore;
 }
 
 type PendingResponseState = "pending" | "claimed" | "consumed";
@@ -109,7 +113,7 @@ export class ChatDeviceRateLimiter {
 }
 
 export function handleOfficeChatConnection(client: WebSocket, dependencies: ChatGatewayDependencies): void {
-  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter, sessionCoordinator, chatHub } = dependencies;
+  const { auth, officeSession, runtimeSource, maxJsonBytes, deviceLimiter, sessionCoordinator, chatHub, usageTelemetry } = dependencies;
   if (!(sessionCoordinator instanceof ChatSessionCoordinator) || !(chatHub instanceof ChatUpstreamHub)) {
     client.close(1011, "Chat session hub unavailable");
     return;
@@ -338,7 +342,10 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
         if (sessionClaim === undefined) { sendSessionInUse(send, frame.id); return; }
       }
       const seed = frame.method === "session.create"
-        ? await runtimeSource.globalInheritance?.().sessionCreateContext()
+        ? await resolveSessionCreateSystemSeed(
+          runtimeSource,
+          typeof frame.params?.profile === "string" ? frame.params.profile : "default",
+        )
         : undefined;
       if (closed || !authorizeSideEffect()) { sessionCoordinator.releaseFailedClaim(sessionClaim); return; }
       let ownedRequest: { liveSessionId: string; leaseToken: symbol } | undefined;
@@ -452,6 +459,15 @@ export function handleOfficeChatConnection(client: WebSocket, dependencies: Chat
       budget.count += 1;
       budget.bytes += eventBytes;
       liveEventBudgets.set(event.sessionId, budget);
+    }
+    // Usage telemetry is best-effort and must never affect delivery.
+    try {
+      const profileHint = event.sessionId === undefined
+        ? event.profile
+        : sessionCoordinator.profileForLive(event.sessionId) ?? event.profile;
+      usageTelemetry?.observeChatEvent(event, profileHint);
+    } catch {
+      // ignore
     }
     if (event.type === "approval.request" && event.sessionId !== undefined) {
       const leaseToken = sessionCoordinator.routingLeaseToken(sessionOwner, event.sessionId);
@@ -637,6 +653,18 @@ function upstreamRequestParams(
     ...(typeof params.session_id === "string" ? { session_id: params.session_id } : {}),
     ...(typeof params.choice === "string" ? { choice: params.choice } : {}),
   } };
+}
+
+/** Trusted Office seeds only: shared context + optional per-profile subagent instruction. */
+async function resolveSessionCreateSystemSeed(
+  runtimeSource: HermesRuntimeSource,
+  profile: string,
+): Promise<string | undefined> {
+  const [globalContext, behaviorInstruction] = await Promise.all([
+    runtimeSource.globalInheritance?.().sessionCreateContext(profile) ?? Promise.resolve(undefined),
+    runtimeSource.agentBehavior?.().sessionCreateInstruction(profile) ?? Promise.resolve(undefined),
+  ]);
+  return composeSessionCreateSystemSeed(globalContext, behaviorInstruction);
 }
 
 function officeApprovalEvent(approval: PendingApproval): HermesChatEvent {

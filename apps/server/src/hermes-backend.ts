@@ -1,7 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type {
   KanbanBoardSummary,
@@ -10,7 +8,8 @@ import type {
   OfficeInventoryMetadata,
   OfficeSnapshot,
   RuntimeStatus,
-} from "@hermes-office/protocol";
+} from "@hermes-studio/protocol";
+import { brandStatePath } from "./brand-env.js";
 import { OFFICE_PROTOCOL_VERSION } from "./demo-state.js";
 import { createHermesChatTransport, type HermesChatTransport } from "./hermes-chat.js";
 import { createHermesChildEnvironment, discardHermesChildOutput } from "./hermes-child-environment.js";
@@ -18,12 +17,16 @@ import { collectHermesInventory, HermesInventoryCache, type CollectedHermesInven
 import { createHermesKanbanHttpRequester, HermesKanbanAdapter } from "./hermes-kanban.js";
 import { GlobalInheritanceCoordinator } from "./global-inheritance.js";
 import { HermesProfileBackendPool } from "./hermes-profile-pool.js";
-import { isSupportedHermesVersion, probeHermesCli } from "./hermes-runtime.js";
+import { isRecognizedHermesVersion, probeHermesCli } from "./hermes-runtime.js";
 import {
   createHermesSettingsAdapter,
   OfficeGlobalSettingsStore,
   type HermesSettingsAdapter,
 } from "./hermes-settings.js";
+import { createHermesModelsAdapter, type HermesModelsAdapter } from "./hermes-models.js";
+import { createHermesProjectsAdapter, type HermesProjectsAdapter } from "./hermes-projects.js";
+import { OfficeAgentBehaviorStore } from "./office-agent-behavior.js";
+import type { OfficeTeamSkillLayer } from "./office-teams.js";
 
 const START_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -39,21 +42,33 @@ export interface HermesBackendOptions {
   startTimeoutMs?: number;
   requestTimeoutMs?: number;
   globalSettingsPath?: string;
+  agentBehaviorPath?: string;
   maxProfileBackends?: number;
   managedRestartAttempts?: number;
   managedRestartBackoffMs?: number;
+  /** Middle inheritance tier: teams that contribute skills/context per profile. */
+  listTeamLayers?(): Promise<readonly OfficeTeamSkillLayer[]>;
 }
 
 export interface HermesRuntimeSource {
   status(): RuntimeStatus;
   snapshot(): Promise<OfficeSnapshot>;
   inventoryPage?(kind: OfficeInventoryKind, cursor: string, limit: number): Promise<OfficeInventoryPage>;
+  /** Permanently delete a durable Hermes session. Absent ids are treated as success. */
+  deleteSession?(profile: string, sessionId: string): Promise<void>;
+  /** Create a durable Hermes profile (proxied to upstream POST /api/profiles). */
+  createProfile?(name: string, options?: { cloneFromDefault?: boolean; description?: string }): Promise<void>;
+  /** Permanently delete a Hermes profile and its local state. */
+  deleteProfile?(name: string): Promise<void>;
   close(): Promise<void>;
   chat(options?: { maxEventBytes?: number }): HermesChatTransport;
   kanban(): HermesKanbanAdapter;
   settings?(): HermesSettingsAdapter;
+  models?(): HermesModelsAdapter;
+  projects?(): HermesProjectsAdapter;
   globalSettings?(): OfficeGlobalSettingsStore;
   globalInheritance?(): GlobalInheritanceCoordinator;
+  agentBehavior?(): OfficeAgentBehaviorStore;
   onStatusChange?(listener: (status: RuntimeStatus) => void): () => void;
 }
 
@@ -71,10 +86,13 @@ export class HermesBackend implements HermesRuntimeSource {
   #sequence = 0;
   readonly #profilePool: HermesProfileBackendPool;
   readonly #globalSettings: OfficeGlobalSettingsStore;
+  readonly #agentBehavior: OfficeAgentBehaviorStore;
   readonly #inventory = new HermesInventoryCache();
   #snapshotRefresh: SnapshotRefresh | undefined;
   #globalInheritance?: GlobalInheritanceCoordinator;
   #settingsAdapter?: HermesSettingsAdapter;
+  #modelsAdapter?: HermesModelsAdapter;
+  #projectsAdapter?: HermesProjectsAdapter;
   #childGeneration = 0;
   #connectionGeneration = 0;
   #startFlight: Promise<RuntimeStatus> | undefined;
@@ -94,7 +112,10 @@ export class HermesBackend implements HermesRuntimeSource {
         .some((item) => item.name === profile),
     });
     this.#globalSettings = new OfficeGlobalSettingsStore(
-      options.globalSettingsPath ?? join(homedir(), ".hermes-office", "global-settings.json"),
+      options.globalSettingsPath ?? brandStatePath("global-settings.json"),
+    );
+    this.#agentBehavior = new OfficeAgentBehaviorStore(
+      options.agentBehaviorPath ?? brandStatePath("agent-behavior.json"),
     );
     this.#state = {
       mode: options.baseUrl === undefined ? "managed-sidecar" : "existing-local",
@@ -145,8 +166,34 @@ export class HermesBackend implements HermesRuntimeSource {
     return this.#settingsAdapter;
   }
 
+  models(): HermesModelsAdapter {
+    this.#modelsAdapter ??= createHermesModelsAdapter({
+      resolveProfileBackend: async (profile) => {
+        if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+        return await this.#profilePool.resolve(profile);
+      },
+      ...(this.#options.requestTimeoutMs === undefined ? {} : { timeoutMs: this.#options.requestTimeoutMs }),
+    });
+    return this.#modelsAdapter;
+  }
+
+  projects(): HermesProjectsAdapter {
+    this.#projectsAdapter ??= createHermesProjectsAdapter({
+      resolveProfileBackend: async (profile) => {
+        if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+        return await this.#profilePool.resolve(profile);
+      },
+      ...(this.#options.requestTimeoutMs === undefined ? {} : { timeoutMs: this.#options.requestTimeoutMs }),
+    });
+    return this.#projectsAdapter;
+  }
+
   globalSettings(): OfficeGlobalSettingsStore {
     return this.#globalSettings;
+  }
+
+  agentBehavior(): OfficeAgentBehaviorStore {
+    return this.#agentBehavior;
   }
 
   globalInheritance(): GlobalInheritanceCoordinator {
@@ -155,6 +202,9 @@ export class HermesBackend implements HermesRuntimeSource {
       settings: this.settings(),
       listProfiles: async () => recordArray(await this.#requestJson("/api/profiles"), "profiles")
         .flatMap((profile) => typeof profile.name === "string" ? [profile.name] : []),
+      ...(this.#options.listTeamLayers === undefined
+        ? {}
+        : { listTeamLayers: this.#options.listTeamLayers }),
     });
     return this.#globalInheritance;
   }
@@ -254,6 +304,40 @@ export class HermesBackend implements HermesRuntimeSource {
     return this.#inventory.page(kind, cursor, limit);
   }
 
+  async deleteSession(profile: string, sessionId: string): Promise<void> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    const safeProfile = requireProfile(profile);
+    const safeSessionId = requireSessionId(sessionId);
+    const path = `/api/sessions/${encodeURIComponent(safeSessionId)}?profile=${encodeURIComponent(safeProfile)}`;
+    await this.#requestJson(path, true, undefined, undefined, { method: "DELETE" });
+    this.#inventory.clear();
+    this.#snapshotRefresh = undefined;
+  }
+
+  async createProfile(name: string, options?: { cloneFromDefault?: boolean; description?: string }): Promise<void> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    const safeName = requireProfile(name);
+    await this.#requestJson("/api/profiles", true, undefined, undefined, {
+      method: "POST",
+      body: {
+        name: safeName,
+        clone_from_default: options?.cloneFromDefault !== false,
+        ...(options?.description === undefined ? {} : { description: options.description }),
+      },
+    });
+    this.#inventory.clear();
+    this.#snapshotRefresh = undefined;
+  }
+
+  async deleteProfile(name: string): Promise<void> {
+    if (this.#state.state !== "ready") throw new Error("Hermes backend is not ready.");
+    const safeName = requireProfile(name);
+    if (safeName === "default") throw new Error("The default profile cannot be deleted.");
+    await this.#requestJson(`/api/profiles/${encodeURIComponent(safeName)}`, true, undefined, undefined, { method: "DELETE" });
+    this.#inventory.clear();
+    this.#snapshotRefresh = undefined;
+  }
+
   async #collectSnapshotData(connection: ConnectionGeneration): Promise<SnapshotCollection> {
     const current = this.#snapshotRefresh;
     if (current?.generation === connection.generation) return await current.promise;
@@ -340,7 +424,7 @@ export class HermesBackend implements HermesRuntimeSource {
     const raw = await this.#requestJson("/api/status", false);
     const version = readString(raw, "version");
     if (version === undefined) throw new IncompatibleHermesError("Hermes status contract is unavailable.");
-    if (!isSupportedHermesVersion(version)) throw new IncompatibleHermesError("Hermes API version is unsupported.");
+    if (!isRecognizedHermesVersion(version)) throw new IncompatibleHermesError("Hermes API version is invalid.");
     return version;
   }
 
@@ -430,8 +514,14 @@ export class HermesBackend implements HermesRuntimeSource {
       && this.#token === connection.token;
   }
 
-  async #requestJson(path: string, authenticated = true): Promise<unknown> {
-    return (await this.#requestJsonResult(path, authenticated)).value;
+  async #requestJson(
+    path: string,
+    authenticated = true,
+    timeoutLimitMs?: number,
+    connection?: ConnectionGeneration,
+    init?: { method?: "GET" | "POST" | "DELETE"; body?: Record<string, unknown> },
+  ): Promise<unknown> {
+    return (await this.#requestJsonResult(path, authenticated, timeoutLimitMs, connection, init)).value;
   }
 
   async #requestJsonResult(
@@ -439,6 +529,7 @@ export class HermesBackend implements HermesRuntimeSource {
     authenticated = true,
     timeoutLimitMs?: number,
     connection?: ConnectionGeneration,
+    init?: { method?: "GET" | "POST" | "DELETE"; body?: Record<string, unknown> },
   ): Promise<HermesJsonResult> {
     const baseUrl = connection?.baseUrl ?? this.#baseUrl;
     if (baseUrl === undefined) throw new Error("Hermes backend is not configured.");
@@ -453,23 +544,35 @@ export class HermesBackend implements HermesRuntimeSource {
     const token = connection?.token ?? this.#token;
     timeout.unref();
     try {
+      const method = init?.method ?? "GET";
       const response = await fetch(target, {
+        method,
         headers: {
           Accept: "application/json",
           ...(authenticated && token !== undefined ? { "X-Hermes-Session-Token": token } : {}),
+          ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
         },
+        ...(init?.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         redirect: "error",
         signal: controller.signal,
       });
       if (!response.ok) {
         const status = response.status;
         try { await response.body?.cancel(); } catch { /* Preserve the HTTP classification if body disposal fails. */ }
+        // Hermes documents DELETE /api/sessions/{id} as idempotent for absent ids.
+        if (method === "DELETE" && status === 404) {
+          return { value: { ok: true, absent: true }, bytes: 0 };
+        }
         if (status === 408 || status === 425 || status === 429 || status >= 500) {
           throw new Error(`Hermes temporarily returned ${status}.`);
         }
         throw new IncompatibleHermesError(`Hermes returned ${status}.`);
       }
+      if (response.status === 204) {
+        return { value: { ok: true }, bytes: 0 };
+      }
       const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
+      if (text.trim() === "") return { value: { ok: true }, bytes: 0 };
       return { value: JSON.parse(text) as unknown, bytes: Buffer.byteLength(text) };
     } finally {
       clearTimeout(timeout);
@@ -609,7 +712,7 @@ function makeSnapshot(runtime: RuntimeStatus, sequence: number, profiles: Office
     capabilities: {
       protocolVersion: OFFICE_PROTOCOL_VERSION, serverVersion: "0.2.0", runtime,
       access: { deviceId: "local-desktop", tier: "owner", exposure: "loopback", authentication: "desktop-capability", allowedOperations: ["state.read"] },
-      features: ["chat", "profiles", "skills", "memory", "kanban", "global-inheritance"],
+      features: ["chat", "profiles", "skills", "memory", "kanban", "teams", "global-inheritance"],
     },
     globalSettings: { sharedContextEnabled: true, sharedSkillsEnabled: true, revision: 1 },
     profiles, sessions, inventory, boards,
@@ -632,3 +735,19 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
 function bounded(value: number | undefined, fallback: number, min: number, max: number): number { return value === undefined || !Number.isFinite(value) ? fallback : Math.min(max, Math.max(min, Math.trunc(value))); }
 
 class IncompatibleHermesError extends Error {}
+
+
+const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function requireProfile(value: string): string {
+  const profile = value.trim();
+  if (!PROFILE_ID_PATTERN.test(profile)) throw new Error("Profile identifier is invalid.");
+  return profile;
+}
+
+function requireSessionId(value: string): string {
+  const sessionId = value.trim();
+  if (!SESSION_ID_PATTERN.test(sessionId)) throw new Error("Session identifier is invalid.");
+  return sessionId;
+}

@@ -149,8 +149,10 @@ test("snapshot is bounded, explicit, and does not expose secret-shaped fields", 
       allowedOperations: [
         "state.read", "chat.session.create", "chat.session.archive", "chat.message.send", "chat.run.cancel",
         "chat.approval.permanent", "kanban.card.create", "kanban.card.update", "kanban.card.comment",
+        "team.create", "team.update", "team.delete",
         "profile.create", "profile.update", "profile.delete", "memory.update", "skill.enable", "skill.install",
-        "global-settings.update", "runtime.start", "runtime.stop", "runtime.configure", "secret.write", "device.revoke", "audit.read",
+        "global-settings.update", "profile-config.update", "privileged-config.read", "privileged-config.update", "host-app.install", "host-fs.read", "obsidian.vault.read", "hermes-agent.update",
+        "runtime.start", "runtime.stop", "runtime.configure", "secret.write", "device.revoke", "audit.read",
       ],
     });
 

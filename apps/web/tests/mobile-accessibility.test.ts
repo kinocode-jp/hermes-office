@@ -7,6 +7,14 @@ import { mobileChatTabPresentation } from "../src/components/chat-workspace.tsx"
 import { mobileOverlayBackgroundElements } from "../src/components/use-mobile-overlay.ts";
 import { locale, preferredBrowserLocale, setLocale } from "../src/i18n.ts";
 import {
+  clearMobileRoutes,
+  closeMobileRoute,
+  mobileRouteStack,
+  openMobileInspector,
+  openMobileWorkspace,
+  resetMobileRouteStateForTests,
+} from "../src/mobile-routes.ts";
+import {
   activeSurface,
   activeSessionId,
   mobileInspectorOpen,
@@ -106,9 +114,8 @@ test("mobile new chat opens its workspace only after session creation succeeds",
   const previousOpenIds = openSessionIds.value;
   const previousActiveId = activeSessionId.value;
   const previousSelectedProfile = selectedProfileId.value;
-  const previousInspector = mobileInspectorOpen.value;
-  const previousWorkspace = mobileWorkspaceOpen.value;
   try {
+    resetMobileRouteStateForTests();
     officeConnection.value = { ...previousConnection, state: "demo", source: "demo" };
     profileList.value = [{
       id: "theo", name: "Theo", role: "Engineering", status: "idle", color: "#087f70",
@@ -117,8 +124,7 @@ test("mobile new chat opens its workspace only after session creation succeeds",
     sessions.value = [];
     openSessionIds.value = [];
     activeSessionId.value = "";
-    mobileInspectorOpen.value = true;
-    mobileWorkspaceOpen.value = false;
+    openMobileInspector();
 
     assert.equal(createProfileSession("missing"), false);
     assert.equal(mobileInspectorOpen.value, true);
@@ -132,86 +138,151 @@ test("mobile new chat opens its workspace only after session creation succeeds",
     assert.equal(activeSessionId.value, sessions.value[0]?.id);
     assert.deepEqual(openSessionIds.value, [sessions.value[0]?.id]);
   } finally {
+    resetMobileRouteStateForTests();
+    clearMobileRoutes();
     officeConnection.value = previousConnection;
     profileList.value = previousProfiles;
     sessions.value = previousSessions;
     openSessionIds.value = previousOpenIds;
     activeSessionId.value = previousActiveId;
     selectedProfileId.value = previousSelectedProfile;
-    mobileInspectorOpen.value = previousInspector;
-    mobileWorkspaceOpen.value = previousWorkspace;
   }
 });
 
 test("mobile primary navigation closes both overlays before revealing its surface", () => {
   const previousSurface = activeSurface.value;
-  const previousInspector = mobileInspectorOpen.value;
-  const previousWorkspace = mobileWorkspaceOpen.value;
   try {
-    for (const surface of ["office", "kanban", "library", "settings"] as const) {
-      mobileInspectorOpen.value = true;
-      mobileWorkspaceOpen.value = true;
+    for (const surface of ["office", "kanban", "teams", "settings"] as const) {
+      resetMobileRouteStateForTests();
+      openMobileWorkspace();
+      openMobileInspector();
       navigateToSurface(surface);
       assert.equal(activeSurface.value, surface);
       assert.equal(mobileInspectorOpen.value, false);
       assert.equal(mobileWorkspaceOpen.value, false);
+      assert.deepEqual(mobileRouteStack(), []);
     }
+    // Legacy library nav folds into Settings → Global.
+    resetMobileRouteStateForTests();
+    openMobileWorkspace();
+    navigateToSurface("library");
+    assert.equal(activeSurface.value, "settings");
+    assert.equal(mobileWorkspaceOpen.value, false);
   } finally {
+    resetMobileRouteStateForTests();
+    clearMobileRoutes();
     activeSurface.value = previousSurface;
-    mobileInspectorOpen.value = previousInspector;
-    mobileWorkspaceOpen.value = previousWorkspace;
   }
 });
 
-test("mobile profile selection opens exactly one focused route with and without an existing chat", () => {
+test("mobile profile selection opens exactly one focused route with and without openWorkspace", () => {
   const previousProfiles = profileList.value;
   const previousSessions = sessions.value;
   const previousOpenIds = openSessionIds.value;
   const previousActiveId = activeSessionId.value;
   const previousSelectedProfile = selectedProfileId.value;
-  const previousInspector = mobileInspectorOpen.value;
-  const previousWorkspace = mobileWorkspaceOpen.value;
+  const previousConnection = officeConnection.value;
   try {
+    resetMobileRouteStateForTests();
+    officeConnection.value = { ...previousConnection, state: "demo", source: "demo" };
     profileList.value = [{
       id: "theo", name: "Theo", role: "Engineering", status: "idle", color: "#087f70",
       sessions: 0, taskCount: 0, memoryBytes: 0, memoryNote: "", skills: [], inheritedSkills: [],
     }];
     sessions.value = [];
     openSessionIds.value = [];
-    mobileWorkspaceOpen.value = true;
-    selectProfile("theo");
+    activeSessionId.value = "";
+
+    // Inspector-only selection must close any open workspace.
+    openMobileWorkspace();
+    selectProfile("theo", { openDetail: false });
     assert.equal(mobileInspectorOpen.value, true);
     assert.equal(mobileWorkspaceOpen.value, false);
+    assert.deepEqual(mobileRouteStack(), ["workspace", "inspector"]);
 
-    sessions.value = [session("existing", "Existing chat")];
-    selectProfile("theo");
+    // openWorkspace opens chat only — never the inspector — with or without an existing session.
+    selectProfile("theo", { openWorkspace: true });
     assert.equal(mobileInspectorOpen.value, false);
     assert.equal(mobileWorkspaceOpen.value, true);
+    assert.deepEqual(mobileRouteStack(), ["workspace"]);
+    assert.equal(sessions.value.length, 1);
+
+    sessions.value = [session("existing", "Existing chat")];
+    openSessionIds.value = ["existing"];
+    selectProfile("theo", { openWorkspace: true });
+    assert.equal(mobileInspectorOpen.value, false);
+    assert.equal(mobileWorkspaceOpen.value, true);
+    assert.equal(activeSessionId.value, "existing");
+    assert.deepEqual(mobileRouteStack(), ["workspace"]);
   } finally {
+    resetMobileRouteStateForTests();
+    clearMobileRoutes();
+    officeConnection.value = previousConnection;
     profileList.value = previousProfiles;
     sessions.value = previousSessions;
     openSessionIds.value = previousOpenIds;
     activeSessionId.value = previousActiveId;
     selectedProfileId.value = previousSelectedProfile;
-    mobileInspectorOpen.value = previousInspector;
-    mobileWorkspaceOpen.value = previousWorkspace;
+  }
+});
+
+test("mobile route stack closes workspace then inspector and restores workspace under inspector", () => {
+  try {
+    resetMobileRouteStateForTests();
+    openMobileWorkspace();
+    assert.deepEqual(mobileRouteStack(), ["workspace"]);
+    assert.equal(mobileWorkspaceOpen.value, true);
+    assert.equal(mobileInspectorOpen.value, false);
+
+    openMobileInspector();
+    assert.deepEqual(mobileRouteStack(), ["workspace", "inspector"]);
+    assert.equal(mobileWorkspaceOpen.value, false);
+    assert.equal(mobileInspectorOpen.value, true);
+
+    closeMobileRoute();
+    assert.deepEqual(mobileRouteStack(), ["workspace"]);
+    assert.equal(mobileWorkspaceOpen.value, true);
+    assert.equal(mobileInspectorOpen.value, false);
+
+    closeMobileRoute();
+    assert.deepEqual(mobileRouteStack(), []);
+    assert.equal(mobileWorkspaceOpen.value, false);
+    assert.equal(mobileInspectorOpen.value, false);
+
+    openMobileInspector();
+    closeMobileRoute();
+    assert.deepEqual(mobileRouteStack(), []);
+    assert.equal(mobileInspectorOpen.value, false);
+  } finally {
+    resetMobileRouteStateForTests();
+    clearMobileRoutes();
   }
 });
 
 test("mobile route and modal overlays expose consistent focus, inert, and navigation semantics", async () => {
-  const [app, workspace, profile, overlay] = await Promise.all([
+  const [app, rail, workspace, profile, overlay, main, routes] = await Promise.all([
     readFile(new URL("../src/app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/side-rail.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/components/chat-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/components/profile-panel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/components/use-mobile-overlay.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/mobile-routes.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(app, /onClick=\{\(\) => navigateToSurface\(item\.id\)\}/);
+  assert.match(rail, /navigateToSurface\(item\.id\)/);
   assert.match(app, /data-mobile-route-chrome/);
+  assert.match(rail, /data-mobile-route-chrome/);
+  assert.match(app, /onClick=\{openMobileInspector\}/);
   assert.match(workspace, /kind: "route"/);
+  assert.match(workspace, /onClose: closeMobileRoute/);
+  assert.match(workspace, /onClick=\{closeMobileRoute\}/);
+  assert.match(workspace, /onClick=\{openMobileInspector\}/);
   assert.match(workspace, /role=\{mobileOverlay\.active \? "region" : undefined\}/);
   assert.doesNotMatch(workspace, /aria-modal=/);
   assert.match(profile, /kind: "modal"/);
+  assert.match(profile, /onClose: closeMobileRoute/);
+  assert.match(profile, /onClick=\{closeMobileRoute\}/);
   assert.match(profile, /viewport: COMPACT_OVERLAY_VIEWPORT/);
   assert.match(overlay, /COMPACT_OVERLAY_VIEWPORT = "\(max-width: 1279px\)"/);
   assert.match(overlay, /PHONE_OVERLAY_VIEWPORT = "\(max-width: 767px\)"/);
@@ -225,6 +296,12 @@ test("mobile route and modal overlays expose consistent focus, inert, and naviga
   assert.match(overlay, /event\.key === "Escape"/);
   assert.match(overlay, /kind !== "modal" \|\| event\.key !== "Tab"/);
   assert.match(overlay, /canRestoreModalFocus\(previousFocus\)/);
+  assert.match(main, /installMobileRouteHistory\(\)/);
+  assert.match(routes, /openMobileWorkspace/);
+  assert.match(routes, /openMobileInspector/);
+  assert.match(routes, /closeMobileRoute/);
+  assert.match(routes, /history\.pushState/);
+  assert.match(routes, /popstate/);
 });
 
 test("nested mobile workspace locks every sibling branch without inerting its own ancestors", () => {
@@ -281,7 +358,7 @@ test("first-run locale follows the browser and login exposes an unauthenticated 
   assert.equal(preferredBrowserLocale({ language: "ja-JP", languages: ["ja-JP"] }), "ja");
   assert.equal(preferredBrowserLocale({ language: "fr-FR", languages: ["fr-FR"] }), "en");
   const login = await readFile(new URL("../src/components/device-login.tsx", import.meta.url), "utf8");
-  assert.match(login, /class="device-login-language"/);
+  assert.match(login, /class="dl-lang"/);
   assert.match(login, /setLocale\(locale\.value === "ja" \? "en" : "ja"\)/);
 });
 
@@ -311,25 +388,11 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
   assert.match(styles, /\.chat-operation-ledger > summary \{[^}]*min-height: 44px/);
   assert.match(styles, /\.chat-operation-ledger > summary:focus-visible \{[^}]*outline: 2px solid/);
 
-  const utilitySelectors = selectorsUsing(appearance, "font-size: var(--text-utility)");
-  for (const selector of [".task-status-select", ".task-status-select small", ".task-comments-state", ".task-comments-empty", ".task-comments-limit", ".task-comment-list header", ".kanban-unconfirmed"]) {
-    assert.match(utilitySelectors, new RegExp(escapeRegExp(selector)), `${selector} must scale with the utility token`);
-  }
-  const labelSelectors = selectorsUsing(appearance, "font-size: var(--text-label)");
-  for (const selector of [".task-assignee-select select", ".task-status-select select", ".task-comments-error", ".task-comments-error button", ".task-card footer button", ".task-comment-form input", ".task-comment-form button", ".kanban-unconfirmed button"]) {
-    assert.match(labelSelectors, new RegExp(escapeRegExp(selector)), `${selector} must scale with the label token`);
-  }
-  for (const selector of [".device-login-message", ".device-login-form input", ".device-login-form button", ".device-login-language", ".avatar-picker > p", ".avatar-picker-actions button", ".avatar-picker-error"]) {
-    assert.match(labelSelectors, new RegExp(escapeRegExp(selector)), `${selector} must scale with the label token`);
-  }
-  const utilityWithLogin = selectorsUsing(appearance, "font-size: var(--text-utility)");
-  for (const selector of [".device-login-card .eyebrow", ".device-login-card::before", ".device-login-form label span", ".avatar-picker header small", ".profile-avatar-button > span:last-child"]) {
-    assert.match(utilityWithLogin, new RegExp(escapeRegExp(selector)), `${selector} must scale with the utility token`);
-  }
-  for (const selector of [".device-login-card h1", ".device-login-mark", ".avatar-picker h3"]) {
-    assert.match(declarationsForSelector(appearance, selector), /var\(--font-scale\)/, `${selector} must follow the selected font scale`);
-  }
-  assert.match(selectorsUsing(appearance, "font-size: var(--text-chat)"), /\.task-comment-list p/);
+  assert.match(styles, /--text-xs: calc\(12px \* var\(--font-scale, 1\)\)/);
+  assert.match(styles, /--text-sm: calc\(13px \* var\(--font-scale, 1\)\)/);
+  assert.match(styles, /--text-md: calc\(14px \* var\(--font-scale, 1\)\)/);
+  assert.match(styles, /\.task-assignee-select, \.task-status-select \{[^}]*var\(--text-xs\)/);
+  assert.match(styles, /\.dl-lang \{[^}]*min-height: var\(--target-mobile, 44px\)[^}]*var\(--text-label, 14px\)/);
 
   const mobileTargets = selectorsUsing(appearance, "min-height: var(--target-mobile)");
   for (const selector of [".task-assignee-select select", ".task-status-select select", ".task-card footer button", ".task-comments-error button", ".task-comment-form input", ".task-comment-form button", ".kanban-unconfirmed button"]) {
@@ -343,7 +406,7 @@ test("mobile tab and Kanban CSS preserve scrolling, focus, scaled text, and touc
     assert.match(declarationsForSelector(liveSettings, selector), /var\(--ls-text-|var\(--font-scale\)/, `${selector} must follow the selected font scale`);
   }
   for (const selector of [".access-audit__title p", ".access-audit__current strong", ".access-audit__rail li", ".access-audit__message", ".access-audit footer"]) {
-    assert.match(declarationsForSelector(audit, selector), /var\(--font-scale\)/, `${selector} must follow the selected font scale`);
+    assert.match(declarationsForSelector(audit, selector), /var\(--font-scale\)|var\(--text-/, `${selector} must follow the selected font scale`);
   }
 });
 
@@ -369,10 +432,20 @@ test("small phones preserve scaled primary navigation, safe areas, and touch tar
     assert.match(mobileTargets, new RegExp(escapeRegExp(selector)), `${selector} must keep a mobile touch target`);
   }
   assert.match(appearance, /\.mobile-close,[\s\S]*\.avatar-picker header > button \{ min-width: var\(--target-mobile\); \}/);
-  assert.match(app, /<span class="user-button user-button--display" role="note" aria-label=\{t\("app\.localOwner"\)\}/);
+  // Remote logout lives in DeviceAdmin only — never a topbar one-tap control.
+  assert.doesNotMatch(app, /logoutRemoteDevice/);
+  assert.doesNotMatch(app, /user-button/);
+  assert.doesNotMatch(app, /class="user-button"/);
   assert.doesNotMatch(app, /<button[^>]*>KO<\/button>/);
 
+  const deviceAdmin = await readFile(new URL("../src/components/device-admin.tsx", import.meta.url), "utf8");
+  assert.match(deviceAdmin, /logoutRemoteDevice/);
+  assert.match(deviceAdmin, /isLocalOfficeClient/);
+  assert.match(deviceAdmin, /hostAdmin\.logoutConfirm/);
+  assert.match(deviceAdmin, /location\.reload\(\)/);
+
   const audit = await readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8");
+  assert.match(audit, /\.access-audit__logout-action \{[\s\S]*min-height: var\(--target-mobile/);
   assert.match(audit, /@media \(max-width: 400px\) \{[\s\S]*\.access-audit__gate \{ grid-template-columns: auto minmax\(0, 1fr\); \}/);
   assert.match(audit, /\.access-audit__gate > button \{[^}]*width: 100%[^}]*min-height: var\(--target-mobile\)/);
 });
@@ -410,7 +483,7 @@ test("information triggers remain siblings of headings used as accessible names"
   }
   assert.match(sources[0] ?? "", /<h1 id="office-title">\{t\("office\.title"\)\}<\/h1>\s*<InfoTip/);
   assert.match(sources[1] ?? "", /<h3 id="avatar-picker-title">[\s\S]*?<\/h3>\s*<InfoTip/);
-  assert.match(sources[4] ?? "", /<h3 id="font-heading">\{copy\.textSize\}<\/h3>\s*<InfoTip/);
+  assert.match(sources[4] ?? "", /<h3 id="font-heading">\{t\("appearance\.textSize"\)\}<\/h3>\s*<InfoTip/);
 });
 
 function session(id: string, title: string): ChatSession {

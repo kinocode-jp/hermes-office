@@ -256,11 +256,11 @@ test("authoritative stored inventory replaces a promoted draft title presentatio
 test("Office reconnect exhaustion is stored as first-party presentation and switches locale", () => {
   const previous = locale.value;
   try {
-    setOfficeError("Office WebSocketへ再接続できませんでした。手動で再試行してください。", serverUrl, true);
+    setOfficeError("Studio WebSocketへ再接続できませんでした。手動で再試行してください。", serverUrl, true);
     setLocale("ja");
-    assert.equal(localizeRuntimeMessage(officeConnection.value.message), "Office WebSocketへ再接続できませんでした。手動で再試行してください。");
+    assert.equal(localizeRuntimeMessage(officeConnection.value.message), "Studio WebSocketへ再接続できませんでした。手動で再試行してください。");
     setLocale("en");
-    assert.equal(localizeRuntimeMessage(officeConnection.value.message), "Unable to reconnect to the Office WebSocket. Retry manually.");
+    assert.equal(localizeRuntimeMessage(officeConnection.value.message), "Unable to reconnect to the Studio WebSocket. Retry manually.");
   } finally { setLocale(previous); }
 });
 

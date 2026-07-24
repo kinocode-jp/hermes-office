@@ -7,8 +7,8 @@ import type {
   OfficeInventoryPage,
   OfficeInventoryPagination,
   ProfileSummary,
-} from "@hermes-office/protocol";
-import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-office/protocol";
+} from "@hermes-studio/protocol";
+import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-studio/protocol";
 import { redactSecrets } from "./secret-scrubber.js";
 
 const UPSTREAM_PAGE_SIZE = 100;
@@ -259,6 +259,10 @@ export class HermesInventoryCache {
     const profiles = this.#page(generation, "profiles", 0, SNAPSHOT_PAGE_SIZE);
     const sessions = this.#page(generation, "sessions", 0, SNAPSHOT_PAGE_SIZE);
     return { profiles: [...profiles.profiles], sessions: [...sessions.sessions], metadata: { profiles: profiles.pagination, sessions: sessions.pagination } };
+  }
+
+  clear(): void {
+    this.#generations.clear();
   }
 
   page(kind: OfficeInventoryKind, cursor: string, limit: number): OfficeInventoryPage {

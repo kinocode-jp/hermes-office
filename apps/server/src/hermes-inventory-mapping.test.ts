@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-office/protocol";
+import { UNKNOWN_INVENTORY_TIMESTAMP } from "@hermes-studio/protocol";
 import { collectHermesInventory, HermesInventoryCache, type HermesJsonResult } from "./hermes-inventory.js";
 
 const MAX_EPOCH_SECONDS = 8_640_000_000_000;
@@ -170,10 +170,10 @@ test("missing timestamps use a stable unknown sentinel and preserve cursor gener
 });
 
 test("session inventory redacts Hermes secrets before bounding browser display text", async () => {
-  const secret = "dashboard-example-value-123456";
+  const secret = "dashboard-example-value-123456"; // gitleaks:allow -- synthetic redaction fixture
   const standalone = "sk_" + "live_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const authorization = "opaque-inventory-credential";
-  const databaseSecret = "database-password-example-value";
+  const databaseSecret = "database-password-example-value"; // gitleaks:allow -- synthetic redaction fixture
   const googleKey = ["AIza", "SyA12345678901234567890123456789012"].join("");
   const row = {
     ...session("secret-safe", 1),
@@ -191,7 +191,7 @@ test("session inventory redacts Hermes secrets before bounding browser display t
 });
 
 test("secret-shaped profile and session identities are dropped instead of exposed", async () => {
-  const secret = "dashboard-example-value-123456";
+  const secret = "dashboard-example-value-123456"; // gitleaks:allow -- synthetic redaction fixture
   const inventory = await collectHermesInventory(requester(
     [profile(), profile(`TOKEN=${secret}`)],
     [session("safe-session", 1), { ...session("unsafe", 1), id: `TOKEN=${secret}` }],

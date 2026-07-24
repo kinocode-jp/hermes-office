@@ -20,7 +20,7 @@ const CARD = {
   latest_summary: null,
   comment_count: 2,
   workspace_path: "/Users/private/project",
-  api_key: "must-not-leak",
+  api_key: "must-not-leak", // gitleaks:allow -- synthetic rejection fixture
 };
 
 function mockAdapter(handler: (request: HermesKanbanRequest) => unknown | Promise<unknown>) {
@@ -36,7 +36,7 @@ test("board reads are allowlisted and strip paths, secrets, and unknown fields",
     assignees: ["mina"],
     latest_event_id: 9,
     now: 200,
-    access_token: "must-not-leak",
+    access_token: "must-not-leak", // gitleaks:allow -- synthetic rejection fixture
   }));
   const board = await adapter.getBoard({ board: "Project_One", includeArchived: true });
 
@@ -105,7 +105,7 @@ test("create, assignment, status, and comments send only bounded allowlisted JSO
   });
   assert.deepEqual(requests[1]?.body, { assignee: "" });
   assert.deepEqual(requests[2]?.body, { status: "blocked" });
-  assert.deepEqual(requests[3]?.body, { body: "Need input", author: "hermes-office" });
+  assert.deepEqual(requests[3]?.body, { body: "Need input", author: "hermes-studio" });
 });
 
 test("profile identities preserve case across assignment, board reads, and updates", async () => {

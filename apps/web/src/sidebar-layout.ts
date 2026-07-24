@@ -1,0 +1,111 @@
+import { signal } from "@preact/signals";
+import { isPhoneViewport } from "./viewport";
+
+const STORAGE_KEY = "hermes-studio:sidebar-layout:v1";
+
+export const SIDEBAR_MIN_WIDTH = 64;
+export const SIDEBAR_MAX_WIDTH = 420;
+export const SIDEBAR_DEFAULT_WIDTH = 248;
+export const SIDEBAR_ICON_THRESHOLD = 96;
+
+export type SidebarMode = "cards" | "rows";
+
+type SidebarPreferences = {
+  width: number;
+  mode: SidebarMode;
+  profilesOpen: boolean;
+  openProfileIds: string[];
+};
+
+const initial = readPreferences();
+
+export const sidebarWidth = signal(initial.width);
+export const sidebarMode = signal<SidebarMode>(initial.mode);
+export const sidebarProfilesOpen = signal(initial.profilesOpen);
+export const sidebarOpenProfileIds = signal<string[]>(initial.openProfileIds);
+
+export function previewSidebarWidth(width: number): void {
+  sidebarWidth.value = clampSidebarWidth(width);
+}
+
+export function setSidebarWidth(width: number): void {
+  previewSidebarWidth(width);
+  persistPreferences();
+}
+
+export function setSidebarMode(mode: SidebarMode): void {
+  sidebarMode.value = mode;
+  persistPreferences();
+}
+
+export function setSidebarProfilesOpen(open: boolean): void {
+  sidebarProfilesOpen.value = open;
+  persistPreferences();
+}
+
+export function isSidebarProfileOpen(profileId: string): boolean {
+  return sidebarOpenProfileIds.value.includes(profileId);
+}
+
+export function setSidebarProfileOpen(profileId: string, open: boolean): void {
+  const key = profileId.trim();
+  if (!key) return;
+  const current = sidebarOpenProfileIds.value;
+  const isOpen = current.includes(key);
+  if (open === isOpen) return;
+  sidebarOpenProfileIds.value = open
+    ? [...current, key]
+    : current.filter((id) => id !== key);
+  persistPreferences();
+}
+
+export function toggleSidebarProfileOpen(profileId: string): void {
+  setSidebarProfileOpen(profileId, !isSidebarProfileOpen(profileId));
+}
+
+export function isSidebarIconOnly(width = sidebarWidth.value): boolean {
+  return width <= SIDEBAR_ICON_THRESHOLD;
+}
+
+function clampSidebarWidth(width: number): number {
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.round(Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width)));
+}
+
+function readPreferences(): SidebarPreferences {
+  const fallback: SidebarPreferences = {
+    width: SIDEBAR_DEFAULT_WIDTH,
+    mode: "cards",
+    // On phones the profile sheet overlays the whole screen, so it starts closed.
+    profilesOpen: !isPhoneViewport(),
+    openProfileIds: [],
+  };
+  if (typeof localStorage === "undefined") return fallback;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null") as Partial<SidebarPreferences> | null;
+    return {
+      width: clampSidebarWidth(typeof parsed?.width === "number" ? parsed.width : fallback.width),
+      mode: parsed?.mode === "rows" ? "rows" : fallback.mode,
+      profilesOpen: typeof parsed?.profilesOpen === "boolean" ? parsed.profilesOpen : fallback.profilesOpen,
+      openProfileIds: Array.isArray(parsed?.openProfileIds)
+        ? parsed.openProfileIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : fallback.openProfileIds,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function persistPreferences(): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      width: sidebarWidth.value,
+      mode: sidebarMode.value,
+      profilesOpen: sidebarProfilesOpen.value,
+      openProfileIds: sidebarOpenProfileIds.value,
+    } satisfies SidebarPreferences));
+  } catch {
+    // The sidebar remains usable when storage is unavailable.
+  }
+}

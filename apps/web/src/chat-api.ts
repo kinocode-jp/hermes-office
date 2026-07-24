@@ -32,6 +32,10 @@ export type ChatTarget = {
   clientSessionId: string;
   profileId: string;
   storedSessionId?: string;
+  model?: string;
+  provider?: string;
+  /** Hermes session.create reasoning_effort when set. */
+  reasoningEffort?: string;
 };
 
 export type ChatGatewayEvent = {
@@ -392,7 +396,7 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     const existingLiveSessionId = liveSessionIdFor(active, liveToClient);
     if (existingLiveSessionId) {
       if (historiesAwaitingReset.has(target.clientSessionId)) return;
-      callbacks.onSessionReady(target.clientSessionId, existingLiveSessionId, target.storedSessionId);
+      // Live session is already mapped; avoid re-emitting ready which causes UI flicker.
       return;
     }
     opening.set(target.clientSessionId, operation);
@@ -404,7 +408,12 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     try {
       const raw = target.storedSessionId
         ? await rpc("session.resume", { session_id: target.storedSessionId, profile: target.profileId })
-        : await rpc("session.create", { profile: target.profileId });
+        : await rpc("session.create", {
+          profile: target.profileId,
+          ...(target.model ? { model: target.model } : {}),
+          ...(target.provider ? { provider: target.provider } : {}),
+          ...(target.reasoningEffort ? { reasoning_effort: target.reasoningEffort } : {}),
+        });
       const envelope = asRecord(raw);
       const result = (asRecord(envelope?.value) ?? envelope) as JsonRpcResult | undefined;
       const liveSessionId = typeof result?.session_id === "string"
@@ -649,8 +658,18 @@ export function connectChatApi(callbacks: ChatApiCallbacks, dependencies: ChatAp
     ensureSession(target) {
       const existing = targets.get(target.clientSessionId);
       if (existing !== undefined && targetsMatch(existing.target, target)) {
+        // Already tracking this session. Only revive a halted transport or finish a
+        // not-yet-live start. Do not re-enter startTarget when a live session exists,
+        // or the UI flaps through connecting/ready on every ensure call.
         restartTransport(false);
-        if (gatewayReady) startTarget(existing);
+        if (!gatewayReady) return;
+        if (liveSessionIdFor(existing, liveToClient) !== undefined) return;
+        if (
+          targetStartOperations.has(target.clientSessionId)
+          || opening.has(target.clientSessionId)
+          || historyLoads.has(target.clientSessionId)
+        ) return;
+        startTarget(existing);
         return;
       }
       if (existing !== undefined) deactivateTarget(existing);

@@ -22,7 +22,7 @@ const RAW_CARD = {
   latest_summary: null,
   comment_count: 0,
   workspace_path: "/Users/private/repository",
-  api_key: "never-return-this",
+  api_key: "never-return-this", // gitleaks:allow -- synthetic rejection fixture
 };
 
 function makeFixture(cardCount = 1) {
@@ -48,7 +48,7 @@ function makeFixture(cardCount = 1) {
           assignees: ["mina"],
           latest_event_id: 3,
           now: 200,
-          access_token: "never-return-this",
+          access_token: "never-return-this", // gitleaks:allow -- synthetic rejection fixture
         };
       }
       if (request.path.endsWith("/comments")) return { ok: true };
@@ -187,7 +187,7 @@ test("Kanban mutations require CSRF and expose create/update/status/assignee/com
     });
     assert.equal(comment.status, 201);
     assert.equal(fixture.requests.length, 5);
-    assert.deepEqual(fixture.requests[4]?.body, { body: "Please continue", author: "hermes-office" });
+    assert.deepEqual(fixture.requests[4]?.body, { body: "Please continue", author: "hermes-studio" });
   } finally {
     await server.close();
   }

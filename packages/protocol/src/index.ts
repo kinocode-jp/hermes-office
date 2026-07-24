@@ -1,5 +1,5 @@
 /**
- * Transport-neutral contracts shared by Hermes Office clients and server.
+ * Transport-neutral contracts shared by Hermes Studio clients and server.
  *
  * This package deliberately has no runtime dependencies. Authentication and
  * authorization context are derived by the server and are never accepted from
@@ -19,6 +19,36 @@ export const GLOBAL_CONTEXT_ENVELOPE_RESERVE_UTF8_BYTES = 16 * 1024;
 export const GLOBAL_CONTEXT_MAX_UTF8_BYTES =
   GLOBAL_SETTINGS_MAX_REQUEST_UTF8_BYTES - GLOBAL_CONTEXT_ENVELOPE_RESERVE_UTF8_BYTES;
 export const GLOBAL_SETTINGS_MAX_SKILLS = 64;
+
+/**
+ * Profile Hermes config (schema-driven advanced settings) wire budgets.
+ * PATCH carries only dotted leaf changes; GET returns safe leaves only.
+ */
+export const PROFILE_CONFIG_MAX_REQUEST_UTF8_BYTES = 64 * 1024;
+export const PROFILE_CONFIG_MAX_RESPONSE_UTF8_BYTES = 512 * 1024;
+export const PROFILE_CONFIG_MAX_FIELDS = 600;
+export const PROFILE_CONFIG_MAX_CHANGES = 100;
+export const PROFILE_CONFIG_MAX_STRING_UTF8_BYTES = 8 * 1024;
+export const PROFILE_CONFIG_MAX_LIST_ITEMS = 64;
+export const PROFILE_CONFIG_MAX_LIST_ITEM_UTF8_BYTES = 2 * 1024;
+export const PROFILE_CONFIG_MAX_NEST_DEPTH = 8;
+export const PROFILE_CONFIG_MAX_OPTIONS = 64;
+
+/**
+ * Privileged Hermes config + one-shot secret transfer budgets.
+ * Privileged leaves are owner-tier; remote access is deployment-gated.
+ * Secrets never leave transfer paths as ordinary config DTOs.
+ */
+export const PRIVILEGED_CONFIG_MAX_REQUEST_UTF8_BYTES = 64 * 1024;
+export const PRIVILEGED_CONFIG_MAX_RESPONSE_UTF8_BYTES = 512 * 1024;
+export const PRIVILEGED_CONFIG_MAX_FIELDS = 600;
+export const PRIVILEGED_CONFIG_MAX_CHANGES = 100;
+export const PRIVILEGED_CONFIG_MAX_JSON_UTF8_BYTES = 16 * 1024;
+export const SECRET_TRANSFER_MAX_VALUE_UTF8_BYTES = 8 * 1024;
+export const SECRET_TRANSFER_MAX_PENDING = 8;
+export const SECRET_TRANSFER_TTL_MS = 30_000;
+export const SECRET_TRANSFER_ID_PATTERN = /^[A-Za-z0-9_-]{22,64}$/;
+export const SECRET_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -45,6 +75,7 @@ export type MessageId = EntityId;
 export type BoardId = EntityId;
 export type CardId = EntityId;
 export type DeviceId = EntityId;
+export type TeamId = EntityId;
 export type SkillId = EntityId;
 export type EventId = EntityId;
 
@@ -89,6 +120,9 @@ export type Operation =
   | "kanban.card.create"
   | "kanban.card.update"
   | "kanban.card.comment"
+  | "team.create"
+  | "team.update"
+  | "team.delete"
   | "profile.create"
   | "profile.update"
   | "profile.delete"
@@ -96,12 +130,43 @@ export type Operation =
   | "skill.enable"
   | "skill.install"
   | "global-settings.update"
+  /** Schema-driven safe Hermes config leaves for a profile. */
+  | "profile-config.update"
+  /**
+   * Previously excluded non-secret Hermes config leaves. Owner tier;
+   * remote-safe when deployment enables remote privileged (Tailscale path).
+   */
+  | "privileged-config.read"
+  | "privileged-config.update"
+  /** Install a fixed allowlisted application on the Studio host. */
+  | "host-app.install"
+  /** Browse host directories (names only) for folder pickers. */
+  | "host-fs.read"
+  /** Read registered Obsidian vault metadata and its bounded note graph. */
+  | "obsidian.vault.read"
+  /** Update the fixed local Hermes Agent install on the Studio host. */
+  | "hermes-agent.update"
   | "runtime.start"
   | "runtime.stop"
   | "runtime.configure"
   | "secret.write"
   | "device.revoke"
   | "audit.read";
+
+/** Operations gated by HERMES_STUDIO_REMOTE_PRIVILEGED for non-local sessions. */
+export const REMOTE_PRIVILEGED_OPERATIONS: readonly Operation[] = [
+  "privileged-config.read",
+  "privileged-config.update",
+  "secret.write",
+  "host-app.install",
+  "host-fs.read",
+  "obsidian.vault.read",
+  "hermes-agent.update",
+] as const;
+
+export function isRemotePrivilegedOperation(operation: Operation): boolean {
+  return (REMOTE_PRIVILEGED_OPERATIONS as readonly string[]).includes(operation);
+}
 
 export interface OperationPolicy {
   operation: Operation;
@@ -121,6 +186,11 @@ export const OPERATION_POLICIES: Readonly<Record<Operation, OperationPolicy>> = 
   "kanban.card.create": policy("kanban.card.create", "operator", "remote-safe", true),
   "kanban.card.update": policy("kanban.card.update", "operator", "remote-safe", true),
   "kanban.card.comment": policy("kanban.card.comment", "operator", "remote-safe", true),
+  // Team membership, context, and skills are inherited by new sessions. Keep
+  // these mutations on the same boundary as direct profile/skill changes.
+  "team.create": policy("team.create", "manager", "step-up-required", true),
+  "team.update": policy("team.update", "manager", "step-up-required", true),
+  "team.delete": policy("team.delete", "manager", "step-up-required", true),
   "profile.create": policy("profile.create", "manager", "step-up-required", true),
   "profile.update": policy("profile.update", "manager", "step-up-required", true),
   "profile.delete": policy("profile.delete", "owner", "step-up-required", true),
@@ -133,10 +203,47 @@ export const OPERATION_POLICIES: Readonly<Record<Operation, OperationPolicy>> = 
     "step-up-required",
     true,
   ),
+  // Safe ordinary Hermes config only (fail-closed policy strips secrets /
+  // execution-adjacent fields). Still step-up-required: remaining leaves can
+  // change agent behavior, so remote devices without local step-up fail closed
+  // (same pattern as skill.enable / profile.update).
+  "profile-config.update": policy(
+    "profile-config.update",
+    "manager",
+    "step-up-required",
+    true,
+  ),
+  // Privileged non-secret Hermes leaves (model/toolsets/terminal/approvals/…).
+  // Owner tier; remote-safe so Tailscale-enrolled owner devices may call when
+  // HERMES_STUDIO_REMOTE_PRIVILEGED is enabled. OfficeAuth filters these out of
+  // remote allowedOperations and denies authorize when the flag is off.
+  "privileged-config.read": policy(
+    "privileged-config.read",
+    "owner",
+    "read-only",
+    true,
+  ),
+  "privileged-config.update": policy(
+    "privileged-config.update",
+    "owner",
+    "remote-safe",
+    true,
+  ),
+  // Fixed allowlisted host app installation. Remote use requires the same
+  // explicit Tailnet privileged deployment gate as secrets/config.
+  "host-app.install": policy("host-app.install", "owner", "remote-safe", true),
+  // Directory-name browsing for folder pickers. Same remote-privileged
+  // deployment gate as other host-scoped reads.
+  "host-fs.read": policy("host-fs.read", "owner", "read-only", true),
+  "obsidian.vault.read": policy("obsidian.vault.read", "owner", "read-only", true),
+  // Fixed Hermes Agent update (`hermes update --yes`). Same remote-privileged
+  // deployment gate as host-app install / privileged config / secrets.
+  "hermes-agent.update": policy("hermes-agent.update", "owner", "remote-safe", true),
   "runtime.start": policy("runtime.start", "owner", "local-only", true),
   "runtime.stop": policy("runtime.stop", "owner", "local-only", true),
   "runtime.configure": policy("runtime.configure", "owner", "local-only", true),
-  "secret.write": policy("secret.write", "owner", "local-only", true),
+  // Secret deposit/consume: owner remote-safe under the same remote-privileged flag.
+  "secret.write": policy("secret.write", "owner", "remote-safe", true),
   "device.revoke": policy("device.revoke", "owner", "local-only", true),
   "audit.read": policy("audit.read", "owner", "read-only", false),
 } as const;
@@ -199,6 +306,7 @@ export interface Capabilities {
     | "skills"
     | "memory"
     | "kanban"
+    | "teams"
     | "global-inheritance"
     | "demo"
   )[];
@@ -401,6 +509,68 @@ export interface AddCardCommentRequest {
   content: string;
 }
 
+/**
+ * Office-owned team layer for skills and shared context.
+ * Precedence when materializing into a Hermes profile:
+ *   global ∪ enabled teams containing the profile
+ * Profile-level skill toggles permanently override Office for that pair.
+ * Each team's context is budgeted like global context; session seeds join
+ * global + matching team contexts under one wire budget.
+ */
+export interface OfficeTeamSettings {
+  revision: number;
+  skillsEnabled: boolean;
+  contextEnabled: boolean;
+  skills: readonly string[];
+  context: string;
+  updatedAt: IsoDateTime;
+}
+
+/**
+ * Office-owned metadata that groups Hermes profiles. Hermes remains the
+ * canonical source for individual profiles and Kanban card assignment; teams
+ * never write upstream kanban.db and never replace individual assignees.
+ */
+export interface OfficeTeam {
+  id: TeamId;
+  name: string;
+  color: string;
+  description?: string;
+  leadProfileId?: ProfileId;
+  memberProfileIds: readonly ProfileId[];
+  /** Team-layer skills/context (middle inheritance tier between global and profile). */
+  settings: OfficeTeamSettings;
+  revision: number;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
+export interface UpdateTeamSettingsRequest {
+  expectedRevision: number;
+  skillsEnabled?: boolean;
+  contextEnabled?: boolean;
+  skills?: readonly string[];
+  context?: string;
+}
+
+export interface CreateTeamRequest {
+  name: string;
+  color: string;
+  description?: string;
+  leadProfileId?: ProfileId | null;
+  memberProfileIds?: readonly ProfileId[];
+}
+
+export interface UpdateTeamRequest {
+  teamId: TeamId;
+  expectedRevision: number;
+  name?: string;
+  color?: string;
+  description?: string | null;
+  leadProfileId?: ProfileId | null;
+  memberProfileIds?: readonly ProfileId[];
+}
+
 export interface CreateProfileRequest {
   displayName: string;
   avatarKey: string;
@@ -435,11 +605,104 @@ export interface UpdateGlobalSettingsRequest {
   sharedSkillsEnabled?: boolean;
 }
 
+/** Dotted-leaf patch for schema-driven safe Hermes profile config. */
+export interface UpdateProfileConfigRequest {
+  profileId: ProfileId;
+  expectedRevision: string;
+  /** Field id → value map; only Office-safe leaves accepted. */
+  changes: Record<string, boolean | number | string | ReadonlyArray<boolean | number | string>>;
+}
+
+/** Dotted-leaf patch for privileged non-secret Hermes profile config. */
+export interface UpdatePrivilegedProfileConfigRequest {
+  profileId: ProfileId;
+  expectedRevision: string;
+  changes: Record<string, boolean | number | string | ReadonlyArray<string> | unknown>;
+}
+
+/** Consume a desktop-native one-shot secret transfer (metadata only on wire). */
+export interface WriteSecretTransferRequest {
+  profileId: ProfileId;
+  key: string;
+  transferId: string;
+  source: "env" | "config" | "memory-provider";
+  /** Required when source is memory-provider; validated provider id only. */
+  provider?: string;
+  expectedRevision?: string;
+}
+
 export interface ConfigureRuntimeRequest {
   mode: RuntimeMode;
   /** Accepted only through a verified local-native session. */
   executablePath?: string;
   endpoint?: string;
+}
+
+export type HostAppPhase = "available" | "installing" | "installed" | "blocked" | "failed" | "unsupported";
+export type HostAppFailure = "homebrew_missing" | "unsupported_platform" | "install_failed" | "install_timeout";
+
+/** Safe, bounded host-side application status exposed to authenticated clients. */
+export interface HostAppStatus {
+  id: "obsidian";
+  name: "Obsidian";
+  phase: HostAppPhase;
+  installed: boolean;
+  canInstall: boolean;
+  installMethod: "homebrew-cask";
+  failure?: HostAppFailure;
+}
+
+export interface ObsidianVaultSummary {
+  id: string;
+  name: string;
+}
+
+export interface ObsidianGraphNode {
+  id: string;
+  title: string;
+  folder: string;
+  links: number;
+}
+
+export interface ObsidianGraphEdge {
+  source: string;
+  target: string;
+}
+
+/** Bounded, content-free note graph. Note bodies and absolute paths are absent. */
+export interface ObsidianGraph {
+  vaultId: string;
+  vaultName: string;
+  generatedAt: IsoDateTime;
+  truncated: boolean;
+  nodes: readonly ObsidianGraphNode[];
+  edges: readonly ObsidianGraphEdge[];
+}
+
+export type HermesAgentUpdatePhase =
+  | "checking"
+  | "up_to_date"
+  | "available"
+  | "updating"
+  | "updated"
+  | "blocked"
+  | "failed"
+  | "unsupported";
+
+export type HermesAgentUpdateFailure =
+  | "executable_missing"
+  | "check_failed"
+  | "update_failed"
+  | "update_timeout"
+  | "unsupported_install";
+
+/** Safe, bounded Hermes Agent update status. No paths or process output. */
+export interface HermesAgentUpdateStatus {
+  phase: HermesAgentUpdatePhase;
+  canUpdate: boolean;
+  updateMethod: "hermes-update";
+  currentVersion?: string;
+  failure?: HermesAgentUpdateFailure;
 }
 
 export interface OperationPayloadMap {
@@ -451,6 +714,9 @@ export interface OperationPayloadMap {
   "kanban.card.create": CreateCardRequest;
   "kanban.card.update": UpdateCardRequest;
   "kanban.card.comment": AddCardCommentRequest;
+  "team.create": CreateTeamRequest;
+  "team.update": UpdateTeamRequest;
+  "team.delete": { teamId: TeamId; expectedRevision?: number };
   "profile.create": CreateProfileRequest;
   "profile.update": UpdateProfileRequest;
   "profile.delete": { profileId: ProfileId };
@@ -458,11 +724,16 @@ export interface OperationPayloadMap {
   "skill.enable": SetSkillEnabledRequest;
   "skill.install": { source: string; expectedDigest?: string };
   "global-settings.update": UpdateGlobalSettingsRequest;
+  "profile-config.update": UpdateProfileConfigRequest;
+  "privileged-config.read": { profileId: ProfileId };
+  "privileged-config.update": UpdatePrivilegedProfileConfigRequest;
+  "host-app.install": { appId: "obsidian" };
+  "hermes-agent.update": Record<string, never>;
   "runtime.start": Record<string, never>;
   "runtime.stop": Record<string, never>;
   "runtime.configure": ConfigureRuntimeRequest;
   /** Secret bytes travel through a separate native one-shot channel. */
-  "secret.write": { key: string; transferId: string };
+  "secret.write": WriteSecretTransferRequest;
   "device.revoke": { deviceId: DeviceId };
 }
 

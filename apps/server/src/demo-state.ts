@@ -2,7 +2,7 @@ import type {
   OfficeSnapshot,
   ProtocolVersion,
   RuntimeStatus,
-} from "@hermes-office/protocol";
+} from "@hermes-studio/protocol";
 
 export const OFFICE_PROTOCOL_VERSION: ProtocolVersion = 1;
 
@@ -40,6 +40,7 @@ export function createDemoSnapshot(now = new Date()): OfficeSnapshot {
         "skills",
         "memory",
         "kanban",
+        "teams",
         "global-inheritance",
         "demo",
       ],
@@ -75,7 +76,7 @@ export function createDemoSnapshot(now = new Date()): OfficeSnapshot {
       {
         id: "session-welcome",
         profileId: "profile-researcher",
-        title: "Welcome to Hermes Office",
+        title: "Welcome to Hermes Studio",
         activity: "idle",
         createdAt: timestamp,
         updatedAt: timestamp,

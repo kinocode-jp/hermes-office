@@ -143,8 +143,8 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
     readFile(new URL("../src/components/access-audit.css", import.meta.url), "utf8"),
   ]);
   assert.match(component, /role="separator"/);
-  assert.match(component, /const chatFirst = workspaceChatPrecedesSurface\(placement, mobile, hasChats\)/);
-  assert.match(component, /const desktopDivider = hasChats && !mobile \? \(/);
+  assert.match(component, /const chatFirst = surfaceVisible && workspaceChatPrecedesSurface\(placement, mobile, hasChats\)/);
+  assert.match(component, /const desktopDivider = surfaceVisible && hasChats && !mobile \? \(/);
   assert.match(component, /key="surface-pane"/);
   assert.match(component, /key="chat-pane"/);
   assert.match(component, /<Fragment key="desktop-divider">/);
@@ -168,14 +168,12 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(component, /aria-valuemax=\{Math\.round\(effectiveBounds\.max \* 100\)\}/);
   assert.match(component, /setEffectiveBounds\(workspaceRatioBounds\(placement, rect\.width, rect\.height\)\)/);
   assert.match(component, /event\.altKey.*event\.ctrlKey/);
-  assert.match(component, /locale\.value === "ja"/);
-  assert.match(component, /Chat placed on the/);
-  assert.match(component, /チャットを\$\{position\}へ配置しました/);
+  assert.match(component, /placed: \(position: string\) => t\("layout\.placed", \{ position \}\)/);
   assert.match(component, /aria-live="polite"/);
   assert.match(component, /workspace-drop-zones/);
   assert.match(component, /source === "chat" \? edge : oppositePlacement\(edge\)/);
-  assert.match(component, /dropZone: \(source: DragSource, edge: string\).*オフィス.*チャット/);
-  assert.match(component, /copy\.dropZone\(drag\.source, labelForPlacement\(edge, isJapanese\)\)/);
+  assert.match(component, /dropZone: \(source: DragSource, edge: string\) => t\("layout\.dropZone"/);
+  assert.match(component, /copy\.dropZone\(drag\.source, labelForPlacement\(edge\)\)/);
   assert.equal(component.match(/hasPointerCapture\(event\.pointerId\)/g)?.length, 2, "capture ownership is checked by resize and the shared release helper");
   assert.equal(component.match(/releasePointerCapture\(event\.pointerId\)/g)?.length, 1, "pointer release is centralized");
   assert.match(component, /const resizeGestureRef = useRef<ResizeGesture \| null>\(null\)/);
@@ -228,11 +226,15 @@ test("workspace interaction contract keeps mobile fixed and exposes pointer plus
   assert.match(styles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.control-grid \{ grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(officeStyles, /@container workspace-surface \(max-width: 520px\)[\s\S]*\.office-heading \{[^}]*flex-wrap: wrap/);
   assert.match(officeStyles, /@container workspace-surface \(max-width: 400px\)[\s\S]*\.office-toolbar \{[^}]*grid-template-columns/);
-  assert.match(officeStyles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-list \{ display: grid; \}/);
+  assert.match(officeStyles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-stage \{[\s\S]*min-height: clamp\(/);
+  assert.doesNotMatch(officeStyles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-list \{ display: grid/);
+  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.main-stage \{[\s\S]*overflow-y: auto[\s\S]*touch-action: pan-y/);
+  assert.match(styles, /\.workspace-layout-host \{[\s\S]*height: 100%[\s\S]*min-height: 0[\s\S]*overflow: hidden/);
+  assert.match(styles, /\.workspace-layout-surface \{[\s\S]*height: 100%[\s\S]*min-height: 0[\s\S]*overflow: hidden/);
   assert.match(liveSettingsStyles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.live-settings__grid \{ grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(liveSettingsStyles, /@container workspace-surface \(max-width: 440px\)[\s\S]*\.provider-fields \{ grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(auditStyles, /@container workspace-surface \(max-width: 620px\)[\s\S]*\.access-audit__rail li \{ grid-template-columns/);
-  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.workspace-layout-host\[data-workspace-placement\][^{]*\{ display: block/);
+  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.workspace-layout-host\[data-workspace-placement\][^{]*\{\s*display: block/);
   assert.match(styles, /\.workspace-drawer \{ position: fixed; inset: calc\(52px/);
   const emptyDrawerRule = styles.match(/\.workspace-layout-host\.is-empty \.workspace-drawer \{([^}]*)\}/)?.[1] ?? "";
   assert.match(emptyDrawerRule, /border-top: 1px solid var\(--line\)/);

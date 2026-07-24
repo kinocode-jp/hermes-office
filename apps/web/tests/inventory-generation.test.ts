@@ -303,9 +303,9 @@ test("profile and session continuation errors localize at render time for every 
   assert.match(profilePanelSource, /localizeRuntimeMessage\(inventory\.error\)/);
 
   const cases = [
-    { failure: "invalid" as const, ja: "Office Serverの一覧ページに互換性がありません。", en: "The Office Server returned an incompatible inventory page." },
-    { failure: "snapshot" as const, ja: "Office Serverの一覧を更新できませんでした。もう一度お試しください。", en: "Unable to refresh the Office Server inventory. Try again." },
-    { failure: "http" as const, ja: "Office Serverから一覧を取得できませんでした（HTTP 503）。", en: "Unable to load the inventory from Office Server (HTTP 503)." }
+    { failure: "invalid" as const, ja: "Studio Serverの一覧ページに互換性がありません。", en: "The Studio Server returned an incompatible inventory page." },
+    { failure: "snapshot" as const, ja: "Studio Serverの一覧を更新できませんでした。もう一度お試しください。", en: "Unable to refresh the Studio Server inventory. Try again." },
+    { failure: "http" as const, ja: "Studio Serverから一覧を取得できませんでした（HTTP 503）。", en: "Unable to load the inventory from Studio Server (HTTP 503)." }
   ];
   try {
     let requestGeneration = 100;

@@ -12,6 +12,10 @@ import {
   type ChatSessionLeaseSnapshot,
   type ChatSessionOwner,
 } from "./chat-session-coordinator.js";
+import {
+  estimateTokensFromText,
+  type TokenUsageStore,
+} from "./usage-stats.js";
 
 const MAX_UNBOUND_SESSIONS = 64;
 const MAX_UNBOUND_EVENTS = 128;
@@ -64,6 +68,7 @@ export class ChatUpstreamHub {
   readonly #coordinator: ChatSessionCoordinator;
   readonly #maxEventBytes: number;
   readonly #pendingSessionSettlementMs: number;
+  readonly #usage: TokenUsageStore | undefined;
   readonly #subscribers = new Map<ChatSessionOwner, ChatHubSubscriber>();
   readonly #unbound = new Map<string, BufferedEvents>();
   readonly #droppedUnbound = new Set<string>();
@@ -84,11 +89,12 @@ export class ChatUpstreamHub {
     runtimeSource: HermesRuntimeSource,
     coordinator: ChatSessionCoordinator,
     maxEventBytes: number,
-    options: { pendingSessionSettlementMs?: number } = {},
+    options: { pendingSessionSettlementMs?: number; usage?: TokenUsageStore } = {},
   ) {
     this.#runtimeSource = runtimeSource;
     this.#coordinator = coordinator;
     this.#maxEventBytes = Math.max(4_096, maxEventBytes);
+    this.#usage = options.usage;
     const settlementMs = options.pendingSessionSettlementMs ?? MAX_PENDING_SESSION_SETTLEMENT_MS;
     this.#pendingSessionSettlementMs = Number.isFinite(settlementMs)
       ? Math.max(1, Math.min(60_000, Math.trunc(settlementMs)))
@@ -222,6 +228,7 @@ export class ChatUpstreamHub {
         }
         throw new Error("Hermes live session ownership changed.");
       }
+      this.#observeRequestUsage(request);
       return result;
     } catch (error) {
       if ((request.method === "session.create" || request.method === "session.resume")
@@ -489,6 +496,8 @@ export class ChatUpstreamHub {
 
   #routeEvent(generation: number, event: HermesChatEvent): void {
     if (this.#stopping || generation !== this.#generation || event.sessionId === undefined) return;
+    // Count once at the shared choke point (before fan-out or unbound buffering).
+    this.#observeEventUsage(event);
     const owner = this.#coordinator.ownerForLive(event.sessionId);
     if (owner !== undefined) {
       try { this.#subscribers.get(owner)?.onEvent(event); }
@@ -496,6 +505,61 @@ export class ChatUpstreamHub {
       return;
     }
     this.#bufferUnbound(event.sessionId, event);
+  }
+
+  /**
+   * Records prompt/steer input size after Hermes acknowledged the request.
+   * Never stores message text — only estimated token counts.
+   */
+  #observeRequestUsage(request: HermesChatRequest): void {
+    if (this.#usage === undefined) return;
+    try {
+      if (request.method !== "prompt.submit" && request.method !== "session.steer") return;
+      const text = typeof request.params?.text === "string" ? request.params.text : "";
+      if (text.length === 0) return;
+      const sessionId = typeof request.params?.session_id === "string" ? request.params.session_id : undefined;
+      const profile = (sessionId === undefined ? undefined : this.#coordinator.profileForLive(sessionId)) ?? "default";
+      this.#usage.record({
+        profile,
+        tokensIn: estimateTokensFromText(text),
+        estimated: true,
+      });
+    } catch {
+      /* Token stats must never break chat streaming. */
+    }
+  }
+
+  /**
+   * Records assistant output on message.complete. Prefers real token fields
+   * from Hermes when present; otherwise estimates from character length.
+   */
+  #observeEventUsage(event: HermesChatEvent): void {
+    if (this.#usage === undefined) return;
+    try {
+      if (event.type !== "message.complete") return;
+      const role = typeof event.payload.role === "string" ? event.payload.role : "assistant";
+      if (role === "user" || role === "tool" || role === "system") return;
+      const profile = event.profile
+        ?? (event.sessionId === undefined ? undefined : this.#coordinator.profileForLive(event.sessionId))
+        ?? "default";
+      // Prefer real completion/output counts when Hermes supplies them. Input is
+      // already approximated on confirmed prompt.submit, so do not also apply
+      // real prompt_tokens here (would double-count the same turn).
+      const tokensOut = finiteNonNegativeInt(event.payload.tokensOut);
+      if (tokensOut !== undefined) {
+        this.#usage.record({ profile, tokensOut, estimated: false });
+        return;
+      }
+      const text = typeof event.payload.text === "string" ? event.payload.text : "";
+      if (text.length === 0) return;
+      this.#usage.record({
+        profile,
+        tokensOut: estimateTokensFromText(text),
+        estimated: true,
+      });
+    } catch {
+      /* Token stats must never break chat streaming. */
+    }
   }
 
   #bufferUnbound(liveSessionId: string, event: HermesChatEvent): void {
@@ -620,4 +684,9 @@ function closeResult(
     joined,
     ...(targetResult === undefined ? {} : { targetResult }),
   };
+}
+
+function finiteNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) return undefined;
+  return Math.floor(value);
 }

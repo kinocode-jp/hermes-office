@@ -34,10 +34,10 @@ test("25 assigned desk targets remain disjoint in every office preset", async ()
   }
 
   assert.match(source, /DENSE_OFFICE_PROFILE_COUNT = 12/);
-  assert.match(source, /denseLayout \? stableProfileIds/);
+  assert.match(source, /denseLayout\s*\? stableProfileIds/);
   assert.match(source, /if \(denseLayout \|\| window\.matchMedia/);
   assert.match(source, /placeCharactersAtAssignedDesks\(world, simRef\.current\)/);
-  assert.match(source, /title=\{profile\.name\}/, "ellipsized names must expose their full value");
+  assert.match(source, /title=\{displayName\}/, "ellipsized names must expose their full value");
 });
 
 test("scene scaling and mobile fallback preserve accessible click targets", async () => {
@@ -56,11 +56,17 @@ test("scene scaling and mobile fallback preserve accessible click targets", asyn
   assert.match(styles, /\.office-world-frame \{[^}]*min-width: 100%[^}]*min-height: 100%/);
   assert.match(styles, /\.ow-char \{[^}]*min-width: 84px[^}]*min-height: 84px/);
   assert.match(styles, /\.office-row \{[^}]*min-height: max\(62px, var\(--target-mobile\)\)/);
-  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-list \{ display: grid; \}/);
-  assert.match(source, /const effectiveView: OfficeView = denseRoster \? "list" : officeView\.value/);
-  assert.match(source, /effectiveView === "scene" && <OfficeStage/);
-  assert.match(source, /disabled=\{denseRoster\}/, "dense rosters must not expose an unreadable Scene option");
-  assert.match(source, /office-density-note[^]*office\.denseList/);
+  // Mobile must honor scene/list selection (no forced list-only fallback) and keep 44px toggles.
+  assert.doesNotMatch(styles, /@media \(max-width: 767px\)[\s\S]*\.office-seg--view,\s*\.office-seg--scene \{ display: none/);
+  assert.doesNotMatch(styles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-stage \{ display: none/);
+  assert.doesNotMatch(styles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-list \{ display: grid/);
+  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.office-wrap\[data-view="scene"\] \.office-stage \{[\s\S]*min-height: clamp\(/);
+  assert.match(styles, /@media \(max-width: 767px\)[\s\S]*\.office-seg button \{[\s\S]*min-height: max\(44px/);
+  assert.match(source, /const effectiveView: OfficeView = groupMode === "teams" \? "list" : officeView\.value/);
+  assert.match(source, /effectiveView === "scene" && \(/);
+  assert.match(source, /effectiveView === "list" && \(/, "list content only mounts in list view");
+  assert.doesNotMatch(source, /denseRoster \? "list"/, "profile count must not force list view");
+  assert.doesNotMatch(source, /TokenUsageCard/, "today's office stays office-only");
 });
 
 test("office selection state is exposed to assistive technology", async () => {

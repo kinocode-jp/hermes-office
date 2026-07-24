@@ -1,3 +1,4 @@
+import { isGlobalContextWithinBudget } from "@hermes-studio/protocol";
 import type {
   HermesSettingsAdapter,
   OfficeGlobalSettingsDto,
@@ -7,16 +8,32 @@ import type {
   OfficePendingSkillOverride,
 } from "./hermes-settings.js";
 import { HermesSettingsError } from "./hermes-settings.js";
+import type { OfficeTeamSkillLayer } from "./office-teams.js";
 
 export interface GlobalInheritanceOptions {
   store: OfficeGlobalSettingsStore;
   settings: HermesSettingsAdapter;
   listProfiles(): Promise<string[]>;
+  /**
+   * Optional middle inheritance tier. When provided, desired skills for a
+   * profile are global ∪ every enabled team that lists the profile as a member.
+   * Profile overrides still win and permanently relinquish Office ownership.
+   */
+  listTeamLayers?(): Promise<readonly OfficeTeamSkillLayer[]>;
 }
 
 /**
- * Owns the boundary between Office-global policy and independent Hermes homes.
- * Every mutation is serialized so provenance changes cannot race a global sync.
+ * Owns the boundary between Office policy layers and independent Hermes homes.
+ *
+ * Precedence for skill materialization (enable-set union):
+ *   1. Global shared skills (when sharedSkillsEnabled)
+ *   2. Team skills for every team containing the profile (when skillsEnabled)
+ *   3. Profile-level user toggles permanently override Office for that pair
+ *
+ * Context for new sessions (joined, global first, then teams by id):
+ *   enabled global context + enabled team contexts for the session profile
+ *
+ * Every mutation is serialized so provenance changes cannot race a sync.
  */
 export class GlobalInheritanceCoordinator {
   readonly #options: GlobalInheritanceOptions;
@@ -46,10 +63,41 @@ export class GlobalInheritanceCoordinator {
     };
   }
 
-  async sessionCreateContext(): Promise<string | undefined> {
+  /**
+   * Builds the internal system seed for a new session.create.
+   * Global context (if enabled) is first; matching team contexts follow in
+   * stable teamId order. Combined seed is clipped to the global context budget.
+   */
+  async sessionCreateContext(profile?: string): Promise<string | undefined> {
     const settings = await this.#options.store.read();
-    if (!settings.sharedContextEnabled || settings.context.trim() === "") return undefined;
-    return settings.context;
+    const parts: string[] = [];
+    if (settings.sharedContextEnabled && settings.context.trim() !== "") {
+      parts.push(settings.context);
+    }
+    if (profile !== undefined && profile.trim() !== "" && this.#options.listTeamLayers !== undefined) {
+      let layers: readonly OfficeTeamSkillLayer[];
+      try {
+        layers = await this.#options.listTeamLayers();
+      } catch {
+        layers = [];
+      }
+      const matching = layers
+        .filter((layer) =>
+          layer.contextEnabled
+          && layer.context.trim() !== ""
+          && layer.memberProfileIds.includes(profile))
+        .slice()
+        .sort((a, b) => a.teamId.localeCompare(b.teamId));
+      for (const layer of matching) parts.push(layer.context);
+    }
+    if (parts.length === 0) return undefined;
+    let combined = "";
+    for (const part of parts) {
+      const next = combined === "" ? part : `${combined}\n\n${part}`;
+      if (!isGlobalContextWithinBudget(next)) break;
+      combined = next;
+    }
+    return combined === "" ? undefined : combined;
   }
 
   async update(input: OfficeGlobalSettingsUpdate): Promise<OfficeGlobalSettingsDto> {
@@ -57,83 +105,25 @@ export class GlobalInheritanceCoordinator {
       await this.#reconcilePendingSkillOverrides();
       await this.#reconcilePendingGlobalSkillMutations();
       const staged = await this.#options.store.beginMaterialization(input);
-      const desired = new Set(staged.settings.sharedSkillsEnabled ? staged.settings.skills : []);
-      const managed = new Map(staged.managedSkills.map((item) => [keyOf(item.profile, item.skill), item]));
-      const overrides = new Map(staged.skillOverrides.map((item) => [keyOf(item.profile, item.skill), item]));
-      const failures: OfficeGlobalSettingsDto["skillSync"]["failures"] = [];
-      let profiles: string[];
-      try {
-        profiles = uniqueProfiles(await this.#options.listProfiles());
-      } catch {
-        await this.#options.store.finishMaterialization(staged.settings.revision, [...managed.values()], [...overrides.values()], [{ profile: "default", skill: "profile-discovery", operation: "enable" }]);
-        throw unavailable();
-      }
-      const profileSet = new Set(profiles);
-      for (const [key, item] of managed) if (!profileSet.has(item.profile)) managed.delete(key);
-      for (const [key, item] of overrides) if (!profileSet.has(item.profile)) overrides.delete(key);
+      return await this.#materializeDesired(staged.settings.revision, staged.settings, staged.managedSkills, staged.skillOverrides);
+    });
+  }
 
-      for (const profile of profiles) {
-        let skills;
-        try { skills = await this.#options.settings.listSkills(profile); }
-        catch {
-          for (const skill of desired) failures.push({ profile, skill, operation: "enable" });
-          for (const item of managed.values()) if (item.profile === profile && !desired.has(item.skill)) failures.push({ profile, skill: item.skill, operation: "disable" });
-          continue;
-        }
-        const byName = new Map(skills.map((skill) => [skill.name, skill]));
-
-        for (const skill of desired) {
-          const key = keyOf(profile, skill);
-          const current = byName.get(skill);
-          if (overrides.has(key)) {
-            managed.delete(key);
-            continue;
-          }
-          if (current === undefined) {
-            failures.push({ profile, skill, operation: "enable" });
-            continue;
-          }
-          if (managed.has(key)) {
-            // A direct/out-of-band disable is treated as a Profile override.
-            if (!current.enabled) {
-              managed.delete(key);
-              overrides.set(key, { profile, skill });
-            }
-            continue;
-          }
-          if (current.enabled) continue; // Already enabled by the Profile/user; never claim it.
-          try {
-            await this.#applyGlobalSkillMutation(staged.settings.revision, profile, skill, true, false);
-            managed.set(key, { profile, skill });
-          } catch {
-            failures.push({ profile, skill, operation: "enable" });
-          }
-        }
-
-        for (const item of [...managed.values()]) {
-          if (item.profile !== profile || desired.has(item.skill)) continue;
-          const current = byName.get(item.skill);
-          if (current === undefined || !current.enabled) {
-            managed.delete(keyOf(item.profile, item.skill));
-            continue;
-          }
-          try {
-            await this.#applyGlobalSkillMutation(staged.settings.revision, profile, item.skill, false, true);
-            managed.delete(keyOf(item.profile, item.skill));
-          } catch {
-            failures.push({ profile, skill: item.skill, operation: "disable" });
-          }
-        }
-      }
-
-      const result = await this.#options.store.finishMaterialization(
-        staged.settings.revision,
-        [...managed.values()],
-        [...overrides.values()],
-        dedupeFailures(failures),
+  /**
+   * Re-applies current global ∪ team desired skills without bumping the global
+   * settings revision. Used after team settings or membership changes.
+   */
+  async rematerializeSkills(): Promise<OfficeGlobalSettingsDto> {
+    return await this.#serialized(async () => {
+      await this.#reconcilePendingSkillOverrides();
+      await this.#reconcilePendingGlobalSkillMutations();
+      const state = await this.#options.store.readMaterialization();
+      return await this.#materializeDesired(
+        state.settings.revision,
+        state.settings,
+        state.managedSkills,
+        state.skillOverrides,
       );
-      if (result.skillSync.state === "pending") throw unavailable();
-      return result;
     });
   }
 
@@ -181,6 +171,101 @@ export class GlobalInheritanceCoordinator {
       }
       await this.#commitSkillOverride(prepared.transaction);
     });
+  }
+
+  async #materializeDesired(
+    revision: number,
+    settings: OfficeGlobalSettingsDto,
+    managedSkills: Array<{ profile: string; skill: string }>,
+    skillOverrides: Array<{ profile: string; skill: string }>,
+  ): Promise<OfficeGlobalSettingsDto> {
+    const managed = new Map(managedSkills.map((item) => [keyOf(item.profile, item.skill), item]));
+    const overrides = new Map(skillOverrides.map((item) => [keyOf(item.profile, item.skill), item]));
+    const failures: OfficeGlobalSettingsDto["skillSync"]["failures"] = [];
+    let profiles: string[];
+    try {
+      profiles = uniqueProfiles(await this.#options.listProfiles());
+    } catch {
+      await this.#options.store.finishMaterialization(revision, [...managed.values()], [...overrides.values()], [{ profile: "default", skill: "profile-discovery", operation: "enable" }]);
+      throw unavailable();
+    }
+    const profileSet = new Set(profiles);
+    for (const [key, item] of managed) if (!profileSet.has(item.profile)) managed.delete(key);
+    for (const [key, item] of overrides) if (!profileSet.has(item.profile)) overrides.delete(key);
+
+    let teamLayers: readonly OfficeTeamSkillLayer[] = [];
+    if (this.#options.listTeamLayers !== undefined) {
+      try {
+        teamLayers = await this.#options.listTeamLayers();
+      } catch {
+        await this.#options.store.finishMaterialization(revision, [...managed.values()], [...overrides.values()], [{ profile: "default", skill: "team-discovery", operation: "enable" }]);
+        throw unavailable();
+      }
+    }
+
+    for (const profile of profiles) {
+      const desired = desiredSkillsForProfile(profile, settings, teamLayers);
+      let skills;
+      try { skills = await this.#options.settings.listSkills(profile); }
+      catch {
+        for (const skill of desired) failures.push({ profile, skill, operation: "enable" });
+        for (const item of managed.values()) if (item.profile === profile && !desired.has(item.skill)) failures.push({ profile, skill: item.skill, operation: "disable" });
+        continue;
+      }
+      const byName = new Map(skills.map((skill) => [skill.name, skill]));
+
+      for (const skill of desired) {
+        const key = keyOf(profile, skill);
+        const current = byName.get(skill);
+        if (overrides.has(key)) {
+          managed.delete(key);
+          continue;
+        }
+        if (current === undefined) {
+          failures.push({ profile, skill, operation: "enable" });
+          continue;
+        }
+        if (managed.has(key)) {
+          // A direct/out-of-band disable is treated as a Profile override.
+          if (!current.enabled) {
+            managed.delete(key);
+            overrides.set(key, { profile, skill });
+          }
+          continue;
+        }
+        if (current.enabled) continue; // Already enabled by the Profile/user; never claim it.
+        try {
+          await this.#applyGlobalSkillMutation(revision, profile, skill, true, false);
+          managed.set(key, { profile, skill });
+        } catch {
+          failures.push({ profile, skill, operation: "enable" });
+        }
+      }
+
+      for (const item of [...managed.values()]) {
+        if (item.profile !== profile || desired.has(item.skill)) continue;
+        const current = byName.get(item.skill);
+        if (current === undefined || !current.enabled) {
+          managed.delete(keyOf(item.profile, item.skill));
+          continue;
+        }
+        try {
+          await this.#applyGlobalSkillMutation(revision, profile, item.skill, false, true);
+          managed.delete(keyOf(item.profile, item.skill));
+        } catch {
+          failures.push({ profile, skill: item.skill, operation: "disable" });
+        }
+      }
+    }
+
+    const result = await this.#options.store.finishMaterialization(
+      revision,
+      [...managed.values()],
+      [...overrides.values()],
+      dedupeFailures(failures),
+    );
+    if (result.skillSync.state === "pending") throw unavailable();
+    return result;
   }
 
   async #reconcilePendingSkillOverrides(): Promise<void> {
@@ -278,6 +363,28 @@ export class GlobalInheritanceCoordinator {
     this.#queue = result.then(() => undefined, () => undefined);
     return await result;
   }
+}
+
+/**
+ * Effective Office skill enable-set for one profile.
+ * Union of global (if enabled) and every membership team's skills (if enabled).
+ * Profile overrides are applied later by the materializer, not here.
+ */
+export function desiredSkillsForProfile(
+  profile: string,
+  global: Pick<OfficeGlobalSettingsDto, "sharedSkillsEnabled" | "skills">,
+  teamLayers: readonly OfficeTeamSkillLayer[],
+): Set<string> {
+  const desired = new Set<string>();
+  if (global.sharedSkillsEnabled) {
+    for (const skill of global.skills) desired.add(skill);
+  }
+  for (const layer of teamLayers) {
+    if (!layer.skillsEnabled) continue;
+    if (!layer.memberProfileIds.includes(profile)) continue;
+    for (const skill of layer.skills) desired.add(skill);
+  }
+  return desired;
 }
 
 function uniqueProfiles(profiles: string[]): string[] {

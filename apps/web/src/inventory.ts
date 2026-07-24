@@ -3,8 +3,10 @@ import type { ChatSession, OfficeInventoryPagination, OfficeSnapshot, OfficeSnap
 import { officeMessage, type RuntimeMessage } from "./i18n";
 import { OfficeHttpError, officeFetchJson, subscribeOfficeAuthChanges } from "./office-api";
 import { storedSessionClientId } from "./session-identity";
+import { isScheduledSessionHidden } from "./scheduled-sessions";
 import { mergeServerSessionStatus } from "./session-runtime";
 import { reconcileDefaultAvatarProfiles, registerDefaultAvatarProfiles } from "./avatar-preferences";
+import { ensurePokemonDisplayNames } from "./profile-names";
 import { activeSessionId, closeSession, openSessionIds, profileList, selectedProfileId, sessions } from "./store";
 
 type InventoryKind = "profiles" | "sessions";
@@ -51,6 +53,17 @@ export function initializeInventory(snapshot: OfficeSnapshot, source: string | O
 
 export function registerInventorySnapshotRefresh(action: SnapshotRefresh | undefined): void {
   refreshSnapshot = action;
+}
+
+/** Force a fresh snapshot (e.g. after profile create/delete) so lists update promptly. */
+export async function requestInventorySnapshotRefresh(): Promise<void> {
+  const identity = inventoryIdentity;
+  if (!refreshSnapshot || !identity) return;
+  try {
+    await refreshSnapshot({ serverUrl: identity.serverUrl, connectionGeneration: identity.connectionGeneration });
+  } catch {
+    // The periodic snapshot cycle will converge eventually.
+  }
 }
 
 export async function loadMoreProfiles(): Promise<void> { await loadMore("profiles"); }
@@ -153,7 +166,9 @@ function commitInventoryPage(page: InventoryPage, identity: InventoryIdentity): 
 }
 
 function mergeProfiles(rows: OfficeSnapshotProfile[], seen?: Set<string>): void {
-  registerDefaultAvatarProfiles(rows.map((profile) => profile.id));
+  const profileIds = rows.map((profile) => profile.id);
+  registerDefaultAvatarProfiles(profileIds);
+  ensurePokemonDisplayNames(profileIds);
   const next = [...profileList.value];
   const existing = new Map(next.map((profile, index) => [profile.id, index]));
   const pageSeen = new Set<string>();
@@ -179,6 +194,13 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
   const existing = new Map(next.flatMap((session, index) => session.remoteKind === "stored" ? [[sessionKey(session), index] as const] : []));
   const pageSeen = new Set<string>();
   for (const live of rows) {
+    if (isScheduledSessionHidden({
+      id: live.id,
+      storedSessionId: live.id,
+      profileId: live.profileId,
+      title: live.title,
+      titlePresentation: undefined,
+    })) continue;
     const key = sessionKey(live);
     if (pageSeen.has(key)) continue;
     pageSeen.add(key);
@@ -188,12 +210,12 @@ function mergeSessions(rows: OfficeSnapshot["sessions"], seen?: Set<string>): vo
     const status = mergeServerSessionStatus(previous, live.activity);
     if (index === undefined || previous === undefined) {
       existing.set(key, next.length);
-      next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
+      next.push({ id: storedSessionClientId(live.profileId, live.id), storedSessionId: live.id, profileId: live.profileId, title: live.title, ...(live.createdAt === undefined ? {} : { createdAt: live.createdAt }), ...(live.updatedAt === undefined ? {} : { updatedAt: live.updatedAt }), ...(live.lastMessagePreview === undefined ? {} : { lastMessagePreview: live.lastMessagePreview }), status, messages: [], connectionState: "disconnected", historyState: "unloaded", remoteKind: "stored", readOnly: true });
       continue;
     }
-    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, titlePresentation: undefined, status, remoteKind: "stored" };
+    next[index] = { ...previous, storedSessionId: live.id, profileId: live.profileId, title: live.title, titlePresentation: undefined, ...(live.createdAt === undefined ? {} : { createdAt: live.createdAt }), ...(live.updatedAt === undefined ? {} : { updatedAt: live.updatedAt }), ...(live.lastMessagePreview === undefined ? {} : { lastMessagePreview: live.lastMessagePreview }), status, remoteKind: "stored" };
   }
-  sessions.value = next;
+  sessions.value = next.filter((session) => !isScheduledSessionHidden(session));
   updateProfileSessionCounts();
 }
 
@@ -214,7 +236,10 @@ function pruneSessions(seen: ReadonlySet<string>): void {
 
 function updateProfileSessionCounts(): void {
   const counts = new Map<string, number>();
-  for (const session of sessions.value) if (session.remoteKind !== "demo") counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  for (const session of sessions.value) {
+    if (session.remoteKind === "demo" || isScheduledSessionHidden(session)) continue;
+    counts.set(session.profileId, (counts.get(session.profileId) ?? 0) + 1);
+  }
   profileList.value = profileList.value.map((profile) => ({ ...profile, sessions: counts.get(profile.id) ?? 0 }));
 }
 
